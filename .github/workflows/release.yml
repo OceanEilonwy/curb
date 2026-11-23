@@ -59,6 +59,9 @@ jobs:
         with:
           version: 12
 
+      - name: Run Rust workspace tests (Windows)
+        run: cargo test --workspace
+
       - name: Build curb-service & curb-cli (release)
         run: cargo build --release --workspace
 
@@ -92,6 +95,14 @@ jobs:
 
           Compress-Archive -Path dist-release/curb-windows-x64/* -DestinationPath dist-release/curb-windows-x64-portable.zip -Force
           Get-ChildItem dist-release
+
+      - name: Run Windows E2E gate before publishing release
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/e2e-windows.ps1 `
+            -CliPath target\release\curb-cli.exe `
+            -ServicePath target\release\curb-service.exe `
+            -SetupExePath dist-release\curb-windows-x64-setup.exe
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')

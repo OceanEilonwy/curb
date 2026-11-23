@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux-tests:
+    name: Core & Frontend Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: Run Rust workspace tests
+        run: cargo test --workspace
+
+      - name: Type-check & build SolidJS 2 frontend
+        working-directory: apps/curb-app
+        run: |
+          pnpm install --frozen-lockfile || pnpm install
+          pnpm typecheck
+          pnpm build
+
+  windows-e2e:
+    name: Windows Service & Installer E2E
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: Run Rust workspace tests (Windows)
+        run: cargo test --workspace
+
+      - name: Build curb-service & curb-cli (release)
+        run: cargo build --release --workspace
+
+      - name: Stage service & CLI binaries into Tauri bundle resources
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path apps/curb-app/src-tauri/resources | Out-Null
+          Copy-Item target/release/curb-service.exe apps/curb-app/src-tauri/resources/
+          Copy-Item target/release/curb-cli.exe apps/curb-app/src-tauri/resources/
+
+      - name: Build Curb Tauri v2 Per-User NSIS Installer
+        working-directory: apps/curb-app
+        run: |
+          pnpm install --frozen-lockfile || pnpm install
+          pnpm tauri build --bundles nsis
+
+      - name: Run Windows E2E test suite (SCM service, non-admin IPC, ACLs, NSIS installer)
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem apps/curb-app/src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if (-not $setup) { throw "NSIS setup executable not found" }
+          pwsh -NoProfile -File scripts/e2e-windows.ps1 `
+            -CliPath target\release\curb-cli.exe `
+            -ServicePath target\release\curb-service.exe `
+            -SetupExePath $setup.FullName
