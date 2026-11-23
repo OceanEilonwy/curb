@@ -25,8 +25,9 @@ enum Commands {
     /// Show current Curb enforcement mode, rule count, and password status.
     Status,
     /// Set or reset the Curb admin password (requires Windows Administrator access to ProgramData).
+    #[command(alias = "reset-password", alias = "change-password")]
     SetPassword {
-        /// Optional password value (if omitted, prompts interactively).
+        /// Optional password value (if omitted, prompts interactively with confirmation).
         #[arg(long)]
         password: Option<String>,
     },
@@ -81,7 +82,17 @@ fn main() {
                     let _ = io::stdout().flush();
                     let mut input = String::new();
                     io::stdin().read_line(&mut input).expect("read password");
-                    input.trim().to_string()
+                    let first = input.trim().to_string();
+
+                    print!("Confirm new Curb admin password: ");
+                    let _ = io::stdout().flush();
+                    let mut confirm = String::new();
+                    io::stdin().read_line(&mut confirm).expect("read confirm");
+                    if first != confirm.trim() {
+                        eprintln!("Error: Passwords do not match.");
+                        std::process::exit(1);
+                    }
+                    first
                 }
             };
             match hash_password(&pwd).and_then(|rec| save_auth(&data_dir, &rec)) {

@@ -4,9 +4,11 @@ import { Switch } from "./Switch";
 
 interface SettingsViewProps {
   unlocked: boolean;
+  passwordConfigured: boolean;
   mode: EnforcementMode;
   baseline: BaselinePolicy;
   theme: "dark" | "light";
+  onRequireUnlock: () => void;
   onToggleTheme: () => void;
   onSetMode: (mode: EnforcementMode) => void;
   onUpdateBaseline: (baseline: BaselinePolicy) => void;
@@ -18,22 +20,57 @@ export function SettingsView(props: SettingsViewProps) {
   const [pwOpen, setPwOpen] = createSignal(false);
   const [currentPw, setCurrentPw] = createSignal("");
   const [newPw, setNewPw] = createSignal("");
+  const [confirmPw, setConfirmPw] = createSignal("");
+  const [showPw, setShowPw] = createSignal(false);
+  const [pwBusy, setPwBusy] = createSignal(false);
   const [pwError, setPwError] = createSignal<string | null>(null);
 
   const isOn = () => props.mode.kind === "enforcing";
   const isPaused = () => props.mode.kind === "paused_until";
   const isOff = () => props.mode.kind === "disabled";
 
+  function handleTogglePwForm() {
+    if (!props.unlocked) {
+      props.onRequireUnlock();
+      return;
+    }
+    setPwError(null);
+    setCurrentPw("");
+    setNewPw("");
+    setConfirmPw("");
+    setShowPw(false);
+    setPwOpen((v) => !v);
+  }
+
   async function submitPasswordChange(e: SubmitEvent) {
     e.preventDefault();
     setPwError(null);
+
+    if (props.passwordConfigured && currentPw().length === 0) {
+      setPwError("Enter your current Curb password.");
+      return;
+    }
+    if (newPw().length < 4) {
+      setPwError("New password must be at least 4 characters.");
+      return;
+    }
+    if (newPw() !== confirmPw()) {
+      setPwError("New passwords do not match.");
+      return;
+    }
+
+    setPwBusy(true);
     try {
       await props.onChangePassword(currentPw(), newPw());
       setCurrentPw("");
       setNewPw("");
+      setConfirmPw("");
+      setShowPw(false);
       setPwOpen(false);
     } catch (err) {
       setPwError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPwBusy(false);
     }
   }
 
@@ -159,41 +196,94 @@ export function SettingsView(props: SettingsViewProps) {
           </div>
           <button
             type="button"
-            disabled={!props.unlocked}
-            onClick={() => setPwOpen((v) => !v)}
-            class="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-55"
+            onClick={handleTogglePwForm}
+            class="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer"
             style={{ background: "var(--c-pill)", color: "var(--c-text)" }}
           >
-            {pwOpen() ? "Cancel" : "Change"}
+            {pwOpen() && props.unlocked ? "Cancel" : "Change"}
           </button>
         </div>
 
         <Show when={pwOpen() && props.unlocked}>
-          <form onSubmit={submitPasswordChange} class="space-y-2 pt-1">
-            <input
-              type="password"
-              value={currentPw()}
-              onInput={(e) => setCurrentPw(e.currentTarget.value)}
-              placeholder="Current password"
-              class="w-full px-3 py-1.5 rounded-lg text-xs"
-              style={{
-                background: "var(--c-surface)",
-                border: "1px solid var(--c-border-strong)",
-                color: "var(--c-text)",
-              }}
-            />
-            <input
-              type="password"
-              value={newPw()}
-              onInput={(e) => setNewPw(e.currentTarget.value)}
-              placeholder="New password (min 4 characters)"
-              class="w-full px-3 py-1.5 rounded-lg text-xs"
-              style={{
-                background: "var(--c-surface)",
-                border: "1px solid var(--c-border-strong)",
-                color: "var(--c-text)",
-              }}
-            />
+          <form
+            onSubmit={submitPasswordChange}
+            class="space-y-2.5 pt-2"
+            style={{ "border-top": "1px solid var(--c-border)" }}
+          >
+            <Show when={props.passwordConfigured}>
+              <div>
+                <label
+                  for="curb-pw-current"
+                  class="block text-xs font-medium mb-1"
+                  style={{ color: "var(--c-text-sec)" }}
+                >
+                  Current password
+                </label>
+                <input
+                  id="curb-pw-current"
+                  type={showPw() ? "text" : "password"}
+                  autocomplete="current-password"
+                  value={currentPw()}
+                  onInput={(e) => setCurrentPw(e.currentTarget.value)}
+                  placeholder="Enter current password"
+                  class="w-full px-3 py-2 rounded-lg text-xs"
+                  style={{
+                    background: "var(--c-surface)",
+                    border: "1px solid var(--c-border-strong)",
+                    color: "var(--c-text)",
+                  }}
+                />
+              </div>
+            </Show>
+
+            <div>
+              <label
+                for="curb-pw-new"
+                class="block text-xs font-medium mb-1"
+                style={{ color: "var(--c-text-sec)" }}
+              >
+                New password
+              </label>
+              <input
+                id="curb-pw-new"
+                type={showPw() ? "text" : "password"}
+                autocomplete="new-password"
+                value={newPw()}
+                onInput={(e) => setNewPw(e.currentTarget.value)}
+                placeholder="At least 4 characters"
+                class="w-full px-3 py-2 rounded-lg text-xs"
+                style={{
+                  background: "var(--c-surface)",
+                  border: "1px solid var(--c-border-strong)",
+                  color: "var(--c-text)",
+                }}
+              />
+            </div>
+
+            <div>
+              <label
+                for="curb-pw-confirm"
+                class="block text-xs font-medium mb-1"
+                style={{ color: "var(--c-text-sec)" }}
+              >
+                Confirm new password
+              </label>
+              <input
+                id="curb-pw-confirm"
+                type={showPw() ? "text" : "password"}
+                autocomplete="new-password"
+                value={confirmPw()}
+                onInput={(e) => setConfirmPw(e.currentTarget.value)}
+                placeholder="Re-enter new password"
+                class="w-full px-3 py-2 rounded-lg text-xs"
+                style={{
+                  background: "var(--c-surface)",
+                  border: "1px solid var(--c-border-strong)",
+                  color: "var(--c-text)",
+                }}
+              />
+            </div>
+
             <Show when={pwError()}>
               {(msg) => (
                 <p
@@ -205,13 +295,28 @@ export function SettingsView(props: SettingsViewProps) {
                 </p>
               )}
             </Show>
-            <div class="flex justify-end">
+
+            <div class="flex items-center justify-between pt-1">
+              <label
+                class="inline-flex items-center gap-1.5 text-xs cursor-pointer"
+                style={{ color: "var(--c-text-sec)" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={showPw()}
+                  onChange={(e) => setShowPw(e.currentTarget.checked)}
+                  class="w-3.5 h-3.5 cursor-pointer"
+                />
+                <span>Show passwords</span>
+              </label>
+
               <button
                 type="submit"
-                class="px-3.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer"
+                disabled={pwBusy()}
+                class="px-3.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-60"
                 style={{ background: "var(--c-accent)", color: "#ffffff" }}
               >
-                Save Password
+                {pwBusy() ? "Updating…" : "Update Password"}
               </button>
             </div>
           </form>

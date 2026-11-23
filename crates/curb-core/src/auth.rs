@@ -134,7 +134,12 @@ impl SessionManager {
         self.sessions.remove(token);
     }
 
-    /// Revokes all active sessions (e.g. after a password change).
+    /// Revokes all active sessions except `keep_token` (used when rotating the password).
+    pub fn lock_all_except(&mut self, keep_token: &str) {
+        self.sessions.retain(|k, _| k == keep_token);
+    }
+
+    /// Revokes all active sessions (e.g. after an administrative password reset).
     pub fn lock_all(&mut self) {
         self.sessions.clear();
     }

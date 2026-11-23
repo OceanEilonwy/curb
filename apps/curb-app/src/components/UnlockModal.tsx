@@ -9,16 +9,28 @@ interface UnlockModalProps {
 
 export function UnlockModal(props: UnlockModalProps) {
   const [password, setPassword] = createSignal("");
+  const [confirm, setConfirm] = createSignal("");
   const [error, setError] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
 
   async function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
     setError(null);
+    if (!props.passwordConfigured) {
+      if (password().length < 4) {
+        setError("Password must be at least 4 characters.");
+        return;
+      }
+      if (password() !== confirm()) {
+        setError("Passwords do not match.");
+        return;
+      }
+    }
     setBusy(true);
     try {
       await props.onUnlock(password());
       setPassword("");
+      setConfirm("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -60,29 +72,57 @@ export function UnlockModal(props: UnlockModalProps) {
             </p>
           </div>
 
-          <div>
-            <label for="curb-unlock-input" class="sr-only">
-              Curb password
-            </label>
-            <input
-              id="curb-unlock-input"
-              type="password"
-              autofocus
-              value={password()}
-              onInput={(e) => setPassword(e.currentTarget.value)}
-              placeholder="Password"
-              class="w-full px-3 py-2 rounded-lg text-xs"
-              style={{
-                background: "var(--c-sub)",
-                border: "1px solid var(--c-border-strong)",
-                color: "var(--c-text)",
-              }}
-            />
+          <div class="space-y-2">
+            <div>
+              <label for="curb-unlock-input" class="sr-only">
+                Curb password
+              </label>
+              <input
+                id="curb-unlock-input"
+                type="password"
+                autofocus
+                value={password()}
+                onInput={(e) => setPassword(e.currentTarget.value)}
+                placeholder={
+                  props.passwordConfigured
+                    ? "Password"
+                    : "New password (min 4 characters)"
+                }
+                class="w-full px-3 py-2 rounded-lg text-xs"
+                style={{
+                  background: "var(--c-sub)",
+                  border: "1px solid var(--c-border-strong)",
+                  color: "var(--c-text)",
+                }}
+              />
+            </div>
+
+            <Show when={!props.passwordConfigured}>
+              <div>
+                <label for="curb-unlock-confirm" class="sr-only">
+                  Confirm password
+                </label>
+                <input
+                  id="curb-unlock-confirm"
+                  type="password"
+                  value={confirm()}
+                  onInput={(e) => setConfirm(e.currentTarget.value)}
+                  placeholder="Confirm password"
+                  class="w-full px-3 py-2 rounded-lg text-xs"
+                  style={{
+                    background: "var(--c-sub)",
+                    border: "1px solid var(--c-border-strong)",
+                    color: "var(--c-text)",
+                  }}
+                />
+              </div>
+            </Show>
+
             <Show when={error()}>
               {(msg) => (
                 <p
                   role="alert"
-                  class="text-xs mt-1.5 font-medium"
+                  class="text-xs font-medium"
                   style={{ color: "var(--c-red-text)" }}
                 >
                   {msg()}
@@ -97,6 +137,7 @@ export function UnlockModal(props: UnlockModalProps) {
               onClick={() => {
                 setError(null);
                 setPassword("");
+                setConfirm("");
                 props.onClose();
               }}
               class="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer"
@@ -110,7 +151,11 @@ export function UnlockModal(props: UnlockModalProps) {
               class="px-3.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-60"
               style={{ background: "var(--c-accent)", color: "#ffffff" }}
             >
-              {busy() ? "Checking…" : "Unlock"}
+              {busy()
+                ? "Checking…"
+                : props.passwordConfigured
+                ? "Unlock"
+                : "Set Password"}
             </button>
           </div>
         </form>

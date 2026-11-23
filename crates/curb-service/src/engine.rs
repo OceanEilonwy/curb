@@ -318,6 +318,7 @@ impl ServiceEngine {
                             };
                         }
                         guard.auth = Some(new_record);
+                        guard.sessions.lock_all_except(&token);
                         IpcResponse::Ok
                     }
                     Err(e) => IpcResponse::Error {
@@ -470,6 +471,76 @@ mod tests {
             sha256: "00".into(),
             filename_hint: "a.exe".into(),
         };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn change_password_verifies_current_and_rotates_sessions() {
+        let dir = std::env::temp_dir().join(format!("curb_pw_{}", Uuid::new_v4()));
+        let engine = ServiceEngine::new(dir.clone()).unwrap();
+
+        // First unlock sets initial password
+        let t1 = match engine.handle_request(IpcRequest::Unlock {
+            password: "initial-pass".into(),
+        }) {
+            IpcResponse::Unlocked { token } => token,
+            other => panic!("expected Unlocked, got {other:?}"),
+        };
+
+        // Open a second session
+        let t2 = match engine.handle_request(IpcRequest::Unlock {
+            password: "initial-pass".into(),
+        }) {
+            IpcResponse::Unlocked { token } => token,
+            other => panic!("expected Unlocked, got {other:?}"),
+        };
+
+        // Wrong current password must fail
+        let bad = engine.handle_request(IpcRequest::ChangePassword {
+            token: t1.clone(),
+            current_password: "wrong".into(),
+            new_password: "new-password".into(),
+        });
+        assert!(matches!(bad, IpcResponse::Error { .. }));
+
+        // Valid change succeeds
+        let ok = engine.handle_request(IpcRequest::ChangePassword {
+            token: t1.clone(),
+            current_password: "initial-pass".into(),
+            new_password: "new-password".into(),
+        });
+        assert!(matches!(ok, IpcResponse::Ok));
+
+        // Caller's session remains valid, other session is revoked
+        assert!(matches!(
+            engine.handle_request(IpcRequest::SetMode {
+                token: t1,
+                mode: EnforcementMode::Enforcing,
+            }),
+            IpcResponse::Snapshot { .. }
+        ));
+        assert!(matches!(
+            engine.handle_request(IpcRequest::SetMode {
+                token: t2,
+                mode: EnforcementMode::Disabled,
+            }),
+            IpcResponse::Error { .. }
+        ));
+
+        // Old password no longer unlocks; new password unlocks
+        assert!(matches!(
+            engine.handle_request(IpcRequest::Unlock {
+                password: "initial-pass".into(),
+            }),
+            IpcResponse::Error { .. }
+        ));
+        assert!(matches!(
+            engine.handle_request(IpcRequest::Unlock {
+                password: "new-password".into(),
+            }),
+            IpcResponse::Unlocked { .. }
+        ));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -221,6 +221,8 @@ const mockSteamGames: DiscoveredSteamGame[] = [
   },
 ];
 
+let mockPassword: string | null = null;
+
 function cloneSnapshot(): ServiceSnapshot {
   return JSON.parse(JSON.stringify(mockSnapshot));
 }
@@ -270,6 +272,12 @@ export const curbApi = {
     }
     if (password.trim().length < 1) {
       throw new Error("Please enter your Curb password.");
+    }
+    if (mockPassword !== null && password !== mockPassword) {
+      throw new Error("Incorrect Curb password.");
+    }
+    if (mockPassword === null) {
+      mockPassword = password;
     }
     return "mock-session-token";
   },
@@ -346,9 +354,13 @@ export const curbApi = {
       });
       return;
     }
+    if (mockPassword !== null && currentPassword !== mockPassword) {
+      throw new Error("Current password is incorrect.");
+    }
     if (newPassword.length < 4) {
       throw new Error("Password must be at least 4 characters.");
     }
+    mockPassword = newPassword;
   },
 
   async hideToTray(token: string | null): Promise<void> {

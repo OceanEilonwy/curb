@@ -199,7 +199,8 @@ export default function App() {
     const t = requireToken();
     if (!t) return;
     await curbApi.changePassword(t, current, next);
-    showToast("Password updated");
+    await refreshSnapshot();
+    showToast("Curb password updated");
   }
 
   const modeVisual = () => {
@@ -400,9 +401,11 @@ export default function App() {
               <Show when={tab() === "settings"}>
                 <SettingsView
                   unlocked={!!token()}
+                  passwordConfigured={snap().password_configured}
                   mode={snap().config.mode}
                   baseline={snap().config.baseline}
                   theme={theme()}
+                  onRequireUnlock={() => setUnlockOpen(true)}
                   onToggleTheme={() =>
                     setTheme((t) => (t === "dark" ? "light" : "dark"))
                   }
