@@ -15,6 +15,7 @@ import { AllowedView } from "./components/AllowedView";
 import { BlockedView } from "./components/BlockedView";
 import { LockIcon, PlusIcon, ShieldIcon, UnlockIcon } from "./components/Icons";
 import { SettingsView } from "./components/SettingsView";
+import { SetupView } from "./components/SetupView";
 import { UnlockModal } from "./components/UnlockModal";
 
 export default function App() {
@@ -195,6 +196,35 @@ export default function App() {
     }
   }
 
+  async function handleSetupFull() {
+    const snap = await curbApi.setupFullProtection();
+    setSnapshot(snap);
+    showToast("Full Protection active");
+    if (!snap.password_configured) {
+      setUnlockOpen(true);
+    }
+  }
+
+  async function handleSetupStandard(password: string) {
+    const [newToken, snap] = await curbApi.setupStandardMode(password);
+    setToken(newToken);
+    setSnapshot(snap);
+    showToast("Standard Mode active");
+  }
+
+  async function handleUpgradeToFull() {
+    try {
+      const snap = await curbApi.setupFullProtection();
+      setSnapshot(snap);
+      showToast("Upgraded to Full Protection");
+      if (!snap.password_configured) {
+        setUnlockOpen(true);
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function handleChangePassword(current: string, next: string) {
     const t = requireToken();
     if (!t) return;
@@ -204,13 +234,15 @@ export default function App() {
   }
 
   const modeVisual = () => {
-    const mode = snapshot()?.config.mode.kind ?? "enforcing";
+    const snap = snapshot();
+    const mode = snap?.config.mode.kind ?? "enforcing";
+    const isStandard = snap?.protection_tier === "standard_user";
     if (mode === "enforcing") {
       return {
         key: "on" as const,
         bg: "var(--c-green-soft)",
         color: "var(--c-green-text)",
-        label: "Internet limited",
+        label: isStandard ? "Standard mode" : "Internet limited",
       };
     }
     if (mode === "paused_until") {
@@ -252,25 +284,34 @@ export default function App() {
             class="flex-1 flex items-center justify-center text-xs"
             style={{ color: "var(--c-text-sec)" }}
           >
-            Connecting to Curb service…
+            Connecting to Curb…
           </div>
         }
       >
         {(snap) => (
           <Show
-            when={screen() === "main"}
+            when={snap().protection_tier !== "unconfigured"}
             fallback={
-              <AllowAppSheet
-                runningApps={runningApps()}
-                steamGames={steamGames()}
-                existingRules={snap().config.rules}
-                onRefresh={() => void refreshPickerSources()}
-                onInspectPath={handleInspectPath}
-                onCancel={() => setScreen("main")}
-                onConfirm={(rule) => void handleUpsertRule(rule)}
+              <SetupView
+                onSelectFull={handleSetupFull}
+                onSelectStandard={handleSetupStandard}
               />
             }
           >
+            <Show
+              when={screen() === "main"}
+              fallback={
+                <AllowAppSheet
+                  runningApps={runningApps()}
+                  steamGames={steamGames()}
+                  existingRules={snap().config.rules}
+                  onRefresh={() => void refreshPickerSources()}
+                  onInspectPath={handleInspectPath}
+                  onCancel={() => setScreen("main")}
+                  onConfirm={(rule) => void handleUpsertRule(rule)}
+                />
+              }
+            >
             {/* Main Header */}
             <div
               class="px-4 pt-3 pb-3 shrink-0 space-y-2.5"
@@ -402,10 +443,12 @@ export default function App() {
                 <SettingsView
                   unlocked={!!token()}
                   passwordConfigured={snap().password_configured}
+                  protectionTier={snap().protection_tier}
                   mode={snap().config.mode}
                   baseline={snap().config.baseline}
                   theme={theme()}
                   onRequireUnlock={() => setUnlockOpen(true)}
+                  onUpgradeToFull={handleUpgradeToFull}
                   onToggleTheme={() =>
                     setTheme((t) => (t === "dark" ? "light" : "dark"))
                   }
@@ -441,6 +484,7 @@ export default function App() {
                   Allow App or Game
                 </button>
               </div>
+            </Show>
             </Show>
           </Show>
         )}

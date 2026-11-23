@@ -37,13 +37,11 @@ Most internet blockers rely on browser extensions or domain blocklists that are 
 
 ## Quick Setup (Windows)
 
-1. **[Download the latest release](https://github.com/OceanEilonwy/curb/releases/latest)** (`curb-windows-x64.msi` or `curb-windows-x64.zip`).
-2. From an **elevated PowerShell** window, install the service and set the Curb admin password:
-   ```powershell
-   curb-cli install
-   curb-cli set-password
-   ```
-3. Launch **Curb** from the taskbar tray, click **Unlock**, and toggle on **Steam** or any apps/games you want online.
+1. **[Download the latest release](https://github.com/OceanEilonwy/curb/releases/latest)** (`curb-windows-x64-setup.exe`) and run it—**no Windows Administrator account needed to install**.
+2. Launch **Curb** and pick your protection mode on first run:
+   - **Full Protection (Recommended):** One-time Windows Admin prompt installs the locked system firewall service (`CurbService`), blocking every app and game across all adapters.
+   - **Standard Mode (No Admin):** Starts immediately in your user account using a local per-user proxy—zero admin needed (voluntary; upgrade to Full Protection anytime in Settings).
+3. Set your **Curb password** right inside the app, and toggle on **Steam** or any apps/games you want online.
 
 > **Admin recovery:** Any Windows Administrator can run `curb-cli emergency-disable` or `curb-cli set-password` from an elevated prompt at any time.
 

@@ -120,11 +120,14 @@ export interface BlockedEvent {
   is_steam_community: boolean;
 }
 
+export type ProtectionTier = "unconfigured" | "full_service" | "standard_user";
+
 export interface ServiceSnapshot {
   config: Config;
   password_configured: boolean;
   blocked_events: BlockedEvent[];
   active_wfp_filters: number;
+  protection_tier: ProtectionTier;
 }
 
 export interface BinaryIdentity {

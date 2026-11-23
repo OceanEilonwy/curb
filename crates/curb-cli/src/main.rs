@@ -40,6 +40,9 @@ enum Commands {
         /// Path to curb-service.exe (defaults to sibling of curb-cli.exe).
         #[arg(long)]
         service_bin: Option<PathBuf>,
+        /// Optional Standard Mode data directory to migrate config.json and auth.json from.
+        #[arg(long)]
+        migrate_from: Option<PathBuf>,
     },
     /// Stop and unregister CurbService from Windows SCM.
     Uninstall,
@@ -137,15 +140,77 @@ fn main() {
             }
         }
 
-        Commands::Install { service_bin } => {
+        Commands::Install {
+            service_bin,
+            migrate_from,
+        } => {
             #[cfg(windows)]
             {
-                let bin = service_bin.unwrap_or_else(|| {
+                let source_service = service_bin.unwrap_or_else(|| {
                     std::env::current_exe()
                         .unwrap_or_default()
                         .with_file_name("curb-service.exe")
                 });
-                let bin_arg = format!("binPath= \"{}\"", bin.display());
+
+                // Place service binary in admin-locked ProgramData\Curb\bin so a standard user
+                // who installed Curb in %LOCALAPPDATA% cannot replace or delete the service binary.
+                let bin_dir = data_dir.join("bin");
+                if let Err(e) = std::fs::create_dir_all(&bin_dir) {
+                    eprintln!("Failed to create {}: {e}", bin_dir.display());
+                    std::process::exit(1);
+                }
+
+                // Stop any prior CurbService instance before replacing binaries.
+                let _ = std::process::Command::new("sc.exe")
+                    .args(["stop", "CurbService"])
+                    .status();
+                std::thread::sleep(std::time::Duration::from_millis(400));
+
+                let installed_service = bin_dir.join("curb-service.exe");
+                if let Err(e) = std::fs::copy(&source_service, &installed_service) {
+                    eprintln!(
+                        "Failed to copy {} to {}: {e}",
+                        source_service.display(),
+                        installed_service.display()
+                    );
+                    std::process::exit(1);
+                }
+                if let Ok(self_exe) = std::env::current_exe() {
+                    let _ = std::fs::copy(&self_exe, bin_dir.join("curb-cli.exe"));
+                }
+
+                // Optionally migrate config & password from Standard Mode (%LOCALAPPDATA%\Curb).
+                if let Some(src_dir) = migrate_from {
+                    for filename in ["config.json", "auth.json"] {
+                        let src = src_dir.join(filename);
+                        let dst = data_dir.join(filename);
+                        if src.exists() && !dst.exists() {
+                            let _ = std::fs::copy(&src, &dst);
+                        }
+                    }
+                }
+
+                // Lock down ProgramData\Curb ACLs: SYSTEM & Administrators full control, Users read-only.
+                let dir_str = data_dir.to_string_lossy().to_string();
+                let _ = std::process::Command::new("icacls.exe")
+                    .args([
+                        &dir_str,
+                        "/inheritance:r",
+                        "/grant:r",
+                        "SYSTEM:(OI)(CI)F",
+                        "/grant:r",
+                        "Administrators:(OI)(CI)F",
+                        "/grant:r",
+                        "Users:(OI)(CI)RX",
+                    ])
+                    .status();
+
+                let _ = std::process::Command::new("sc.exe")
+                    .args(["delete", "CurbService"])
+                    .status();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+
+                let bin_arg = format!("binPath= \"{}\"", installed_service.display());
                 let status = std::process::Command::new("sc.exe")
                     .args([
                         "create",
@@ -172,7 +237,7 @@ fn main() {
             }
             #[cfg(not(windows))]
             {
-                let _ = service_bin;
+                let _ = (service_bin, migrate_from);
                 eprintln!("Windows service installation is only supported on Windows.");
             }
         }

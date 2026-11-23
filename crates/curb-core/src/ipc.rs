@@ -44,6 +44,18 @@ pub struct BlockedEvent {
     pub is_steam_community: bool,
 }
 
+/// Indicates which protection architecture Curb is currently running in.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtectionTier {
+    #[default]
+    Unconfigured,
+    /// LocalSystem Windows Service + WFP default-deny across all adapters.
+    FullService,
+    /// Per-user local proxy mode requiring zero Windows Administrator privileges.
+    StandardUser,
+}
+
 /// Snapshot of service state returned on initial load and updates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceSnapshot {
@@ -51,6 +63,8 @@ pub struct ServiceSnapshot {
     pub password_configured: bool,
     pub blocked_events: Vec<BlockedEvent>,
     pub active_wfp_filters: usize,
+    #[serde(default)]
+    pub protection_tier: ProtectionTier,
 }
 
 /// Requests sent from `curb-app` (or `curb-cli`) to `curb-service`.

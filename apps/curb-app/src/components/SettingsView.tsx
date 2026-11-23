@@ -1,14 +1,20 @@
 import { createSignal, Show } from "solid-js";
-import type { BaselinePolicy, EnforcementMode } from "../lib/types";
+import type {
+  BaselinePolicy,
+  EnforcementMode,
+  ProtectionTier,
+} from "../lib/types";
 import { Switch } from "./Switch";
 
 interface SettingsViewProps {
   unlocked: boolean;
   passwordConfigured: boolean;
+  protectionTier: ProtectionTier;
   mode: EnforcementMode;
   baseline: BaselinePolicy;
   theme: "dark" | "light";
   onRequireUnlock: () => void;
+  onUpgradeToFull: () => Promise<void>;
   onToggleTheme: () => void;
   onSetMode: (mode: EnforcementMode) => void;
   onUpdateBaseline: (baseline: BaselinePolicy) => void;
@@ -18,6 +24,7 @@ interface SettingsViewProps {
 export function SettingsView(props: SettingsViewProps) {
   const [advOpen, setAdvOpen] = createSignal(false);
   const [pwOpen, setPwOpen] = createSignal(false);
+  const [upgrading, setUpgrading] = createSignal(false);
   const [currentPw, setCurrentPw] = createSignal("");
   const [newPw, setNewPw] = createSignal("");
   const [confirmPw, setConfirmPw] = createSignal("");
@@ -28,6 +35,15 @@ export function SettingsView(props: SettingsViewProps) {
   const isOn = () => props.mode.kind === "enforcing";
   const isPaused = () => props.mode.kind === "paused_until";
   const isOff = () => props.mode.kind === "disabled";
+
+  async function handleUpgrade() {
+    setUpgrading(true);
+    try {
+      await props.onUpgradeToFull();
+    } finally {
+      setUpgrading(false);
+    }
+  }
 
   function handleTogglePwForm() {
     if (!props.unlocked) {
@@ -76,6 +92,55 @@ export function SettingsView(props: SettingsViewProps) {
 
   return (
     <div class="space-y-3">
+      {/* Protection Tier Status / Upgrade */}
+      <div
+        class="p-3.5 rounded-xl flex items-center justify-between gap-2"
+        style={{
+          background: "var(--c-card)",
+          border: "1px solid var(--c-border)",
+        }}
+      >
+        <div class="min-w-0">
+          <div
+            class="text-[13px] font-semibold"
+            style={{ color: "var(--c-text)" }}
+          >
+            {props.protectionTier === "full_service"
+              ? "Full Protection"
+              : "Standard Mode (No Admin)"}
+          </div>
+          <div class="text-xs mt-0.5" style={{ color: "var(--c-text-sec)" }}>
+            {props.protectionTier === "full_service"
+              ? "System firewall active across all adapters"
+              : "Voluntary browser proxy · upgrade anytime"}
+          </div>
+        </div>
+        <Show
+          when={props.protectionTier === "standard_user"}
+          fallback={
+            <span
+              class="text-xs font-semibold px-2.5 py-1 rounded-full shrink-0"
+              style={{
+                background: "var(--c-green-soft)",
+                color: "var(--c-green-text)",
+              }}
+            >
+              Active
+            </span>
+          }
+        >
+          <button
+            type="button"
+            disabled={upgrading()}
+            onClick={() => void handleUpgrade()}
+            class="px-3 py-1.5 rounded-lg text-xs font-semibold shrink-0 cursor-pointer disabled:opacity-60"
+            style={{ background: "var(--c-accent)", color: "#ffffff" }}
+          >
+            {upgrading() ? "Upgrading…" : "Upgrade"}
+          </button>
+        </Show>
+      </div>
+
       {/* Protection Switch */}
       <div
         class="p-3.5 rounded-xl space-y-2.5"

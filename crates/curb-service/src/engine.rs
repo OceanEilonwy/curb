@@ -174,6 +174,7 @@ impl EngineState {
             password_configured: self.auth.is_some(),
             blocked_events: self.blocked_events.iter().cloned().collect(),
             active_wfp_filters: self.active_wfp_filters,
+            protection_tier: curb_core::ipc::ProtectionTier::FullService,
         }
     }
 }

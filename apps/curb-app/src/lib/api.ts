@@ -18,6 +18,7 @@ function isTauriRuntime(): boolean {
 let mockSnapshot: ServiceSnapshot = {
   password_configured: true,
   active_wfp_filters: 14,
+  protection_tier: "full_service",
   config: {
     schema_version: 1,
     mode: { kind: "enforcing" },
@@ -234,6 +235,28 @@ export const curbApi = {
       return invoke<ServiceSnapshot>("get_snapshot");
     }
     return cloneSnapshot();
+  },
+
+  async setupFullProtection(): Promise<ServiceSnapshot> {
+    if (isTauriRuntime()) {
+      return invoke<ServiceSnapshot>("setup_full_protection");
+    }
+    mockSnapshot.protection_tier = "full_service";
+    return cloneSnapshot();
+  },
+
+  async setupStandardMode(
+    password: string
+  ): Promise<[string, ServiceSnapshot]> {
+    if (isTauriRuntime()) {
+      return invoke<[string, ServiceSnapshot]>("setup_standard_mode", {
+        password,
+      });
+    }
+    mockPassword = password;
+    mockSnapshot.password_configured = true;
+    mockSnapshot.protection_tier = "standard_user";
+    return ["mock-session-token", cloneSnapshot()];
   },
 
   async listRunningApps(): Promise<RunningAppInfo[]> {
