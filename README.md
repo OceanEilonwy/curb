@@ -37,13 +37,18 @@ Most internet blockers rely on browser extensions or domain blocklists that are 
 
 ## Quick Setup (Windows)
 
-1. **[Download the latest release](https://github.com/OceanEilonwy/curb/releases/latest)** (`curb-windows-x64-setup.exe`) and run it—**no Windows Administrator account needed to install**.
-2. Launch **Curb** and pick your protection mode on first run:
-   - **Full Protection (Recommended):** One-time Windows Admin prompt installs the locked system firewall service (`CurbService`), blocking every app and game across all adapters.
-   - **Standard Mode (No Admin):** Starts immediately in your user account using a local per-user proxy—zero admin needed (voluntary; upgrade to Full Protection anytime in Settings).
-3. Set your **Curb password** right inside the app, and toggle on **Steam** or any apps/games you want online.
+1. **[Download Curb for Windows](https://github.com/OceanEilonwy/curb/releases/latest)** (`curb-windows-x64-setup.exe`) and run the one-click installer—everything is bundled inside, and **no admin account is needed to install**.
+2. Open **Curb** and choose your mode:
+   - **Full Protection (Recommended):** One click + a single Windows Admin prompt sets up the locked system firewall automatically.
+   - **Standard Mode (No Admin):** Starts immediately in your user account with zero admin needed (upgrade to Full Protection anytime in Settings).
+3. Pick your **Curb password** right in the app and toggle on **Steam** or any apps and games you want online.
 
-> **Admin recovery:** Any Windows Administrator can run `curb-cli emergency-disable` or `curb-cli set-password` from an elevated prompt at any time.
+<details>
+<summary>Admin recovery (forgot Curb password?)</summary>
+
+Any Windows Administrator can reset the Curb password or pause protection from an elevated PowerShell prompt using the bundled CLI (`C:\ProgramData\Curb\bin\curb-cli.exe set-password` or `curb-cli.exe emergency-disable`).
+
+</details>
 
 ---
 

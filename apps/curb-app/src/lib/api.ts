@@ -245,6 +245,14 @@ export const curbApi = {
     return cloneSnapshot();
   },
 
+  async uninstallFullProtection(): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke("uninstall_full_protection");
+      return;
+    }
+    mockSnapshot.protection_tier = "unconfigured";
+  },
+
   async setupStandardMode(
     password: string
   ): Promise<[string, ServiceSnapshot]> {

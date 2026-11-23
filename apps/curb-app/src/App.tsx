@@ -225,6 +225,17 @@ export default function App() {
     }
   }
 
+  async function handleUninstallService() {
+    try {
+      await curbApi.uninstallFullProtection();
+      setToken(null);
+      await refreshSnapshot();
+      showToast("System service removed");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function handleChangePassword(current: string, next: string) {
     const t = requireToken();
     if (!t) return;
@@ -449,6 +460,7 @@ export default function App() {
                   theme={theme()}
                   onRequireUnlock={() => setUnlockOpen(true)}
                   onUpgradeToFull={handleUpgradeToFull}
+                  onUninstallService={handleUninstallService}
                   onToggleTheme={() =>
                     setTheme((t) => (t === "dark" ? "light" : "dark"))
                   }

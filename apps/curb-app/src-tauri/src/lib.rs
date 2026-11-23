@@ -44,6 +44,7 @@ async fn setup_full_protection(
     local: State<'_, LocalStandardRuntime>,
 ) -> Result<ServiceSnapshot, String> {
     elevate::launch_elevated_service_install(&app)?;
+    elevate::ensure_tray_autostart();
 
     // Wait briefly for CurbService to start and open its Named Pipe.
     for _ in 0..24 {
@@ -64,11 +65,17 @@ async fn setup_full_protection(
 }
 
 #[tauri::command]
+async fn uninstall_full_protection(app: AppHandle) -> Result<(), String> {
+    elevate::launch_elevated_service_uninstall(&app)
+}
+
+#[tauri::command]
 async fn setup_standard_mode(
     password: String,
     local: State<'_, LocalStandardRuntime>,
 ) -> Result<(String, ServiceSnapshot), String> {
     let token = local.activate(&password)?;
+    elevate::ensure_tray_autostart();
     let snapshot = local.snapshot(true);
     Ok((token, snapshot))
 }
@@ -305,6 +312,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             setup_full_protection,
+            uninstall_full_protection,
             setup_standard_mode,
             list_running_apps,
             list_steam_games,

@@ -15,6 +15,7 @@ interface SettingsViewProps {
   theme: "dark" | "light";
   onRequireUnlock: () => void;
   onUpgradeToFull: () => Promise<void>;
+  onUninstallService: () => Promise<void>;
   onToggleTheme: () => void;
   onSetMode: (mode: EnforcementMode) => void;
   onUpdateBaseline: (baseline: BaselinePolicy) => void;
@@ -510,8 +511,35 @@ export function SettingsView(props: SettingsViewProps) {
             >
               <div>Firewall: Windows Filtering Platform (IPv4/IPv6)</div>
               <div>Adapter DNS: 127.0.0.1 (auto-restored when off)</div>
-              <div>Admin recovery: curb-cli set-password</div>
             </div>
+
+            <Show when={props.protectionTier === "full_service"}>
+              <div
+                class="pt-2.5 flex items-center justify-between gap-2"
+                style={{ "border-top": "1px solid var(--c-border)" }}
+              >
+                <div>
+                  <div class="font-semibold" style={{ color: "var(--c-text)" }}>
+                    Remove System Service
+                  </div>
+                  <div style={{ color: "var(--c-text-muted)" }}>
+                    Stops and unregisters CurbService (Admin prompt)
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={!props.unlocked}
+                  onClick={() => void props.onUninstallService()}
+                  class="px-2.5 py-1.5 rounded-lg text-xs font-semibold shrink-0 cursor-pointer disabled:opacity-55"
+                  style={{
+                    background: "var(--c-red-soft)",
+                    color: "var(--c-red-text)",
+                  }}
+                >
+                  Remove
+                </button>
+              </div>
+            </Show>
           </div>
         </Show>
       </div>

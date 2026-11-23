@@ -54,6 +54,71 @@ fn locate_bundled_binaries(app: &AppHandle) -> Result<(PathBuf, PathBuf), String
     )
 }
 
+/// Triggers a single Windows UAC prompt (`runas`) to stop and unregister `CurbService`.
+pub fn launch_elevated_service_uninstall(app: &AppHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let (cli_path, _) = locate_bundled_binaries(app)?;
+        run_elevated_windows(&cli_path, "uninstall")
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Err("Only available on Windows.".into())
+    }
+}
+
+/// Registers `curb-app.exe` to start quietly in the taskbar tray on Windows login
+/// using `HKCU\...\Run` (requires zero administrator privileges).
+pub fn ensure_tray_autostart() {
+    #[cfg(windows)]
+    {
+        use windows::core::PCWSTR;
+        use windows::Win32::System::Registry::{
+            RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
+            REG_SZ,
+        };
+
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
+            .encode_utf16()
+            .collect();
+        let value_name: Vec<u16> = "Curb\0".encode_utf16().collect();
+        let quoted_exe: Vec<u16> = format!("\"{}\"\0", exe.display())
+            .encode_utf16()
+            .collect();
+
+        unsafe {
+            let mut hkey = HKEY::default();
+            if RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(subkey.as_ptr()),
+                0,
+                KEY_SET_VALUE,
+                &mut hkey,
+            )
+            .is_ok()
+            {
+                let bytes = std::slice::from_raw_parts(
+                    quoted_exe.as_ptr() as *const u8,
+                    quoted_exe.len() * 2,
+                );
+                let _ = RegSetValueExW(
+                    hkey,
+                    PCWSTR(value_name.as_ptr()),
+                    0,
+                    REG_SZ,
+                    Some(bytes),
+                );
+                let _ = RegCloseKey(hkey);
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 fn run_elevated_windows(exe: &PathBuf, params: &str) -> Result<(), String> {
     use std::ffi::OsStr;

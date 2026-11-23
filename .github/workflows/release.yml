@@ -90,7 +90,7 @@ jobs:
             Copy-Item $setup.FullName dist-release/curb-windows-x64-setup.exe
           }
 
-          Compress-Archive -Path dist-release/curb-windows-x64/* -DestinationPath dist-release/curb-windows-x64.zip -Force
+          Compress-Archive -Path dist-release/curb-windows-x64/* -DestinationPath dist-release/curb-windows-x64-portable.zip -Force
           Get-ChildItem dist-release
 
       - name: Publish GitHub Release
@@ -100,6 +100,4 @@ jobs:
           generate_release_notes: true
           files: |
             dist-release/curb-windows-x64-setup.exe
-            dist-release/curb-windows-x64.zip
-            target/release/curb-service.exe
-            target/release/curb-cli.exe
+            dist-release/curb-windows-x64-portable.zip
