@@ -277,7 +277,6 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
       matcher = {
         kind: "signature",
         subject_cn: sel.signer!,
-        product_name: sel.name,
         original_filename: sel.exe,
       };
     } else {

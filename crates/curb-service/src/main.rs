@@ -76,8 +76,9 @@ async fn run_service_runtime(args: Args, shutdown_rx: tokio::sync::watch::Receiv
     {
         let wf_engine = engine.clone();
         let wf_dir = data_dir.clone();
+        let wf_upstream = args.dns_upstream;
         tokio::spawn(async move {
-            windows::run_windows_enforcement_loop(wf_engine, wf_dir).await;
+            windows::run_windows_enforcement_loop(wf_engine, wf_dir, wf_upstream).await;
         });
     }
 

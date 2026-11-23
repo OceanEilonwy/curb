@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -12,13 +13,25 @@ use curb_core::presets::EffectiveRule;
 use curb_core::steam::{discover_steam_games, find_default_steam_root};
 use curb_core::store::{load_auth, load_config, save_auth, save_config};
 use curb_core::verify::{inspect_binary, BinaryIdentity};
+use tokio::sync::Notify;
 
 use crate::processes::collect_running_apps;
 
 const MAX_BLOCKED_HISTORY: usize = 100;
 
+/// Microsoft NCSI probe domains used by Windows to verify internet connectivity
+/// and keep Wi-Fi / Ethernet adapters from showing "No Internet" or bouncing.
+pub const NCSI_DOMAINS: &[&str] = &[
+    "www.msftconnecttest.com",
+    "ipv6.msftconnecttest.com",
+    "dns.msftncsi.com",
+    "www.msftncsi.com",
+    "ipv6.msftncsi.com",
+];
+
 /// Represents an allowed running process currently tracked by `curb-service`.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TrackedProcess {
     pub pid: u32,
     pub identity: BinaryIdentity,
@@ -32,9 +45,11 @@ pub struct TrackedProcess {
 pub struct EngineState {
     pub data_dir: PathBuf,
     pub config: Config,
+    pub config_version: u64,
     pub auth: Option<AuthRecord>,
     pub sessions: SessionManager,
     pub dns_cache: DnsCache,
+    pub upstream_dns: Vec<SocketAddr>,
     pub blocked_events: VecDeque<BlockedEvent>,
     pub tracked_processes: HashMap<u32, TrackedProcess>,
     pub active_wfp_filters: usize,
@@ -47,9 +62,11 @@ impl EngineState {
         Ok(Self {
             data_dir,
             config,
+            config_version: 0,
             auth,
             sessions: SessionManager::default(),
             dns_cache: DnsCache::new(),
+            upstream_dns: Vec::new(),
             blocked_events: VecDeque::with_capacity(MAX_BLOCKED_HISTORY),
             tracked_processes: HashMap::new(),
             active_wfp_filters: 0,
@@ -120,11 +137,7 @@ impl EngineState {
 
         // Allow Windows NCSI probe domains when baseline NCSI is enabled.
         if self.config.baseline.ncsi {
-            let ncsi = [
-                "www.msftconnecttest.com".to_string(),
-                "dns.msftncsi.com".to_string(),
-                "www.msftncsi.com".to_string(),
-            ];
+            let ncsi: Vec<String> = NCSI_DOMAINS.iter().map(|s| (*s).to_string()).collect();
             if domain_matches_any(domain, &ncsi) {
                 return true;
             }
@@ -161,6 +174,15 @@ impl EngineState {
             .map(|patterns| self.dns_cache.allowed_ips_for_patterns(patterns))
     }
 
+    /// Computes currently resolved IPs for Windows NCSI connectivity probes.
+    pub fn ncsi_allowed_ips(&self) -> Vec<IpAddr> {
+        if !self.config.baseline.ncsi {
+            return Vec::new();
+        }
+        let patterns: Vec<String> = NCSI_DOMAINS.iter().map(|s| (*s).to_string()).collect();
+        self.dns_cache.allowed_ips_for_patterns(&patterns)
+    }
+
     pub fn record_blocked_event(&mut self, event: BlockedEvent) {
         if self.blocked_events.len() >= MAX_BLOCKED_HISTORY {
             self.blocked_events.pop_back();
@@ -183,13 +205,63 @@ impl EngineState {
 #[derive(Clone)]
 pub struct ServiceEngine {
     pub state: Arc<Mutex<EngineState>>,
+    pub reconcile_notify: Arc<Notify>,
+    pub dns_v4_ready: Arc<AtomicBool>,
+    pub dns_v6_ready: Arc<AtomicBool>,
 }
 
 impl ServiceEngine {
     pub fn new(data_dir: PathBuf) -> curb_core::Result<Self> {
         Ok(Self {
             state: Arc::new(Mutex::new(EngineState::load(data_dir)?)),
+            reconcile_notify: Arc::new(Notify::new()),
+            dns_v4_ready: Arc::new(AtomicBool::new(false)),
+            dns_v6_ready: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub fn notify_reconcile(&self) {
+        self.reconcile_notify.notify_one();
+    }
+
+    pub fn set_dns_ready(&self, v4: bool, v6: bool) {
+        self.dns_v4_ready.store(v4, Ordering::Release);
+        self.dns_v6_ready.store(v6, Ordering::Release);
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn is_dns_v4_ready(&self) -> bool {
+        self.dns_v4_ready.load(Ordering::Acquire)
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn is_dns_v6_ready(&self) -> bool {
+        self.dns_v6_ready.load(Ordering::Acquire)
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn set_upstream_dns(&self, servers: Vec<SocketAddr>) {
+        let mut guard = self.state.lock().unwrap();
+        guard.upstream_dns = servers;
+    }
+
+    /// Returns upstream DNS resolvers ordered by preference:
+    /// 1. Original adapter DNS servers captured before Curb redirected DNS
+    /// 2. Configured fallback resolver (default `1.1.1.1:53`)
+    /// 3. Secondary public fallback (`8.8.8.8:53`)
+    pub fn upstream_dns_servers(&self, fallback: SocketAddr) -> Vec<SocketAddr> {
+        let mut out = {
+            let guard = self.state.lock().unwrap();
+            guard.upstream_dns.clone()
+        };
+        if !out.contains(&fallback) {
+            out.push(fallback);
+        }
+        let secondary = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53);
+        if !out.contains(&secondary) {
+            out.push(secondary);
+        }
+        out
     }
 
     pub fn handle_request(&self, req: IpcRequest) -> IpcResponse {
@@ -341,14 +413,16 @@ impl ServiceEngine {
             };
         }
         update(&mut guard.config);
+        guard.config_version = guard.config_version.wrapping_add(1);
         if let Err(e) = save_config(&guard.data_dir, &guard.config) {
             return IpcResponse::Error {
                 message: format!("Failed to persist config: {e}"),
             };
         }
-        IpcResponse::Snapshot {
-            data: guard.snapshot(),
-        }
+        let snapshot = guard.snapshot();
+        drop(guard);
+        self.notify_reconcile();
+        IpcResponse::Snapshot { data: snapshot }
     }
 }
 

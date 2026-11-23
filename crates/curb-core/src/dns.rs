@@ -42,6 +42,7 @@ struct CachedIp {
 #[derive(Debug, Default)]
 pub struct DnsCache {
     entries: HashMap<String, Vec<CachedIp>>,
+    version: u64,
 }
 
 impl DnsCache {
@@ -49,33 +50,56 @@ impl DnsCache {
         Self::default()
     }
 
+    /// Monotonically increasing counter bumped whenever the set of cached IPs changes.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Records resolved IPs for `domain` with a minimum TTL floor so short CDN
-    /// TTLs don't cause mid-connection drops.
-    pub fn record(&mut self, domain: &str, ips: &[IpAddr], ttl_secs: u32) {
+    /// TTLs don't cause mid-connection drops. Returns `true` if any new IP was added
+    /// or an expired entry was removed (indicating WFP IP filters may need updating).
+    pub fn record(&mut self, domain: &str, ips: &[IpAddr], ttl_secs: u32) -> bool {
         let key = normalize_domain(domain);
         let ttl = Duration::from_secs(ttl_secs.max(30) as u64);
         let now = Instant::now();
         let expires_at = now + ttl;
 
         let list = self.entries.entry(key).or_default();
+        let before = list.len();
         list.retain(|e| e.expires_at > now);
+        let mut changed = list.len() != before;
 
         for &ip in ips {
             if let Some(existing) = list.iter_mut().find(|e| e.ip == ip) {
                 existing.expires_at = expires_at;
             } else {
                 list.push(CachedIp { ip, expires_at });
+                changed = true;
             }
         }
+
+        if changed {
+            self.version = self.version.wrapping_add(1);
+        }
+        changed
     }
 
-    /// Purges expired entries across the cache.
-    pub fn prune_expired(&mut self) {
+    /// Purges expired entries across the cache. Returns `true` if any entries expired.
+    pub fn prune_expired(&mut self) -> bool {
         let now = Instant::now();
+        let mut changed = false;
         self.entries.retain(|_, list| {
+            let before = list.len();
             list.retain(|e| e.expires_at > now);
+            if list.len() != before {
+                changed = true;
+            }
             !list.is_empty()
         });
+        if changed {
+            self.version = self.version.wrapping_add(1);
+        }
+        changed
     }
 
     /// Returns all currently valid IPs for domains matching any of `patterns`.

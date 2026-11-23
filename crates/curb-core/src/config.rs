@@ -199,7 +199,21 @@ fn match_signature(
     if let Some(expected_product) = product_name {
         match &binary.product_name {
             Some(actual) if actual.eq_ignore_ascii_case(expected_product) => {}
-            _ => return false,
+            Some(_) => return false,
+            None => {
+                // When PE version metadata is unavailable, compare against the executable
+                // filename stem (e.g. "Signal" for "Signal.exe") so existing rules saved
+                // with a display-name fallback still match without over-allowing unrelated
+                // binaries from the same signer.
+                let stem = binary
+                    .filename
+                    .strip_suffix(".exe")
+                    .or_else(|| binary.filename.strip_suffix(".EXE"))
+                    .unwrap_or(&binary.filename);
+                if !stem.eq_ignore_ascii_case(expected_product) {
+                    return false;
+                }
+            }
         }
     }
     if let Some(expected_file) = original_filename {
@@ -382,6 +396,52 @@ mod tests {
 
         assert!(matcher.matches(&minecraft));
         assert!(!matcher.matches(&edge));
+    }
+
+    #[test]
+    fn signature_rule_matches_signed_app_without_pe_product_metadata() {
+        let signal = BinaryIdentity {
+            path: r"C:\Users\alice\AppData\Local\Programs\signal-desktop\Signal.exe".into(),
+            filename: "Signal.exe".into(),
+            sha256: "abc123".into(),
+            signature: Some(SignatureInfo {
+                trusted: true,
+                subject_cn: "Signal Messenger, LLC".into(),
+                issuer_cn: "DigiCert Trusted G4".into(),
+            }),
+            product_name: None,
+            original_filename: None,
+            file_description: None,
+        };
+        let unrelated_same_signer = BinaryIdentity {
+            path: r"C:\Users\alice\AppData\Local\Programs\signal-desktop\Updater.exe".into(),
+            filename: "Updater.exe".into(),
+            sha256: "def456".into(),
+            signature: signal.signature.clone(),
+            product_name: None,
+            original_filename: None,
+            file_description: None,
+        };
+
+        // New-style rule (no product_name, matches by trusted signer + filename)
+        let new_rule = ExecutableMatcher::Signature {
+            subject_cn: "Signal Messenger, LLC".into(),
+            issuer_cn: None,
+            product_name: None,
+            original_filename: Some("Signal.exe".into()),
+        };
+        assert!(new_rule.matches(&signal));
+        assert!(!new_rule.matches(&unrelated_same_signer));
+
+        // Legacy v0.2.2 rule that stored display-name fallback ("Signal") in product_name
+        let legacy_rule = ExecutableMatcher::Signature {
+            subject_cn: "Signal Messenger, LLC".into(),
+            issuer_cn: None,
+            product_name: Some("Signal".into()),
+            original_filename: Some("Signal.exe".into()),
+        };
+        assert!(legacy_rule.matches(&signal));
+        assert!(!legacy_rule.matches(&unrelated_same_signer));
     }
 
     #[test]
