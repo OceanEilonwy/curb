@@ -17,15 +17,23 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          node-version: 22
+          shared-key: curb-linux
+          cache-on-failure: true
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 12
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/curb-app/pnpm-lock.yaml
 
       - name: Run Rust workspace tests
         run: cargo test --workspace
@@ -46,15 +54,26 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Cache Rust dependencies (workspace + Tauri)
+        uses: Swatinem/rust-cache@v2
         with:
-          node-version: 22
+          shared-key: curb-windows
+          workspaces: |
+            . -> target
+            apps/curb-app/src-tauri -> target
+          cache-on-failure: true
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 12
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/curb-app/pnpm-lock.yaml
 
       - name: Run Rust workspace tests (Windows)
         run: cargo test --workspace

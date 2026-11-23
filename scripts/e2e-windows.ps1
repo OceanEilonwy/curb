@@ -200,13 +200,12 @@ try {
         token = $token
         steam = @{
             enabled                = $true
-            store_and_downloads    = $true
+            store_and_library      = $true
             community_and_workshop = $true
-            friends_and_chat       = $false
-            auto_allow_games       = $true
+            friends_and_voice      = $false
         }
     }
-    Assert-True ($updated.status -eq "snapshot" -and $updated.data.config.presets.steam.community_and_workshop -eq $true) "Authenticated config mutation persisted"
+    Assert-True ($updated.status -eq "snapshot" -and $updated.data.config.presets.steam.community_and_workshop -eq $true) "Authenticated config mutation persisted (got: $($updated | ConvertTo-Json -Compress))"
 
     $pwChange = Invoke-CurbIpc @{
         op               = "change_password"
