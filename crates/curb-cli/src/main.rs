@@ -169,7 +169,11 @@ fn main() {
 
                 let installed_service = bin_dir.join("curb-service.exe");
                 if source_service != installed_service {
-                    if let Err(e) = std::fs::copy(&source_service, &installed_service) {
+                    if let Err(e) = win_scm::copy_with_retry(
+                        &source_service,
+                        &installed_service,
+                        std::time::Duration::from_secs(5),
+                    ) {
                         eprintln!(
                             "Failed to copy {} to {}: {e}",
                             source_service.display(),
@@ -181,7 +185,11 @@ fn main() {
                 if let Ok(self_exe) = std::env::current_exe() {
                     let target_cli = bin_dir.join("curb-cli.exe");
                     if self_exe != target_cli {
-                        let _ = std::fs::copy(&self_exe, &target_cli);
+                        let _ = win_scm::copy_with_retry(
+                            &self_exe,
+                            &target_cli,
+                            std::time::Duration::from_secs(5),
+                        );
                     }
                 }
 
@@ -249,7 +257,10 @@ fn main() {
                 }
 
                 // Clean up installed service binaries in ProgramData\Curb\bin
-                let _ = std::fs::remove_dir_all(data_dir.join("bin"));
+                win_scm::remove_dir_with_retry(
+                    &data_dir.join("bin"),
+                    std::time::Duration::from_secs(5),
+                );
                 println!("CurbService removed and all Windows firewall & DNS settings restored.");
             }
             #[cfg(not(windows))]
@@ -424,5 +435,40 @@ mod win_scm {
         }
 
         Err("Timed out waiting for CurbService to reach Running state".into())
+    }
+
+    /// Copies `src` to `dst`, retrying briefly on transient Windows file-lock errors
+    /// (ERROR_SHARING_VIOLATION = 32 / ERROR_ACCESS_DENIED = 5) while a freshly stopped
+    /// `curb-service.exe` process finishes tearing down its executable image mapping.
+    pub fn copy_with_retry(src: &Path, dst: &Path, timeout: Duration) -> std::io::Result<u64> {
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            match std::fs::copy(src, dst) {
+                Ok(n) => return Ok(n),
+                Err(e)
+                    if matches!(
+                        e.raw_os_error(),
+                        Some(ERROR_SHARING_VIOLATION | ERROR_ACCESS_DENIED)
+                    ) && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Best-effort recursive removal with short retries while a stopped service releases file locks.
+    pub fn remove_dir_with_retry(dir: &Path, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while dir.exists() {
+            if std::fs::remove_dir_all(dir).is_ok() || Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 }

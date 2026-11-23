@@ -205,7 +205,7 @@ try {
             friends_and_voice      = $false
         }
     }
-    Assert-True ($updated.status -eq "snapshot" -and $updated.data.config.presets.steam.community_and_workshop -eq $true) "Authenticated config mutation persisted (got: $($updated | ConvertTo-Json -Compress))"
+    Assert-True ($updated.status -eq "snapshot" -and $updated.data.config.presets.steam.community_and_workshop -eq $true) "Authenticated config mutation persisted"
 
     $pwChange = Invoke-CurbIpc @{
         op               = "change_password"
