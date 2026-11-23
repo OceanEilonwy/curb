@@ -395,10 +395,10 @@ try {
 
         Assert-True (-not (Test-Path (Join-Path $installDir "curb-app.exe"))) "curb-app.exe removed by uninstaller"
         Assert-True (-not (Test-Path (Join-Path $installDir "standard_mode.flag"))) "NSIS hook removed standard_mode.flag"
-        $runVal = Get-ItemPropertyValue -Path $runKey -Name "Curb" -ErrorAction SilentlyContinue
+        $runVal = (Get-Item -Path $runKey).GetValue("Curb", $null)
         Assert-True ($null -eq $runVal) "NSIS hook removed HKCU\...\Run\Curb"
-        $proxyEnable = Get-ItemPropertyValue -Path $inetKey -Name "ProxyEnable" -ErrorAction SilentlyContinue
-        $proxyServer = Get-ItemPropertyValue -Path $inetKey -Name "ProxyServer" -ErrorAction SilentlyContinue
+        $proxyEnable = (Get-Item -Path $inetKey).GetValue("ProxyEnable", $null)
+        $proxyServer = (Get-Item -Path $inetKey).GetValue("ProxyServer", $null)
         Assert-True ($proxyEnable -eq 0) "NSIS hook reset HKCU ProxyEnable to 0"
         Assert-True ($null -eq $proxyServer) "NSIS hook deleted Curb HKCU ProxyServer"
 
