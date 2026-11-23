@@ -114,14 +114,20 @@ fn main() {
                 eprintln!("Failed to update config: {e}");
                 std::process::exit(1);
             }
-            println!("Curb mode set to Disabled.");
             #[cfg(windows)]
             {
                 let _ = std::process::Command::new("sc.exe")
                     .args(["stop", "CurbService"])
                     .status();
-                println!("Stopped CurbService. Run `curb-cli enable` when ready to resume.");
             }
+            match curb_core::cleanup::purge_all_curb_wfp_objects() {
+                Ok(n) => println!("Removed {n} Curb WFP firewall filters."),
+                Err(e) => eprintln!("Warning: WFP cleanup reported: {e}"),
+            }
+            if let Err(e) = curb_core::cleanup::restore_adapter_dns_clean(&data_dir) {
+                eprintln!("Warning: DNS restore reported: {e}");
+            }
+            println!("Curb disabled and network settings restored.");
         }
 
         Commands::Enable => {
@@ -248,10 +254,23 @@ fn main() {
                 let _ = std::process::Command::new("sc.exe")
                     .args(["stop", "CurbService"])
                     .status();
+                std::thread::sleep(std::time::Duration::from_millis(400));
                 let _ = std::process::Command::new("sc.exe")
                     .args(["delete", "CurbService"])
                     .status();
-                println!("CurbService removed.");
+
+                // Always purge persistent WFP default-deny filters & restore original adapter DNS!
+                match curb_core::cleanup::purge_all_curb_wfp_objects() {
+                    Ok(n) => println!("Removed {n} Curb WFP firewall filters."),
+                    Err(e) => eprintln!("Warning: WFP cleanup reported: {e}"),
+                }
+                if let Err(e) = curb_core::cleanup::restore_adapter_dns_clean(&data_dir) {
+                    eprintln!("Warning: DNS restore reported: {e}");
+                }
+
+                // Clean up installed service binaries in ProgramData\Curb\bin
+                let _ = std::fs::remove_dir_all(data_dir.join("bin"));
+                println!("CurbService removed and all Windows firewall & DNS settings restored.");
             }
             #[cfg(not(windows))]
             {

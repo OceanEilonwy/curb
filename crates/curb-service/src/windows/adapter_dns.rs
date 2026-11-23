@@ -1,18 +1,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use curb_core::store::{dns_backup_path, read_json, write_json_atomic};
-use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
-
-/// Snapshot of a Windows network adapter's original DNS settings so Curb can
-/// cleanly restore DHCP or custom static DNS servers on disable/uninstall.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AdapterDnsBackup {
-    pub interface_alias: String,
-    pub interface_index: u32,
-    pub original_servers: Vec<String>,
-}
+use curb_core::cleanup::{restore_adapter_dns_clean, AdapterDnsBackup};
+use curb_core::store::{dns_backup_path, write_json_atomic};
+use tracing::info;
 
 /// Snapshots current adapter DNS settings (if not already backed up) and points
 /// active Windows network adapters to Curb's local DNS proxy (`127.0.0.1` / `::1`).
@@ -35,43 +26,10 @@ pub fn enable_local_dns_redirect(data_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Restores every adapter's original DNS configuration from `dns_backup.json`.
+/// Restores every adapter's original DNS configuration from `dns_backup.json`
+/// and resets any adapter still pointed at `127.0.0.1` / `::1` back to DHCP.
 pub fn restore_original_adapter_dns(data_dir: &Path) -> Result<(), String> {
-    let backup_file = dns_backup_path(data_dir);
-    if !backup_file.exists() {
-        return Ok(());
-    }
-
-    let backups: Vec<AdapterDnsBackup> =
-        read_json(&backup_file).map_err(|e| format!("Failed to read DNS backup: {e}"))?;
-
-    for adapter in backups {
-        let cmd = if adapter.original_servers.is_empty() {
-            format!(
-                "Set-DnsClientServerAddress -InterfaceIndex {} -ResetServerAddresses",
-                adapter.interface_index
-            )
-        } else {
-            let quoted = adapter
-                .original_servers
-                .iter()
-                .map(|s| format!("'{}'", s.replace('\'', "")))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                "Set-DnsClientServerAddress -InterfaceIndex {} -ServerAddresses ({quoted})",
-                adapter.interface_index
-            )
-        };
-        if let Err(e) = run_powershell(&cmd) {
-            warn!(
-                "Failed to restore DNS for adapter {}: {e}",
-                adapter.interface_alias
-            );
-        }
-    }
-
-    let _ = std::fs::remove_file(&backup_file);
+    restore_adapter_dns_clean(data_dir)?;
     info!("Restored original network adapter DNS settings");
     Ok(())
 }

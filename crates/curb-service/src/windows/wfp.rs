@@ -24,11 +24,13 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
 };
 use windows::Win32::System::Rpc::RPC_C_AUTHN_DEFAULT;
 
+use curb_core::cleanup::{CURB_PROVIDER_UUID, CURB_SUBLAYER_UUID};
+
 /// Stable Curb WFP Provider GUID.
-pub const CURB_PROVIDER_GUID: GUID = GUID::from_u128(0x7c8e94b1_4412_4f68_a13b_2210c8894e01);
+pub const CURB_PROVIDER_GUID: GUID = GUID::from_u128(CURB_PROVIDER_UUID);
 
 /// Stable Curb WFP Sublayer GUID (high weight so Curb rules take precedence).
-pub const CURB_SUBLAYER_GUID: GUID = GUID::from_u128(0x7c8e94b1_4412_4f68_a13b_2210c8894e02);
+pub const CURB_SUBLAYER_GUID: GUID = GUID::from_u128(CURB_SUBLAYER_UUID);
 
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
