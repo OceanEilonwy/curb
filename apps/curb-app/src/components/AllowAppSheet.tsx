@@ -16,6 +16,7 @@ import {
   SpinnerIcon,
   WarnIcon,
 } from "./Icons";
+import { PromptModal } from "./PromptModal";
 
 interface AllowAppSheetProps {
   runningApps: RunningAppInfo[];
@@ -64,6 +65,7 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
   const [browsed, setBrowsed] = createSignal<RunningAppInfo | null>(null);
 
   const [browsing, setBrowsing] = createSignal(false);
+  const [browseModalOpen, setBrowseModalOpen] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
   const [inspectedByPath, setInspectedByPath] = createSignal<
     Record<string, RunningAppInfo>
@@ -225,21 +227,28 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
     return !!sel && inspectingPath() === sel.path.toLowerCase();
   };
 
-  async function handleBrowse() {
+  function openBrowseModal() {
     if (browsing() || saving()) return;
-    const path = window.prompt(
-      "Enter the full path to an executable (.exe):",
-      "C:\\Program Files\\Example\\App.exe"
-    );
-    if (!path || !path.trim()) return;
+    setBrowseModalOpen(true);
+  }
+
+  async function handleBrowseSubmit(rawPath: string) {
+    const cleaned = rawPath.trim().replace(/^"+|"+$/g, "").trim();
+    if (!cleaned) {
+      throw new Error("Please enter the full path to an executable.");
+    }
     setBrowsing(true);
     try {
-      const inspected = await props.onInspectPath(path.trim());
-      if (inspected) {
-        setBrowsed(inspected);
-        setSelectedKey(inspected.key);
-        setInspectError(null);
+      const inspected = await props.onInspectPath(cleaned);
+      if (!inspected) {
+        throw new Error(
+          "Could not read that executable. Check the path and try again."
+        );
       }
+      setBrowsed(inspected);
+      setSelectedKey(inspected.key);
+      setInspectError(null);
+      setBrowseModalOpen(false);
     } finally {
       setBrowsing(false);
     }
@@ -791,7 +800,7 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
             type="button"
             disabled={browsing() || saving()}
             aria-busy={browsing() ? "true" : "false"}
-            onClick={() => void handleBrowse()}
+            onClick={openBrowseModal}
             class="w-full py-2.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
             style={{
               background: "transparent",
@@ -1085,6 +1094,19 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
           }}
         </Show>
       </div>
+
+      <PromptModal
+        open={browseModalOpen()}
+        title="Add Executable by Path"
+        description="Enter or paste the full path to an executable (.exe) on this computer."
+        label="Executable path"
+        placeholder="C:\Program Files\Example\App.exe"
+        submitLabel="Inspect File"
+        busyLabel="Inspecting…"
+        mono={true}
+        onClose={() => setBrowseModalOpen(false)}
+        onSubmit={handleBrowseSubmit}
+      />
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { createSignal, For, Show } from "solid-js";
 import type { Rule, SteamPresetConfig, SubprocessPolicy } from "../lib/types";
 import { isMatcherSigned, matcherDetail } from "../lib/types";
 import { CheckIcon, ChevronDownIcon, SpinnerIcon, WarnIcon } from "./Icons";
+import { PromptModal } from "./PromptModal";
 import { Switch } from "./Switch";
 
 interface AllowedViewProps {
@@ -29,6 +30,9 @@ const STEAM_STORE_DOMAINS = [
 export function AllowedView(props: AllowedViewProps) {
   const [expandedId, setExpandedId] = createSignal<string | null>("steam");
   const [advOpen, setAdvOpen] = createSignal<Record<string, boolean>>({});
+  const [domainPromptRule, setDomainPromptRule] = createSignal<Rule | null>(
+    null
+  );
 
   function toggleExpand(id: string) {
     setExpandedId((prev) => (prev === id ? null : id));
@@ -70,16 +74,25 @@ export function AllowedView(props: AllowedViewProps) {
       props.onRequireUnlock();
       return;
     }
-    const domain = window.prompt("Allowed website pattern (e.g. *.example.com):");
-    if (!domain || !domain.trim()) return;
+    setDomainPromptRule(rule);
+  }
+
+  function handleAddDomainSubmit(domain: string) {
+    const rule = domainPromptRule();
+    if (!rule) return;
+    const cleaned = domain.trim();
+    if (!cleaned) {
+      throw new Error("Please enter a website pattern.");
+    }
     const current = rule.network.dns_whitelist ?? [];
     props.onUpdateRule({
       ...rule,
       network: {
         ...rule.network,
-        dns_whitelist: [...current, domain.trim()],
+        dns_whitelist: [...current, cleaned],
       },
     });
+    setDomainPromptRule(null);
   }
 
   function removeDomain(rule: Rule, index: number) {
@@ -629,6 +642,18 @@ export function AllowedView(props: AllowedViewProps) {
           }}
         </For>
       </div>
+
+      <PromptModal
+        open={domainPromptRule() !== null}
+        title="Add Allowed Website"
+        description="Allow this app to connect to a specific domain or wildcard pattern."
+        label="Website pattern"
+        placeholder="*.example.com"
+        submitLabel="Add"
+        mono={true}
+        onClose={() => setDomainPromptRule(null)}
+        onSubmit={handleAddDomainSubmit}
+      />
     </div>
   );
 }
