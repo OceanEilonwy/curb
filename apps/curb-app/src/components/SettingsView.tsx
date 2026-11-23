@@ -4,6 +4,7 @@ import type {
   EnforcementMode,
   ProtectionTier,
 } from "../lib/types";
+import { SpinnerIcon } from "./Icons";
 import { Switch } from "./Switch";
 
 interface SettingsViewProps {
@@ -11,7 +12,9 @@ interface SettingsViewProps {
   passwordConfigured: boolean;
   protectionTier: ProtectionTier;
   mode: EnforcementMode;
+  pendingMode: EnforcementMode["kind"] | null;
   baseline: BaselinePolicy;
+  busyBaseline: boolean;
   theme: "dark" | "light";
   onRequireUnlock: () => void;
   onUpgradeToFull: () => Promise<void>;
@@ -26,6 +29,7 @@ export function SettingsView(props: SettingsViewProps) {
   const [advOpen, setAdvOpen] = createSignal(false);
   const [pwOpen, setPwOpen] = createSignal(false);
   const [upgrading, setUpgrading] = createSignal(false);
+  const [uninstalling, setUninstalling] = createSignal(false);
   const [currentPw, setCurrentPw] = createSignal("");
   const [newPw, setNewPw] = createSignal("");
   const [confirmPw, setConfirmPw] = createSignal("");
@@ -43,6 +47,15 @@ export function SettingsView(props: SettingsViewProps) {
       await props.onUpgradeToFull();
     } finally {
       setUpgrading(false);
+    }
+  }
+
+  async function handleUninstall() {
+    setUninstalling(true);
+    try {
+      await props.onUninstallService();
+    } finally {
+      setUninstalling(false);
     }
   }
 
@@ -133,11 +146,15 @@ export function SettingsView(props: SettingsViewProps) {
           <button
             type="button"
             disabled={upgrading()}
+            aria-busy={upgrading() ? "true" : "false"}
             onClick={() => void handleUpgrade()}
-            class="px-3 py-1.5 rounded-lg text-xs font-semibold shrink-0 cursor-pointer disabled:opacity-60"
+            class="px-3 py-1.5 rounded-lg text-xs font-semibold shrink-0 cursor-pointer inline-flex items-center gap-1.5 disabled:opacity-60"
             style={{ background: "var(--c-accent)", color: "#ffffff" }}
           >
-            {upgrading() ? "Upgrading…" : "Upgrade"}
+            <Show when={upgrading()}>
+              <SpinnerIcon size={12} />
+            </Show>
+            <span>{upgrading() ? "Upgrading…" : "Upgrade"}</span>
           </button>
         </Show>
       </div>
@@ -164,27 +181,32 @@ export function SettingsView(props: SettingsViewProps) {
         <div class="grid grid-cols-3 gap-2 text-xs">
           <button
             type="button"
-            disabled={!props.unlocked}
+            disabled={!props.unlocked || props.pendingMode !== null}
+            aria-busy={props.pendingMode === "enforcing" ? "true" : "false"}
             onClick={() => props.onSetMode({ kind: "enforcing" })}
-            class="py-2 rounded-lg font-semibold cursor-pointer disabled:opacity-55"
+            class="py-2 rounded-lg font-semibold cursor-pointer inline-flex items-center justify-center gap-1.5 disabled:opacity-55"
             style={{
               background: isOn() ? "var(--c-green-solid)" : "var(--c-surface)",
               color: isOn() ? "#ffffff" : "var(--c-text)",
               border: "1px solid var(--c-border-strong)",
             }}
           >
-            On
+            <Show when={props.pendingMode === "enforcing"}>
+              <SpinnerIcon size={12} />
+            </Show>
+            <span>On</span>
           </button>
           <button
             type="button"
-            disabled={!props.unlocked}
+            disabled={!props.unlocked || props.pendingMode !== null}
+            aria-busy={props.pendingMode === "paused_until" ? "true" : "false"}
             onClick={() =>
               props.onSetMode({
                 kind: "paused_until",
                 until: new Date(Date.now() + 15 * 60_000).toISOString(),
               })
             }
-            class="py-2 rounded-lg font-semibold cursor-pointer disabled:opacity-55"
+            class="py-2 rounded-lg font-semibold cursor-pointer inline-flex items-center justify-center gap-1.5 disabled:opacity-55"
             style={{
               background: isPaused()
                 ? "var(--c-amber-solid)"
@@ -193,20 +215,27 @@ export function SettingsView(props: SettingsViewProps) {
               border: "1px solid var(--c-border-strong)",
             }}
           >
-            Pause 15m
+            <Show when={props.pendingMode === "paused_until"}>
+              <SpinnerIcon size={12} />
+            </Show>
+            <span>Pause 15m</span>
           </button>
           <button
             type="button"
-            disabled={!props.unlocked}
+            disabled={!props.unlocked || props.pendingMode !== null}
+            aria-busy={props.pendingMode === "disabled" ? "true" : "false"}
             onClick={() => props.onSetMode({ kind: "disabled" })}
-            class="py-2 rounded-lg font-semibold cursor-pointer disabled:opacity-55"
+            class="py-2 rounded-lg font-semibold cursor-pointer inline-flex items-center justify-center gap-1.5 disabled:opacity-55"
             style={{
               background: isOff() ? "var(--c-red-solid)" : "var(--c-surface)",
               color: isOff() ? "#ffffff" : "var(--c-text)",
               border: "1px solid var(--c-border-strong)",
             }}
           >
-            Off
+            <Show when={props.pendingMode === "disabled"}>
+              <SpinnerIcon size={12} />
+            </Show>
+            <span>Off</span>
           </button>
         </div>
       </div>
@@ -262,8 +291,9 @@ export function SettingsView(props: SettingsViewProps) {
           </div>
           <button
             type="button"
+            disabled={pwBusy()}
             onClick={handleTogglePwForm}
-            class="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer"
+            class="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-55"
             style={{ background: "var(--c-pill)", color: "var(--c-text)" }}
           >
             {pwOpen() && props.unlocked ? "Cancel" : "Change"}
@@ -289,10 +319,11 @@ export function SettingsView(props: SettingsViewProps) {
                   id="curb-pw-current"
                   type={showPw() ? "text" : "password"}
                   autocomplete="current-password"
+                  disabled={pwBusy()}
                   value={currentPw()}
                   onInput={(e) => setCurrentPw(e.currentTarget.value)}
                   placeholder="Enter current password"
-                  class="w-full px-3 py-2 rounded-lg text-xs"
+                  class="w-full px-3 py-2 rounded-lg text-xs disabled:opacity-60"
                   style={{
                     background: "var(--c-surface)",
                     border: "1px solid var(--c-border-strong)",
@@ -314,10 +345,11 @@ export function SettingsView(props: SettingsViewProps) {
                 id="curb-pw-new"
                 type={showPw() ? "text" : "password"}
                 autocomplete="new-password"
+                disabled={pwBusy()}
                 value={newPw()}
                 onInput={(e) => setNewPw(e.currentTarget.value)}
                 placeholder="At least 4 characters"
-                class="w-full px-3 py-2 rounded-lg text-xs"
+                class="w-full px-3 py-2 rounded-lg text-xs disabled:opacity-60"
                 style={{
                   background: "var(--c-surface)",
                   border: "1px solid var(--c-border-strong)",
@@ -338,10 +370,11 @@ export function SettingsView(props: SettingsViewProps) {
                 id="curb-pw-confirm"
                 type={showPw() ? "text" : "password"}
                 autocomplete="new-password"
+                disabled={pwBusy()}
                 value={confirmPw()}
                 onInput={(e) => setConfirmPw(e.currentTarget.value)}
                 placeholder="Re-enter new password"
-                class="w-full px-3 py-2 rounded-lg text-xs"
+                class="w-full px-3 py-2 rounded-lg text-xs disabled:opacity-60"
                 style={{
                   background: "var(--c-surface)",
                   border: "1px solid var(--c-border-strong)",
@@ -369,6 +402,7 @@ export function SettingsView(props: SettingsViewProps) {
               >
                 <input
                   type="checkbox"
+                  disabled={pwBusy()}
                   checked={showPw()}
                   onChange={(e) => setShowPw(e.currentTarget.checked)}
                   class="w-3.5 h-3.5 cursor-pointer"
@@ -379,10 +413,14 @@ export function SettingsView(props: SettingsViewProps) {
               <button
                 type="submit"
                 disabled={pwBusy()}
-                class="px-3.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-60"
+                aria-busy={pwBusy() ? "true" : "false"}
+                class="px-3.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer inline-flex items-center gap-1.5 disabled:opacity-60"
                 style={{ background: "var(--c-accent)", color: "#ffffff" }}
               >
-                {pwBusy() ? "Updating…" : "Update Password"}
+                <Show when={pwBusy()}>
+                  <SpinnerIcon size={12} />
+                </Show>
+                <span>{pwBusy() ? "Updating…" : "Update Password"}</span>
               </button>
             </div>
           </form>
@@ -431,7 +469,7 @@ export function SettingsView(props: SettingsViewProps) {
               </div>
               <Switch
                 checked={props.baseline.dhcp}
-                disabled={!props.unlocked}
+                disabled={!props.unlocked || props.busyBaseline}
                 label="DHCP"
                 onChange={() =>
                   props.onUpdateBaseline({
@@ -451,7 +489,7 @@ export function SettingsView(props: SettingsViewProps) {
               </div>
               <Switch
                 checked={props.baseline.loopback}
-                disabled={!props.unlocked}
+                disabled={!props.unlocked || props.busyBaseline}
                 label="Loopback"
                 onChange={() =>
                   props.onUpdateBaseline({
@@ -471,7 +509,7 @@ export function SettingsView(props: SettingsViewProps) {
               </div>
               <Switch
                 checked={props.baseline.ntp}
-                disabled={!props.unlocked}
+                disabled={!props.unlocked || props.busyBaseline}
                 label="NTP Time Sync"
                 onChange={() =>
                   props.onUpdateBaseline({
@@ -491,7 +529,7 @@ export function SettingsView(props: SettingsViewProps) {
               </div>
               <Switch
                 checked={props.baseline.ncsi}
-                disabled={!props.unlocked}
+                disabled={!props.unlocked || props.busyBaseline}
                 label="Windows NCSI"
                 onChange={() =>
                   props.onUpdateBaseline({
@@ -528,15 +566,19 @@ export function SettingsView(props: SettingsViewProps) {
                 </div>
                 <button
                   type="button"
-                  disabled={!props.unlocked}
-                  onClick={() => void props.onUninstallService()}
-                  class="px-2.5 py-1.5 rounded-lg text-xs font-semibold shrink-0 cursor-pointer disabled:opacity-55"
+                  disabled={!props.unlocked || uninstalling()}
+                  aria-busy={uninstalling() ? "true" : "false"}
+                  onClick={() => void handleUninstall()}
+                  class="px-2.5 py-1.5 rounded-lg text-xs font-semibold shrink-0 cursor-pointer inline-flex items-center gap-1.5 disabled:opacity-55"
                   style={{
                     background: "var(--c-red-soft)",
                     color: "var(--c-red-text)",
                   }}
                 >
-                  Remove
+                  <Show when={uninstalling()}>
+                    <SpinnerIcon size={12} />
+                  </Show>
+                  <span>{uninstalling() ? "Removing…" : "Remove"}</span>
                 </button>
               </div>
             </Show>

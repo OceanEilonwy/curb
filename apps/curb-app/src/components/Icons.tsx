@@ -177,7 +177,7 @@ export function SearchIcon() {
   );
 }
 
-export function RefreshIcon() {
+export function RefreshIcon(props: { spinning?: boolean }) {
   return (
     <svg
       aria-hidden="true"
@@ -187,10 +187,39 @@ export function RefreshIcon() {
       fill="none"
       stroke="currentColor"
       stroke-width="2.2"
-      class="shrink-0"
+      class={`shrink-0 ${props.spinning ? "curb-spin" : ""}`}
     >
       <polyline points="23 4 23 10 17 10" />
       <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+    </svg>
+  );
+}
+
+export function SpinnerIcon(props: { size?: number }) {
+  const size = () => props.size ?? 13;
+  return (
+    <svg
+      aria-hidden="true"
+      width={size()}
+      height={size()}
+      viewBox="0 0 24 24"
+      fill="none"
+      class="shrink-0 curb-spin"
+    >
+      <circle
+        cx="12"
+        cy="12"
+        r="9"
+        stroke="currentColor"
+        stroke-width="2.8"
+        stroke-opacity="0.25"
+      />
+      <path
+        d="M21 12a9 9 0 0 0-9-9"
+        stroke="currentColor"
+        stroke-width="2.8"
+        stroke-linecap="round"
+      />
     </svg>
   );
 }

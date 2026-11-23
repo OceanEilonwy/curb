@@ -35,7 +35,14 @@ where
             continue;
         }
         let response = match serde_json::from_str::<IpcRequest>(&line) {
-            Ok(req) => engine.handle_request(req),
+            Ok(req) => {
+                let eng = engine.clone();
+                tokio::task::spawn_blocking(move || eng.handle_request(req))
+                    .await
+                    .unwrap_or_else(|e| IpcResponse::Error {
+                        message: format!("Internal service error: {e}"),
+                    })
+            }
             Err(e) => IpcResponse::Error {
                 message: format!("Malformed IPC request: {e}"),
             },

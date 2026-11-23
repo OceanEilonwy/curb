@@ -23,7 +23,7 @@ mod windows_impl {
     use std::path::Path;
 
     use curb_core::ipc::{BlockedEvent, RunningAppInfo};
-    use curb_core::verify::inspect_binary;
+    use curb_core::verify::peek_binary;
     use windows::core::PWSTR;
     use windows::Win32::Foundation::{BOOL, CloseHandle, HWND, LPARAM};
     use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -75,17 +75,19 @@ mod windows_impl {
             if Process32FirstW(snap, &mut entry).is_ok() {
                 loop {
                     let pid = entry.th32ProcessID;
-                    if let Some(full_path) = query_process_path(pid) {
-                        let exe_lower = Path::new(&full_path)
-                            .file_name()
-                            .map(|f| f.to_string_lossy().to_ascii_lowercase())
-                            .unwrap_or_default();
+                    if pid > 4 {
+                        if let Some(full_path) = query_process_path(pid) {
+                            let exe_lower = Path::new(&full_path)
+                                .file_name()
+                                .map(|f| f.to_string_lossy().to_ascii_lowercase())
+                                .unwrap_or_default();
 
-                        if !SYSTEM_EXCLUDED.contains(&exe_lower.as_str()) {
-                            let is_fg = visible_pids.contains(&pid);
-                            let slot = grouped.entry(full_path).or_insert((0, false));
-                            slot.0 += 1;
-                            slot.1 = slot.1 || is_fg;
+                            if !SYSTEM_EXCLUDED.contains(&exe_lower.as_str()) {
+                                let is_fg = visible_pids.contains(&pid);
+                                let slot = grouped.entry(full_path).or_insert((0, false));
+                                slot.0 += 1;
+                                slot.1 = slot.1 || is_fg;
+                            }
                         }
                     }
 
@@ -101,7 +103,7 @@ mod windows_impl {
         let mut apps = Vec::new();
         for (path_str, (count, has_window)) in grouped {
             let path = Path::new(&path_str);
-            let Ok(identity) = inspect_binary(path) else {
+            let Ok(identity) = peek_binary(path) else {
                 continue;
             };
             let display_name = identity
@@ -121,6 +123,12 @@ mod windows_impl {
                 .iter()
                 .find(|b| b.exe.eq_ignore_ascii_case(&identity.filename));
 
+            let signed = if identity.sha256.is_empty() {
+                identity.signature.is_some()
+            } else {
+                identity.signature.as_ref().is_some_and(|s| s.trusted)
+            };
+
             apps.push(RunningAppInfo {
                 key: format!("run-{}", identity.path.to_ascii_lowercase()),
                 name: display_name,
@@ -130,7 +138,7 @@ mod windows_impl {
                 background: !has_window,
                 tried_connect: blocked_match.is_some(),
                 tried_host: blocked_match.map(|b| b.destination.clone()),
-                signed: identity.signature.as_ref().is_some_and(|s| s.trusted),
+                signed,
                 signer: identity.signature.map(|s| s.subject_cn),
                 sha256: identity.sha256,
             });

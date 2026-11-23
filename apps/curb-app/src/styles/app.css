@@ -144,9 +144,28 @@ select:focus-visible,
   cursor: not-allowed;
 }
 
+:where(button):disabled,
+:where(select):disabled,
+:where(input):disabled {
+  cursor: not-allowed;
+}
+
+@keyframes curb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.curb-spin {
+  animation: curb-spin 0.75s linear infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::after {
     transition: none !important;
+  }
+  .curb-spin {
+    animation-duration: 1.5s;
   }
 }

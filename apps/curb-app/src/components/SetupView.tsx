@@ -1,5 +1,5 @@
 import { createSignal, Show } from "solid-js";
-import { CheckIcon, ShieldIcon, WarnIcon } from "./Icons";
+import { CheckIcon, ShieldIcon, SpinnerIcon, WarnIcon } from "./Icons";
 
 interface SetupViewProps {
   onSelectFull: () => Promise<void>;
@@ -87,12 +87,13 @@ export function SetupView(props: SetupViewProps) {
         <button
           type="button"
           role="radio"
+          disabled={busy()}
           aria-checked={choice() === "full" ? "true" : "false"}
           onClick={() => {
             setChoice("full");
             setError(null);
           }}
-          class="w-full text-left p-4 rounded-xl space-y-2 cursor-pointer transition-colors"
+          class="w-full text-left p-4 rounded-xl space-y-2 cursor-pointer transition-colors disabled:opacity-65"
           style={{
             background:
               choice() === "full" ? "var(--c-accent-soft)" : "var(--c-card)",
@@ -157,12 +158,13 @@ export function SetupView(props: SetupViewProps) {
         <button
           type="button"
           role="radio"
+          disabled={busy()}
           aria-checked={choice() === "standard" ? "true" : "false"}
           onClick={() => {
             setChoice("standard");
             setError(null);
           }}
-          class="w-full text-left p-4 rounded-xl space-y-2 cursor-pointer transition-colors"
+          class="w-full text-left p-4 rounded-xl space-y-2 cursor-pointer transition-colors disabled:opacity-65"
           style={{
             background:
               choice() === "standard"
@@ -248,10 +250,11 @@ export function SetupView(props: SetupViewProps) {
               <input
                 id="setup-pw"
                 type="password"
+                disabled={busy()}
                 value={password()}
                 onInput={(e) => setPassword(e.currentTarget.value)}
                 placeholder="New password (min 4 characters)"
-                class="w-full px-3 py-2 rounded-lg text-xs"
+                class="w-full px-3 py-2 rounded-lg text-xs disabled:opacity-60"
                 style={{
                   background: "var(--c-surface)",
                   border: "1px solid var(--c-border-strong)",
@@ -266,10 +269,11 @@ export function SetupView(props: SetupViewProps) {
               <input
                 id="setup-pw-confirm"
                 type="password"
+                disabled={busy()}
                 value={confirm()}
                 onInput={(e) => setConfirm(e.currentTarget.value)}
                 placeholder="Confirm password"
-                class="w-full px-3 py-2 rounded-lg text-xs"
+                class="w-full px-3 py-2 rounded-lg text-xs disabled:opacity-60"
                 style={{
                   background: "var(--c-surface)",
                   border: "1px solid var(--c-border-strong)",
@@ -309,16 +313,22 @@ export function SetupView(props: SetupViewProps) {
         <button
           type="submit"
           disabled={busy()}
-          class="px-4 py-2 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-60"
+          aria-busy={busy() ? "true" : "false"}
+          class="px-4 py-2 rounded-lg text-xs font-semibold cursor-pointer inline-flex items-center gap-1.5 disabled:opacity-60"
           style={{ background: "var(--c-accent)", color: "#ffffff" }}
         >
-          {busy()
-            ? choice() === "full"
-              ? "Installing Service…"
-              : "Starting…"
-            : choice() === "full"
-            ? "Set Up Full Protection"
-            : "Start Standard Mode"}
+          <Show when={busy()}>
+            <SpinnerIcon size={12} />
+          </Show>
+          <span>
+            {busy()
+              ? choice() === "full"
+                ? "Installing Service…"
+                : "Starting…"
+              : choice() === "full"
+              ? "Set Up Full Protection"
+              : "Start Standard Mode"}
+          </span>
         </button>
       </div>
     </form>

@@ -1,11 +1,37 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::sync::{OnceLock, RwLock};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::Result;
+
+type CacheKey = (String, u64, SystemTime);
+const MAX_CACHE_ENTRIES: usize = 4096;
+
+fn full_inspect_cache() -> &'static RwLock<HashMap<CacheKey, BinaryIdentity>> {
+    static CACHE: OnceLock<RwLock<HashMap<CacheKey, BinaryIdentity>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn peek_inspect_cache() -> &'static RwLock<HashMap<CacheKey, BinaryIdentity>> {
+    static CACHE: OnceLock<RwLock<HashMap<CacheKey, BinaryIdentity>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn cache_key(path: &Path) -> Option<CacheKey> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    Some((
+        path.to_string_lossy().to_ascii_lowercase(),
+        meta.len(),
+        modified,
+    ))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SignatureInfo {
@@ -46,7 +72,18 @@ pub fn compute_sha256(path: &Path) -> Result<String> {
 
 /// Inspects an executable: computes SHA-256 and, on Windows, verifies its
 /// Authenticode signature (`WinVerifyTrust`) and extracts certificate & PE metadata.
+///
+/// Results are cached in-memory keyed by `(lowercased path, file size, mtime)`.
 pub fn inspect_binary(path: &Path) -> Result<BinaryIdentity> {
+    let key = cache_key(path);
+    if let Some(ref k) = key {
+        if let Ok(cache) = full_inspect_cache().read() {
+            if let Some(cached) = cache.get(k) {
+                return Ok(cached.clone());
+            }
+        }
+    }
+
     let sha256 = compute_sha256(path)?;
     let filename = path
         .file_name()
@@ -60,7 +97,7 @@ pub fn inspect_binary(path: &Path) -> Result<BinaryIdentity> {
     #[cfg(not(windows))]
     let (signature, product_name, original_filename, file_description) = (None, None, None, None);
 
-    Ok(BinaryIdentity {
+    let identity = BinaryIdentity {
         path: path.to_string_lossy().to_string(),
         filename,
         sha256,
@@ -68,7 +105,80 @@ pub fn inspect_binary(path: &Path) -> Result<BinaryIdentity> {
         product_name,
         original_filename,
         file_description,
-    })
+    };
+
+    if let Some(k) = key {
+        if let Ok(mut cache) = full_inspect_cache().write() {
+            if cache.len() >= MAX_CACHE_ENTRIES {
+                cache.clear();
+            }
+            cache.insert(k, identity.clone());
+        }
+    }
+
+    Ok(identity)
+}
+
+/// Fast, non-hashing metadata inspection for listing many executables (running
+/// processes or installed Steam games) without stalling on full-file SHA-256
+/// reads or `WinVerifyTrust`.
+///
+/// If the file has already been fully verified via `inspect_binary`, the full
+/// cached `BinaryIdentity` (with `sha256` and `WinVerifyTrust` result) is
+/// returned immediately. Otherwise `sha256` is empty and only the embedded
+/// signer certificate metadata (if any) is read. Callers must perform a full
+/// `inspect_binary` before persisting a security rule when `sha256` is empty.
+pub fn peek_binary(path: &Path) -> Result<BinaryIdentity> {
+    let meta = std::fs::metadata(path)?;
+    let key = meta
+        .modified()
+        .ok()
+        .map(|m| (path.to_string_lossy().to_ascii_lowercase(), meta.len(), m));
+
+    if let Some(ref k) = key {
+        if let Ok(cache) = full_inspect_cache().read() {
+            if let Some(cached) = cache.get(k) {
+                return Ok(cached.clone());
+            }
+        }
+        if let Ok(cache) = peek_inspect_cache().read() {
+            if let Some(cached) = cache.get(k) {
+                return Ok(cached.clone());
+            }
+        }
+    }
+
+    let filename = path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    #[cfg(windows)]
+    let signature = windows_impl::peek_authenticode_signer(path);
+
+    #[cfg(not(windows))]
+    let signature = None;
+
+    let identity = BinaryIdentity {
+        path: path.to_string_lossy().to_string(),
+        filename,
+        sha256: String::new(),
+        signature,
+        product_name: None,
+        original_filename: None,
+        file_description: None,
+    };
+
+    if let Some(k) = key {
+        if let Ok(mut cache) = peek_inspect_cache().write() {
+            if cache.len() >= MAX_CACHE_ENTRIES {
+                cache.clear();
+            }
+            cache.insert(k, identity.clone());
+        }
+    }
+
+    Ok(identity)
 }
 
 #[cfg(windows)]
@@ -90,7 +200,8 @@ mod windows_impl {
     };
     use windows::Win32::Security::WinTrust::{
         WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
-        WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE,
+        WINTRUST_FILE_INFO, WTD_CACHE_ONLY_URL_RETRIEVAL, WTD_CHOICE_FILE,
+        WTD_REVOCATION_CHECK_NONE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE,
         WTD_STATEACTION_VERIFY, WTD_UI_NONE,
     };
 
@@ -111,6 +222,15 @@ mod windows_impl {
         (signature, None, None, None)
     }
 
+    pub fn peek_authenticode_signer(path: &Path) -> Option<SignatureInfo> {
+        let wide: Vec<u16> = OsStr::new(path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        read_signer_certificate(&wide, false)
+    }
+
     fn verify_wintrust(wide_path: &[u16]) -> bool {
         let mut file_info = WINTRUST_FILE_INFO {
             cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
@@ -128,6 +248,9 @@ mod windows_impl {
                 pFile: &mut file_info,
             },
             dwStateAction: WTD_STATEACTION_VERIFY,
+            // Never perform network AIA/CRL/OCSP/CTL fetches; Curb blocks outbound
+            // internet by default, so online URL retrieval causes multi-second hangs.
+            dwProvFlags: WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE,
             ..Default::default()
         };
 
@@ -271,6 +394,31 @@ mod tests {
             identity.sha256,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn peek_skips_hashing_and_reuses_full_cache() {
+        let tmp = std::env::temp_dir().join(format!("curb_peek_{}.exe", uuid::Uuid::new_v4()));
+        std::fs::write(&tmp, b"abc").unwrap();
+
+        let peeked = peek_binary(&tmp).unwrap();
+        assert!(peeked.sha256.is_empty());
+        assert_eq!(
+            peeked.filename,
+            tmp.file_name().unwrap().to_string_lossy()
+        );
+
+        let full = inspect_binary(&tmp).unwrap();
+        assert_eq!(
+            full.sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        // Once fully inspected, peek_binary should return the full cached identity.
+        let peeked_cached = peek_binary(&tmp).unwrap();
+        assert_eq!(peeked_cached.sha256, full.sha256);
+
         let _ = std::fs::remove_file(&tmp);
     }
 }

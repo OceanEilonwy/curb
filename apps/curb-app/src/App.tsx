@@ -13,7 +13,7 @@ import type {
 import { AllowAppSheet } from "./components/AllowAppSheet";
 import { AllowedView } from "./components/AllowedView";
 import { BlockedView } from "./components/BlockedView";
-import { LockIcon, PlusIcon, ShieldIcon, UnlockIcon } from "./components/Icons";
+import { LockIcon, PlusIcon, ShieldIcon, SpinnerIcon, UnlockIcon } from "./components/Icons";
 import { SettingsView } from "./components/SettingsView";
 import { SetupView } from "./components/SetupView";
 import { UnlockModal } from "./components/UnlockModal";
@@ -26,13 +26,34 @@ export default function App() {
   );
   const [token, setToken] = createSignal<string | null>(null);
   const [unlockOpen, setUnlockOpen] = createSignal(false);
+  const [pendingOpenAllow, setPendingOpenAllow] = createSignal(false);
   const [toast, setToast] = createSignal<string | null>(null);
 
   const [snapshot, setSnapshot] = createSignal<ServiceSnapshot | null>(null);
   const [runningApps, setRunningApps] = createSignal<RunningAppInfo[]>([]);
   const [steamGames, setSteamGames] = createSignal<DiscoveredSteamGame[]>([]);
+  const [loadingRunningApps, setLoadingRunningApps] = createSignal(false);
+  const [loadingSteamGames, setLoadingSteamGames] = createSignal(false);
+
+  const [locking, setLocking] = createSignal(false);
+  const [hidingToTray, setHidingToTray] = createSignal(false);
+  const [busySteam, setBusySteam] = createSignal(false);
+  const [busyBaseline, setBusyBaseline] = createSignal(false);
+  const [pendingMode, setPendingMode] = createSignal<
+    EnforcementMode["kind"] | null
+  >(null);
+  const [busyRuleIds, setBusyRuleIds] = createSignal<Record<string, boolean>>(
+    {}
+  );
+  const [deletingRuleId, setDeletingRuleId] = createSignal<string | null>(null);
+  const [allowingBlockedId, setAllowingBlockedId] = createSignal<string | null>(
+    null
+  );
 
   let toastTimer: number | undefined;
+  let runningReqId = 0;
+  let steamReqId = 0;
+
   function showToast(msg: string) {
     setToast(msg);
     if (toastTimer) window.clearTimeout(toastTimer);
@@ -51,8 +72,12 @@ export default function App() {
   void refreshSnapshot();
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
-      if (unlockOpen()) setUnlockOpen(false);
-      else if (screen() === "add") setScreen("main");
+      if (unlockOpen()) {
+        setUnlockOpen(false);
+        setPendingOpenAllow(false);
+      } else if (screen() === "add") {
+        setScreen("main");
+      }
     }
   });
 
@@ -65,13 +90,51 @@ export default function App() {
     }
   }
 
-  async function refreshPickerSources() {
-    const [apps, games] = await Promise.all([
-      curbApi.listRunningApps(),
-      curbApi.listSteamGames(),
-    ]);
-    setRunningApps(apps);
-    setSteamGames(games);
+  async function refreshRunningApps() {
+    const reqId = ++runningReqId;
+    setLoadingRunningApps(true);
+    try {
+      const apps = await curbApi.listRunningApps();
+      if (reqId === runningReqId) {
+        setRunningApps(apps);
+      }
+    } catch (err) {
+      if (reqId === runningReqId) {
+        showToast(
+          `Could not list running apps: ${err instanceof Error ? err.message : err}`
+        );
+      }
+    } finally {
+      if (reqId === runningReqId) {
+        setLoadingRunningApps(false);
+      }
+    }
+  }
+
+  async function refreshSteamGames() {
+    const reqId = ++steamReqId;
+    setLoadingSteamGames(true);
+    try {
+      const games = await curbApi.listSteamGames();
+      if (reqId === steamReqId) {
+        setSteamGames(games);
+      }
+    } catch (err) {
+      if (reqId === steamReqId) {
+        showToast(
+          `Could not scan Steam games: ${err instanceof Error ? err.message : err}`
+        );
+      }
+    } finally {
+      if (reqId === steamReqId) {
+        setLoadingSteamGames(false);
+      }
+    }
+  }
+
+  function refreshPickerSources() {
+    void refreshRunningApps();
+    void refreshSteamGames();
   }
 
   function requireToken(): string | null {
@@ -89,89 +152,164 @@ export default function App() {
     setUnlockOpen(false);
     showToast("Unlocked · auto-locks when closed");
     await refreshSnapshot();
+    if (pendingOpenAllow()) {
+      setPendingOpenAllow(false);
+      setScreen("add");
+      refreshPickerSources();
+    }
   }
 
   async function handleLock() {
-    const t = token();
-    if (t) await curbApi.lock(t);
-    setToken(null);
-    if (screen() === "add") setScreen("main");
-    showToast("Locked");
+    if (locking()) return;
+    setLocking(true);
+    try {
+      const t = token();
+      if (t) await curbApi.lock(t);
+      setToken(null);
+      setPendingOpenAllow(false);
+      if (screen() === "add") setScreen("main");
+      showToast("Locked");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLocking(false);
+    }
   }
 
   async function handleCloseToTray() {
-    const t = token();
-    setToken(null);
-    setScreen("main");
-    await curbApi.hideToTray(t);
-    showToast("Hidden to taskbar tray · locked");
+    if (hidingToTray()) return;
+    setHidingToTray(true);
+    try {
+      const t = token();
+      setToken(null);
+      setPendingOpenAllow(false);
+      setScreen("main");
+      await curbApi.hideToTray(t);
+      showToast("Hidden to taskbar tray · locked");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setHidingToTray(false);
+    }
   }
 
-  async function openAllowSheet() {
-    if (!requireToken()) return;
-    await refreshPickerSources();
+  function openAllowSheet() {
+    if (!requireToken()) {
+      setPendingOpenAllow(true);
+      return;
+    }
+    // Open immediately so the button responds instantaneously while sources load in parallel.
     setScreen("add");
+    refreshPickerSources();
   }
 
-  async function handleUpdateSteam(steam: SteamPresetConfig) {
+  async function handleUpdateSteam(steam: SteamPresetConfig): Promise<boolean> {
     const t = requireToken();
-    if (!t) return;
-    setSnapshot(await curbApi.updateSteamPreset(t, steam));
+    if (!t || busySteam()) return false;
+    setBusySteam(true);
+    try {
+      setSnapshot(await curbApi.updateSteamPreset(t, steam));
+      return true;
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+      return false;
+    } finally {
+      setBusySteam(false);
+    }
   }
 
   async function handleUpdateBaseline(baseline: BaselinePolicy) {
     const t = requireToken();
-    if (!t) return;
-    setSnapshot(await curbApi.updateBaseline(t, baseline));
+    if (!t || busyBaseline()) return;
+    setBusyBaseline(true);
+    try {
+      setSnapshot(await curbApi.updateBaseline(t, baseline));
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyBaseline(false);
+    }
   }
 
   async function handleSetMode(mode: EnforcementMode) {
     const t = requireToken();
-    if (!t) return;
-    setSnapshot(await curbApi.setMode(t, mode));
-    showToast(
-      mode.kind === "enforcing"
-        ? "Protection on"
-        : mode.kind === "paused_until"
-        ? "Paused for 15 minutes"
-        : "Protection off"
-    );
+    if (!t || pendingMode() !== null) return;
+    setPendingMode(mode.kind);
+    try {
+      setSnapshot(await curbApi.setMode(t, mode));
+      showToast(
+        mode.kind === "enforcing"
+          ? "Protection on"
+          : mode.kind === "paused_until"
+          ? "Paused for 15 minutes"
+          : "Protection off"
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPendingMode(null);
+    }
   }
 
   async function handleUpsertRule(rule: Rule) {
     const t = requireToken();
     if (!t) return;
-    setSnapshot(await curbApi.upsertRule(t, rule));
-    setScreen("main");
-    setTab("allowed");
-    showToast(`Saved ${rule.name}`);
+    setBusyRuleIds((prev) => ({ ...prev, [rule.id]: true }));
+    try {
+      setSnapshot(await curbApi.upsertRule(t, rule));
+      setScreen("main");
+      setTab("allowed");
+      showToast(`Saved ${rule.name}`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyRuleIds((prev) => {
+        const next = { ...prev };
+        delete next[rule.id];
+        return next;
+      });
+    }
   }
 
   async function handleDeleteRule(id: string) {
     const t = requireToken();
-    if (!t) return;
-    setSnapshot(await curbApi.deleteRule(t, id));
-    showToast("Removed rule");
+    if (!t || deletingRuleId() !== null) return;
+    setDeletingRuleId(id);
+    try {
+      setSnapshot(await curbApi.deleteRule(t, id));
+      showToast("Removed rule");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeletingRuleId(null);
+    }
   }
 
   async function handleAllowBlocked(ev: BlockedEvent) {
     const t = requireToken();
-    if (!t) return;
+    if (!t || allowingBlockedId() !== null) return;
     const snap = snapshot();
     if (!snap) return;
 
     if (ev.is_steam_community) {
-      await handleUpdateSteam({
-        ...snap.config.presets.steam,
-        enabled: true,
-        community_and_workshop: true,
-      });
-      setTab("allowed");
-      showToast("Enabled Steam Community");
+      setAllowingBlockedId(ev.id);
+      try {
+        const ok = await handleUpdateSteam({
+          ...snap.config.presets.steam,
+          enabled: true,
+          community_and_workshop: true,
+        });
+        if (ok) {
+          setTab("allowed");
+          showToast("Enabled Steam Community");
+        }
+      } finally {
+        setAllowingBlockedId(null);
+      }
       return;
     }
 
-    await openAllowSheet();
+    openAllowSheet();
   }
 
   async function handleInspectPath(path: string): Promise<RunningAppInfo | null> {
@@ -292,10 +430,12 @@ export default function App() {
         when={snapshot()}
         fallback={
           <div
-            class="flex-1 flex items-center justify-center text-xs"
+            role="status"
+            class="flex-1 flex items-center justify-center gap-2 text-xs"
             style={{ color: "var(--c-text-sec)" }}
           >
-            Connecting to Curb…
+            <SpinnerIcon size={14} />
+            <span>Connecting to Curb…</span>
           </div>
         }
       >
@@ -315,11 +455,13 @@ export default function App() {
                 <AllowAppSheet
                   runningApps={runningApps()}
                   steamGames={steamGames()}
+                  loadingRunning={loadingRunningApps()}
+                  loadingSteam={loadingSteamGames()}
                   existingRules={snap().config.rules}
-                  onRefresh={() => void refreshPickerSources()}
+                  onRefresh={refreshPickerSources}
                   onInspectPath={handleInspectPath}
                   onCancel={() => setScreen("main")}
-                  onConfirm={(rule) => void handleUpsertRule(rule)}
+                  onConfirm={handleUpsertRule}
                 />
               }
             >
@@ -362,10 +504,12 @@ export default function App() {
                 <div class="flex items-center gap-1.5 shrink-0">
                   <button
                     type="button"
+                    disabled={locking() || hidingToTray()}
+                    aria-busy={locking() ? "true" : "false"}
                     onClick={() =>
                       token() ? void handleLock() : setUnlockOpen(true)
                     }
-                    class="text-xs font-semibold px-2.5 py-1.5 rounded-lg inline-flex items-center gap-1.5 cursor-pointer"
+                    class="text-xs font-semibold px-2.5 py-1.5 rounded-lg inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
                     style={{
                       background: token()
                         ? "var(--c-amber-soft)"
@@ -375,17 +519,28 @@ export default function App() {
                         : "var(--c-text)",
                     }}
                   >
-                    {token() ? <UnlockIcon /> : <LockIcon />}
-                    {token() ? "Lock" : "Unlock"}
+                    <Show
+                      when={!locking()}
+                      fallback={<SpinnerIcon size={12} />}
+                    >
+                      {token() ? <UnlockIcon /> : <LockIcon />}
+                    </Show>
+                    <span>
+                      {locking() ? "Locking…" : token() ? "Lock" : "Unlock"}
+                    </span>
                   </button>
                   <button
                     type="button"
+                    disabled={hidingToTray()}
+                    aria-busy={hidingToTray() ? "true" : "false"}
                     onClick={() => void handleCloseToTray()}
                     aria-label="Hide to taskbar tray"
-                    class="w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer text-base"
+                    class="w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer text-base disabled:opacity-60"
                     style={{ color: "var(--c-text-sec)" }}
                   >
-                    &times;
+                    <Show when={!hidingToTray()} fallback={<SpinnerIcon size={13} />}>
+                      &times;
+                    </Show>
                   </button>
                 </div>
               </div>
@@ -436,6 +591,9 @@ export default function App() {
                   unlocked={!!token()}
                   steam={snap().config.presets.steam}
                   rules={snap().config.rules}
+                  busySteam={busySteam()}
+                  busyRuleIds={busyRuleIds()}
+                  deletingRuleId={deletingRuleId()}
                   onRequireUnlock={() => setUnlockOpen(true)}
                   onUpdateSteam={(s) => void handleUpdateSteam(s)}
                   onUpdateRule={(r) => void handleUpsertRule(r)}
@@ -446,6 +604,7 @@ export default function App() {
               <Show when={tab() === "blocked"}>
                 <BlockedView
                   events={snap().blocked_events}
+                  allowingId={allowingBlockedId()}
                   onAllowEvent={(ev) => void handleAllowBlocked(ev)}
                 />
               </Show>
@@ -456,7 +615,9 @@ export default function App() {
                   passwordConfigured={snap().password_configured}
                   protectionTier={snap().protection_tier}
                   mode={snap().config.mode}
+                  pendingMode={pendingMode()}
                   baseline={snap().config.baseline}
+                  busyBaseline={busyBaseline()}
                   theme={theme()}
                   onRequireUnlock={() => setUnlockOpen(true)}
                   onUpgradeToFull={handleUpgradeToFull}
@@ -488,8 +649,9 @@ export default function App() {
                 </span>
                 <button
                   type="button"
-                  onClick={() => void openAllowSheet()}
-                  class="px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                  disabled={locking() || hidingToTray()}
+                  onClick={openAllowSheet}
+                  class="px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
                   style={{ background: "var(--c-accent)", color: "#ffffff" }}
                 >
                   <PlusIcon />
@@ -524,7 +686,10 @@ export default function App() {
       <UnlockModal
         open={unlockOpen()}
         passwordConfigured={snapshot()?.password_configured ?? true}
-        onClose={() => setUnlockOpen(false)}
+        onClose={() => {
+          setUnlockOpen(false);
+          setPendingOpenAllow(false);
+        }}
         onUnlock={handleUnlock}
       />
     </div>
