@@ -116,9 +116,7 @@ fn main() {
             }
             #[cfg(windows)]
             {
-                let _ = std::process::Command::new("sc.exe")
-                    .args(["stop", "CurbService"])
-                    .status();
+                let _ = win_scm::stop_service_if_running();
             }
             match curb_core::cleanup::purge_all_curb_wfp_objects() {
                 Ok(n) => println!("Removed {n} Curb WFP firewall filters."),
@@ -140,9 +138,9 @@ fn main() {
             println!("Curb mode set to Enforcing.");
             #[cfg(windows)]
             {
-                let _ = std::process::Command::new("sc.exe")
-                    .args(["start", "CurbService"])
-                    .status();
+                if let Err(e) = win_scm::start_service() {
+                    eprintln!("Warning: could not start CurbService: {e}");
+                }
             }
         }
 
@@ -166,23 +164,25 @@ fn main() {
                     std::process::exit(1);
                 }
 
-                // Stop any prior CurbService instance before replacing binaries.
-                let _ = std::process::Command::new("sc.exe")
-                    .args(["stop", "CurbService"])
-                    .status();
-                std::thread::sleep(std::time::Duration::from_millis(400));
+                // Stop any prior CurbService instance and wait for it to release the binary.
+                let _ = win_scm::stop_service_if_running();
 
                 let installed_service = bin_dir.join("curb-service.exe");
-                if let Err(e) = std::fs::copy(&source_service, &installed_service) {
-                    eprintln!(
-                        "Failed to copy {} to {}: {e}",
-                        source_service.display(),
-                        installed_service.display()
-                    );
-                    std::process::exit(1);
+                if source_service != installed_service {
+                    if let Err(e) = std::fs::copy(&source_service, &installed_service) {
+                        eprintln!(
+                            "Failed to copy {} to {}: {e}",
+                            source_service.display(),
+                            installed_service.display()
+                        );
+                        std::process::exit(1);
+                    }
                 }
                 if let Ok(self_exe) = std::env::current_exe() {
-                    let _ = std::fs::copy(&self_exe, bin_dir.join("curb-cli.exe"));
+                    let target_cli = bin_dir.join("curb-cli.exe");
+                    if self_exe != target_cli {
+                        let _ = std::fs::copy(&self_exe, &target_cli);
+                    }
                 }
 
                 // Optionally migrate config & password from Standard Mode (%LOCALAPPDATA%\Curb).
@@ -196,47 +196,31 @@ fn main() {
                     }
                 }
 
-                // Lock down ProgramData\Curb ACLs: SYSTEM & Administrators full control, Users read-only.
+                // Lock down ProgramData\Curb ACLs using locale-independent well-known SIDs:
+                // SYSTEM (*S-1-5-18) & Administrators (*S-1-5-32-544) full control,
+                // Users (*S-1-5-32-545) read-only.
                 let dir_str = data_dir.to_string_lossy().to_string();
                 let _ = std::process::Command::new("icacls.exe")
                     .args([
                         &dir_str,
                         "/inheritance:r",
                         "/grant:r",
-                        "SYSTEM:(OI)(CI)F",
+                        "*S-1-5-18:(OI)(CI)F",
                         "/grant:r",
-                        "Administrators:(OI)(CI)F",
+                        "*S-1-5-32-544:(OI)(CI)F",
                         "/grant:r",
-                        "Users:(OI)(CI)RX",
+                        "*S-1-5-32-545:(OI)(CI)RX",
                     ])
                     .status();
 
-                let _ = std::process::Command::new("sc.exe")
-                    .args(["delete", "CurbService"])
-                    .status();
-                std::thread::sleep(std::time::Duration::from_millis(300));
-
-                let bin_arg = format!("binPath= \"{}\"", installed_service.display());
-                let status = std::process::Command::new("sc.exe")
-                    .args([
-                        "create",
-                        "CurbService",
-                        &bin_arg,
-                        "start=",
-                        "auto",
-                        "DisplayName=",
-                        "Curb Internet Limiter Service",
-                    ])
-                    .status();
-                match status {
-                    Ok(s) if s.success() => {
-                        let _ = std::process::Command::new("sc.exe")
-                            .args(["start", "CurbService"])
-                            .status();
+                match win_scm::install_and_start_service(&installed_service) {
+                    Ok(()) => {
                         println!("CurbService installed and started.");
                     }
-                    _ => {
-                        eprintln!("Failed to install CurbService. Run from an elevated Administrator prompt.");
+                    Err(e) => {
+                        eprintln!(
+                            "Failed to install or start CurbService: {e}\nRun from an elevated Administrator prompt."
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -251,13 +235,9 @@ fn main() {
         Commands::Uninstall => {
             #[cfg(windows)]
             {
-                let _ = std::process::Command::new("sc.exe")
-                    .args(["stop", "CurbService"])
-                    .status();
-                std::thread::sleep(std::time::Duration::from_millis(400));
-                let _ = std::process::Command::new("sc.exe")
-                    .args(["delete", "CurbService"])
-                    .status();
+                if let Err(e) = win_scm::uninstall_service() {
+                    eprintln!("Warning: service removal reported: {e}");
+                }
 
                 // Always purge persistent WFP default-deny filters & restore original adapter DNS!
                 match curb_core::cleanup::purge_all_curb_wfp_objects() {
@@ -277,5 +257,172 @@ fn main() {
                 eprintln!("Windows service uninstallation is only supported on Windows.");
             }
         }
+    }
+}
+
+#[cfg(windows)]
+mod win_scm {
+    use std::ffi::{OsStr, OsString};
+    use std::path::Path;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use windows_service::service::{
+        Service, ServiceAccess, ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceState,
+        ServiceType,
+    };
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    const SERVICE_NAME: &str = "CurbService";
+    const SERVICE_DISPLAY_NAME: &str = "Curb Internet Limiter Service";
+    const SERVICE_DESCRIPTION: &str =
+        "Default-deny Windows Firewall and DNS enforcement service for Curb.";
+
+    pub fn stop_service_if_running() -> Result<(), String> {
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+                .map_err(|e| format!("OpenSCManager failed: {e}"))?;
+
+        let Ok(service) = manager.open_service(
+            SERVICE_NAME,
+            ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
+        ) else {
+            return Ok(());
+        };
+
+        stop_and_wait(&service, Duration::from_secs(10))
+    }
+
+    pub fn start_service() -> Result<(), String> {
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+                .map_err(|e| format!("OpenSCManager failed: {e}"))?;
+
+        let service = manager
+            .open_service(
+                SERVICE_NAME,
+                ServiceAccess::START | ServiceAccess::QUERY_STATUS,
+            )
+            .map_err(|e| format!("OpenService({SERVICE_NAME}) failed: {e}"))?;
+
+        start_and_wait(&service, Duration::from_secs(10))
+    }
+
+    pub fn install_and_start_service(executable_path: &Path) -> Result<(), String> {
+        let manager = ServiceManager::local_computer(
+            None::<&str>,
+            ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
+        )
+        .map_err(|e| format!("OpenSCManager failed: {e}"))?;
+
+        let info = ServiceInfo {
+            name: OsString::from(SERVICE_NAME),
+            display_name: OsString::from(SERVICE_DISPLAY_NAME),
+            service_type: ServiceType::OWN_PROCESS,
+            start_type: ServiceStartType::AutoStart,
+            error_control: ServiceErrorControl::Normal,
+            executable_path: executable_path.to_path_buf(),
+            launch_arguments: Vec::new(),
+            dependencies: Vec::new(),
+            account_name: None, // LocalSystem
+            account_password: None,
+        };
+
+        let access = ServiceAccess::CHANGE_CONFIG
+            | ServiceAccess::START
+            | ServiceAccess::QUERY_STATUS;
+
+        // Prefer updating an existing service in place so reinstall/repair succeeds even if
+        // services.msc is open (which would otherwise cause DeleteService -> ERROR 1072).
+        let service = match manager.open_service(SERVICE_NAME, access) {
+            Ok(existing) => {
+                existing
+                    .change_config(&info)
+                    .map_err(|e| format!("ChangeServiceConfig failed: {e}"))?;
+                existing
+            }
+            Err(_) => manager
+                .create_service(&info, access)
+                .map_err(|e| format!("CreateService failed: {e}"))?,
+        };
+
+        let _ = service.set_description(SERVICE_DESCRIPTION);
+
+        start_and_wait(&service, Duration::from_secs(10))
+    }
+
+    pub fn uninstall_service() -> Result<(), String> {
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+                .map_err(|e| format!("OpenSCManager failed: {e}"))?;
+
+        let Ok(service) = manager.open_service(
+            SERVICE_NAME,
+            ServiceAccess::STOP | ServiceAccess::DELETE | ServiceAccess::QUERY_STATUS,
+        ) else {
+            return Ok(());
+        };
+
+        let _ = stop_and_wait(&service, Duration::from_secs(10));
+        service
+            .delete()
+            .map_err(|e| format!("DeleteService failed: {e}"))
+    }
+
+    fn stop_and_wait(service: &Service, timeout: Duration) -> Result<(), String> {
+        let status = service
+            .query_status()
+            .map_err(|e| format!("QueryServiceStatus failed: {e}"))?;
+        if status.current_state == ServiceState::Stopped {
+            return Ok(());
+        }
+
+        if status.current_state != ServiceState::StopPending {
+            let _ = service.stop();
+        }
+
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Ok(st) = service.query_status() {
+                if st.current_state == ServiceState::Stopped {
+                    return Ok(());
+                }
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+
+        Err("Timed out waiting for CurbService to stop".into())
+    }
+
+    fn start_and_wait(service: &Service, timeout: Duration) -> Result<(), String> {
+        let status = service
+            .query_status()
+            .map_err(|e| format!("QueryServiceStatus failed: {e}"))?;
+        if status.current_state == ServiceState::Running {
+            return Ok(());
+        }
+
+        service
+            .start(&[] as &[&OsStr])
+            .map_err(|e| format!("StartService failed: {e}"))?;
+
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Ok(st) = service.query_status() {
+                match st.current_state {
+                    ServiceState::Running => return Ok(()),
+                    ServiceState::Stopped => {
+                        return Err(format!(
+                            "CurbService stopped immediately after start (exit_code={:?})",
+                            st.exit_code
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+
+        Err("Timed out waiting for CurbService to reach Running state".into())
     }
 }

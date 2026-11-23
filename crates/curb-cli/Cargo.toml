@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 clap.workspace = true
 curb-core = { path = "../curb-core" }
+
+[target.'cfg(windows)'.dependencies]
+windows-service.workspace = true

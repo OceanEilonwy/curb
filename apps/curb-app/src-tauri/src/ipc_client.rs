@@ -10,11 +10,28 @@ pub async fn send_request(req: &IpcRequest) -> Result<IpcResponse, String> {
     #[cfg(windows)]
     {
         use curb_core::ipc::WINDOWS_PIPE_NAME;
+        use std::time::Duration;
         use tokio::net::windows::named_pipe::ClientOptions;
 
-        let mut client = ClientOptions::new()
-            .open(WINDOWS_PIPE_NAME)
-            .map_err(|e| format!("Could not connect to CurbService ({WINDOWS_PIPE_NAME}): {e}"))?;
+        const ERROR_PIPE_BUSY: i32 = 231;
+
+        let mut client = {
+            let mut attempts = 0u8;
+            loop {
+                match ClientOptions::new().open(WINDOWS_PIPE_NAME) {
+                    Ok(c) => break c,
+                    Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempts < 10 => {
+                        attempts += 1;
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "Could not connect to CurbService ({WINDOWS_PIPE_NAME}): {e}"
+                        ));
+                    }
+                }
+            }
+        };
 
         client
             .write_all(payload.as_bytes())

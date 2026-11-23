@@ -55,11 +55,12 @@ fn main() {
         return;
     }
 
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    rt.block_on(run_service_runtime(args));
+    rt.block_on(run_service_runtime(args, shutdown_rx));
 }
 
-async fn run_service_runtime(args: Args) {
+async fn run_service_runtime(args: Args, shutdown_rx: tokio::sync::watch::Receiver<bool>) {
     let data_dir = args.data_dir.unwrap_or_else(default_data_dir);
     info!("Starting curb-service with data dir: {}", data_dir.display());
 
@@ -91,7 +92,7 @@ async fn run_service_runtime(args: Args) {
         });
     }
 
-    if let Err(e) = ipc_server::run_ipc_server(engine).await {
+    if let Err(e) = ipc_server::run_ipc_server(engine, shutdown_rx).await {
         error!("IPC server failed: {e}");
     }
 }
@@ -99,29 +100,52 @@ async fn run_service_runtime(args: Args) {
 #[cfg(windows)]
 fn run_as_windows_service() -> Result<(), windows_service::Error> {
     use std::ffi::OsString;
+    use std::sync::{Arc, OnceLock};
     use std::time::Duration;
     use windows_service::service::{
         ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
         ServiceType,
     };
-    use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+    use windows_service::service_control_handler::{
+        self, ServiceControlHandlerResult, ServiceStatusHandle,
+    };
     use windows_service::{define_windows_service, service_dispatcher};
 
     define_windows_service!(ffi_service_main, service_main);
 
     fn service_main(_args: Vec<OsString>) {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let handle_cell: Arc<OnceLock<ServiceStatusHandle>> = Arc::new(OnceLock::new());
+        let handler_cell = handle_cell.clone();
+
         let status_handle =
             service_control_handler::register("CurbService", move |control| match control {
-                ServiceControl::Stop => ServiceControlHandlerResult::NoError,
+                ServiceControl::Stop | ServiceControl::Shutdown => {
+                    if let Some(h) = handler_cell.get() {
+                        let _ = h.set_service_status(ServiceStatus {
+                            service_type: ServiceType::OWN_PROCESS,
+                            current_state: ServiceState::StopPending,
+                            controls_accepted: ServiceControlAccept::empty(),
+                            exit_code: ServiceExitCode::Win32(0),
+                            checkpoint: 0,
+                            wait_hint: Duration::from_secs(5),
+                            process_id: None,
+                        });
+                    }
+                    let _ = shutdown_tx.send(true);
+                    ServiceControlHandlerResult::NoError
+                }
                 ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
                 _ => ServiceControlHandlerResult::NotImplemented,
             })
             .expect("register service handler");
 
+        let _ = handle_cell.set(status_handle);
+
         let _ = status_handle.set_service_status(ServiceStatus {
             service_type: ServiceType::OWN_PROCESS,
             current_state: ServiceState::Running,
-            controls_accepted: ServiceControlAccept::STOP,
+            controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
             exit_code: ServiceExitCode::Win32(0),
             checkpoint: 0,
             wait_hint: Duration::default(),
@@ -129,13 +153,26 @@ fn run_as_windows_service() -> Result<(), windows_service::Error> {
         });
 
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        rt.block_on(run_service_runtime(Args {
-            console: false,
-            data_dir: None,
-            dns_bind: "127.0.0.1:53".parse().unwrap(),
-            dns_upstream: "1.1.1.1:53".parse().unwrap(),
-            no_dns: false,
-        }));
+        rt.block_on(run_service_runtime(
+            Args {
+                console: false,
+                data_dir: None,
+                dns_bind: "127.0.0.1:53".parse().unwrap(),
+                dns_upstream: "1.1.1.1:53".parse().unwrap(),
+                no_dns: false,
+            },
+            shutdown_rx,
+        ));
+
+        let _ = status_handle.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Stopped,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::default(),
+            process_id: None,
+        });
     }
 
     service_dispatcher::start("CurbService", ffi_service_main)
