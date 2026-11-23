@@ -380,6 +380,7 @@ try {
 
         # Seed Standard Mode artifacts to verify hooks.nsh cleans them up on uninstall
         $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+        if (-not (Test-Path $runKey)) { New-Item -Path $runKey -Force | Out-Null }
         $inetKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
         Set-ItemProperty -Path $runKey -Name "Curb" -Value "`"$(Join-Path $installDir 'curb-app.exe')`""
         Set-ItemProperty -Path $inetKey -Name "ProxyEnable" -Value 1 -Type DWord
