@@ -26,7 +26,10 @@ async fn dispatch_request(
     if let Ok(resp) = ipc_client::send_request(&req).await {
         return Ok(resp);
     }
-    Ok(local.handle_request(req))
+    let rt = local.clone();
+    tokio::task::spawn_blocking(move || rt.handle_request(req))
+        .await
+        .map_err(|e| format!("Internal error: {e}"))
 }
 
 #[tauri::command]
@@ -74,7 +77,10 @@ async fn setup_standard_mode(
     password: String,
     local: State<'_, LocalStandardRuntime>,
 ) -> Result<(String, ServiceSnapshot), String> {
-    let token = local.activate(&password)?;
+    let rt = local.inner().clone();
+    let token = tokio::task::spawn_blocking(move || rt.activate(&password))
+        .await
+        .map_err(|e| format!("Internal error: {e}"))??;
     elevate::ensure_tray_autostart();
     let snapshot = local.snapshot(true);
     Ok((token, snapshot))

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::verify::inspect_binary;
+use crate::verify::peek_binary;
 use crate::Result;
 
 /// A Steam game discovered from `libraryfolders.vdf` + `appmanifest_<appid>.acf`.
@@ -39,6 +39,26 @@ const IGNORED_EXE_PATTERNS: &[&str] = &[
     "directx",
     "redist",
     "easyanticheat_setup",
+];
+
+/// Subdirectory names (lowercased) skipped during recursive `.exe` search to avoid
+/// traversing huge non-executable game asset trees.
+const IGNORED_DIR_NAMES: &[&str] = &[
+    "_commonredist",
+    "directx",
+    "redist",
+    "locales",
+    "shaders",
+    "textures",
+    "audio",
+    "sounds",
+    "music",
+    "movies",
+    "videos",
+    "fonts",
+    "paks",
+    "logs",
+    "screenshots",
 ];
 
 /// Parses Steam's `libraryfolders.vdf` content and returns all library root paths.
@@ -95,7 +115,7 @@ pub fn parse_app_manifest_acf(acf: &str) -> Option<AppManifest> {
 }
 
 /// Scans a Steam installation root (e.g. `C:\Program Files (x86)\Steam`) and all
-/// secondary library folders for installed games and inspects their main `.exe`.
+/// secondary library folders for installed games and peeks their main `.exe` metadata.
 pub fn discover_steam_games(steam_root: &Path) -> Result<Vec<DiscoveredSteamGame>> {
     let mut library_roots = vec![steam_root.to_path_buf()];
 
@@ -134,14 +154,19 @@ pub fn discover_steam_games(steam_root: &Path) -> Result<Vec<DiscoveredSteamGame
 
             let game_dir = steamapps.join("common").join(&manifest.install_dir);
             if let Some(exe_path) = pick_primary_executable(&game_dir) {
-                if let Ok(identity) = inspect_binary(&exe_path) {
+                if let Ok(identity) = peek_binary(&exe_path) {
+                    let signed = if identity.sha256.is_empty() {
+                        identity.signature.is_some()
+                    } else {
+                        identity.signature.as_ref().is_some_and(|s| s.trusted)
+                    };
                     games.push(DiscoveredSteamGame {
                         app_id: manifest.app_id,
                         name: manifest.name,
                         install_dir: game_dir,
                         exe_path,
                         exe_name: identity.filename,
-                        signed: identity.signature.as_ref().is_some_and(|s| s.trusted),
+                        signed,
                         signer: identity.signature.map(|s| s.subject_cn),
                         sha256: identity.sha256,
                     });
@@ -256,22 +281,27 @@ fn collect_exes(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<(u64, 
     };
 
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_exes(&path, depth + 1, max_depth, out);
-        } else if path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
-        {
-            let name_lower = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_ascii_lowercase())
-                .unwrap_or_default();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if depth < max_depth {
+                let dir_lower = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if !IGNORED_DIR_NAMES.contains(&dir_lower.as_str()) {
+                    collect_exes(&entry.path(), depth + 1, max_depth, out);
+                }
+            }
+        } else if file_type.is_file() {
+            let file_name = entry.file_name();
+            let name_lower = file_name.to_string_lossy().to_ascii_lowercase();
+            if !name_lower.ends_with(".exe") {
+                continue;
+            }
             if IGNORED_EXE_PATTERNS.iter().any(|p| name_lower.contains(p)) {
                 continue;
             }
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            out.push((size, depth, path));
+            out.push((size, depth, entry.path()));
         }
     }
 }
@@ -362,6 +392,25 @@ mod tests {
         assert_eq!(games.len(), 1);
         assert_eq!(games[0].name, "Hades II");
         assert_eq!(games[0].exe_name, "Hades2.exe");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn skips_ignored_dirs_and_finds_nested_game_binary() {
+        let tmp = std::env::temp_dir().join(format!("curb_steam_dirs_{}", uuid::Uuid::new_v4()));
+        let redist = tmp.join("_CommonRedist");
+        let bin = tmp.join("Binaries/Win64");
+        fs::create_dir_all(&redist).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(redist.join("HelperTool.exe"), vec![0u8; 50_000]).unwrap();
+        fs::write(bin.join("Game-Win64-Shipping.exe"), vec![1u8; 2_000]).unwrap();
+
+        let picked = pick_primary_executable(&tmp).expect("picked exe");
+        assert_eq!(
+            picked.file_name().unwrap().to_string_lossy(),
+            "Game-Win64-Shipping.exe"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }

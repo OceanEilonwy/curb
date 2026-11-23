@@ -1,4 +1,5 @@
 import { createSignal, Show } from "solid-js";
+import { SpinnerIcon } from "./Icons";
 
 interface UnlockModalProps {
   open: boolean;
@@ -81,6 +82,7 @@ export function UnlockModal(props: UnlockModalProps) {
                 id="curb-unlock-input"
                 type="password"
                 autofocus
+                disabled={busy()}
                 value={password()}
                 onInput={(e) => setPassword(e.currentTarget.value)}
                 placeholder={
@@ -88,7 +90,7 @@ export function UnlockModal(props: UnlockModalProps) {
                     ? "Password"
                     : "New password (min 4 characters)"
                 }
-                class="w-full px-3 py-2 rounded-lg text-xs"
+                class="w-full px-3 py-2 rounded-lg text-xs disabled:opacity-60"
                 style={{
                   background: "var(--c-sub)",
                   border: "1px solid var(--c-border-strong)",
@@ -105,10 +107,11 @@ export function UnlockModal(props: UnlockModalProps) {
                 <input
                   id="curb-unlock-confirm"
                   type="password"
+                  disabled={busy()}
                   value={confirm()}
                   onInput={(e) => setConfirm(e.currentTarget.value)}
                   placeholder="Confirm password"
-                  class="w-full px-3 py-2 rounded-lg text-xs"
+                  class="w-full px-3 py-2 rounded-lg text-xs disabled:opacity-60"
                   style={{
                     background: "var(--c-sub)",
                     border: "1px solid var(--c-border-strong)",
@@ -134,13 +137,14 @@ export function UnlockModal(props: UnlockModalProps) {
           <div class="flex justify-end gap-2">
             <button
               type="button"
+              disabled={busy()}
               onClick={() => {
                 setError(null);
                 setPassword("");
                 setConfirm("");
                 props.onClose();
               }}
-              class="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer"
+              class="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-55"
               style={{ color: "var(--c-text-sec)" }}
             >
               Cancel
@@ -148,14 +152,20 @@ export function UnlockModal(props: UnlockModalProps) {
             <button
               type="submit"
               disabled={busy()}
-              class="px-3.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-60"
+              aria-busy={busy() ? "true" : "false"}
+              class="px-3.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer inline-flex items-center gap-1.5 disabled:opacity-60"
               style={{ background: "var(--c-accent)", color: "#ffffff" }}
             >
-              {busy()
-                ? "Checking…"
-                : props.passwordConfigured
-                ? "Unlock"
-                : "Set Password"}
+              <Show when={busy()}>
+                <SpinnerIcon size={12} />
+              </Show>
+              <span>
+                {busy()
+                  ? "Checking…"
+                  : props.passwordConfigured
+                  ? "Unlock"
+                  : "Set Password"}
+              </span>
             </button>
           </div>
         </form>

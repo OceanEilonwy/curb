@@ -1,13 +1,16 @@
 import { createSignal, For, Show } from "solid-js";
 import type { Rule, SteamPresetConfig, SubprocessPolicy } from "../lib/types";
 import { isMatcherSigned, matcherDetail } from "../lib/types";
-import { CheckIcon, ChevronDownIcon, WarnIcon } from "./Icons";
+import { CheckIcon, ChevronDownIcon, SpinnerIcon, WarnIcon } from "./Icons";
 import { Switch } from "./Switch";
 
 interface AllowedViewProps {
   unlocked: boolean;
   steam: SteamPresetConfig;
   rules: Rule[];
+  busySteam: boolean;
+  busyRuleIds: Record<string, boolean>;
+  deletingRuleId: string | null;
   onRequireUnlock: () => void;
   onUpdateSteam: (steam: SteamPresetConfig) => void;
   onUpdateRule: (rule: Rule) => void;
@@ -34,6 +37,9 @@ export function AllowedView(props: AllowedViewProps) {
   function toggleAdv(id: string) {
     setAdvOpen((prev) => ({ ...prev, [id]: !prev[id] }));
   }
+
+  const isRuleBusy = (id: string) =>
+    !!props.busyRuleIds[id] || props.deletingRuleId === id;
 
   const steamSummary = () => {
     if (!props.steam.enabled) return "Blocked";
@@ -140,7 +146,7 @@ export function AllowedView(props: AllowedViewProps) {
           <div class="flex items-center gap-2.5 shrink-0">
             <Switch
               checked={props.steam.enabled}
-              disabled={!props.unlocked}
+              disabled={!props.unlocked || props.busySteam}
               label="Allow Steam"
               onChange={() =>
                 props.onUpdateSteam({
@@ -181,7 +187,7 @@ export function AllowedView(props: AllowedViewProps) {
               </div>
               <Switch
                 checked={props.steam.store_and_library}
-                disabled={!props.unlocked}
+                disabled={!props.unlocked || props.busySteam}
                 label="Steam Store and Library"
                 onChange={() =>
                   props.onUpdateSteam({
@@ -203,7 +209,7 @@ export function AllowedView(props: AllowedViewProps) {
               </div>
               <Switch
                 checked={props.steam.community_and_workshop}
-                disabled={!props.unlocked}
+                disabled={!props.unlocked || props.busySteam}
                 label="Steam Community and Workshop"
                 onChange={() =>
                   props.onUpdateSteam({
@@ -225,7 +231,7 @@ export function AllowedView(props: AllowedViewProps) {
               </div>
               <Switch
                 checked={props.steam.friends_and_voice}
-                disabled={!props.unlocked}
+                disabled={!props.unlocked || props.busySteam}
                 label="Steam Friends and Voice"
                 onChange={() =>
                   props.onUpdateSteam({
@@ -294,6 +300,8 @@ export function AllowedView(props: AllowedViewProps) {
             const signed = () => isMatcherSigned(rule.matcher);
             const open = () => expandedId() === rule.id;
             const adv = () => !!advOpen()[rule.id];
+            const busy = () => isRuleBusy(rule.id);
+            const deleting = () => props.deletingRuleId === rule.id;
 
             return (
               <div
@@ -336,7 +344,7 @@ export function AllowedView(props: AllowedViewProps) {
                   <div class="flex items-center gap-2.5 shrink-0">
                     <Switch
                       checked={rule.enabled}
-                      disabled={!props.unlocked}
+                      disabled={!props.unlocked || busy()}
                       label={`Allow ${rule.name}`}
                       onChange={() =>
                         props.onUpdateRule({ ...rule, enabled: !rule.enabled })
@@ -378,7 +386,7 @@ export function AllowedView(props: AllowedViewProps) {
                       </div>
                       <Switch
                         checked={rule.subprocesses !== "disabled"}
-                        disabled={!props.unlocked}
+                        disabled={!props.unlocked || busy()}
                         label={`Allow helper apps for ${rule.name}`}
                         onChange={() =>
                           props.onUpdateRule({
@@ -422,7 +430,7 @@ export function AllowedView(props: AllowedViewProps) {
                             <div class="flex gap-1.5">
                               <button
                                 type="button"
-                                disabled={!props.unlocked}
+                                disabled={!props.unlocked || busy()}
                                 aria-pressed={rule.network.allow_tcp ? "true" : "false"}
                                 onClick={() =>
                                   props.onUpdateRule({
@@ -447,7 +455,7 @@ export function AllowedView(props: AllowedViewProps) {
                               </button>
                               <button
                                 type="button"
-                                disabled={!props.unlocked}
+                                disabled={!props.unlocked || busy()}
                                 aria-pressed={rule.network.allow_udp ? "true" : "false"}
                                 onClick={() =>
                                   props.onUpdateRule({
@@ -478,7 +486,7 @@ export function AllowedView(props: AllowedViewProps) {
                               Sub-process scope
                             </span>
                             <select
-                              disabled={!props.unlocked}
+                              disabled={!props.unlocked || busy()}
                               value={rule.subprocesses}
                               onChange={(e) =>
                                 props.onUpdateRule({
@@ -512,8 +520,9 @@ export function AllowedView(props: AllowedViewProps) {
                               <Show when={props.unlocked}>
                                 <button
                                   type="button"
+                                  disabled={busy()}
                                   onClick={() => addDomain(rule)}
-                                  class="font-semibold cursor-pointer"
+                                  class="font-semibold cursor-pointer disabled:opacity-55"
                                   style={{ color: "var(--c-accent-text)" }}
                                 >
                                   + Add
@@ -548,11 +557,12 @@ export function AllowedView(props: AllowedViewProps) {
                                       <Show when={props.unlocked}>
                                         <button
                                           type="button"
+                                          disabled={busy()}
                                           aria-label={`Remove ${domain}`}
                                           onClick={() =>
                                             removeDomain(rule, idx())
                                           }
-                                          class="cursor-pointer font-bold"
+                                          class="cursor-pointer font-bold disabled:opacity-55"
                                         >
                                           &times;
                                         </button>
@@ -599,11 +609,16 @@ export function AllowedView(props: AllowedViewProps) {
                       >
                         <button
                           type="button"
+                          disabled={busy()}
+                          aria-busy={deleting() ? "true" : "false"}
                           onClick={() => props.onDeleteRule(rule.id)}
-                          class="font-semibold cursor-pointer hover:underline"
+                          class="font-semibold cursor-pointer hover:underline inline-flex items-center gap-1.5 disabled:opacity-55"
                           style={{ color: "var(--c-red-text)" }}
                         >
-                          Remove
+                          <Show when={deleting()}>
+                            <SpinnerIcon size={12} />
+                          </Show>
+                          <span>{deleting() ? "Removing…" : "Remove"}</span>
                         </button>
                       </Show>
                     </div>

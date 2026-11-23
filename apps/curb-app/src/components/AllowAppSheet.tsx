@@ -13,17 +13,20 @@ import {
   FolderIcon,
   RefreshIcon,
   SearchIcon,
+  SpinnerIcon,
   WarnIcon,
 } from "./Icons";
 
 interface AllowAppSheetProps {
   runningApps: RunningAppInfo[];
   steamGames: DiscoveredSteamGame[];
+  loadingRunning: boolean;
+  loadingSteam: boolean;
   existingRules: Rule[];
   onRefresh: () => void;
   onInspectPath: (path: string) => Promise<RunningAppInfo | null>;
   onCancel: () => void;
-  onConfirm: (rule: Rule) => void;
+  onConfirm: (rule: Rule) => Promise<void>;
 }
 
 const AVATAR_COLORS = [
@@ -60,6 +63,14 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
   const [selectedKey, setSelectedKey] = createSignal<string | null>(null);
   const [browsed, setBrowsed] = createSignal<RunningAppInfo | null>(null);
 
+  const [browsing, setBrowsing] = createSignal(false);
+  const [saving, setSaving] = createSignal(false);
+  const [inspectedByPath, setInspectedByPath] = createSignal<
+    Record<string, RunningAppInfo>
+  >({});
+  const [inspectingPath, setInspectingPath] = createSignal<string | null>(null);
+  const [inspectError, setInspectError] = createSignal<string | null>(null);
+
   const [advOpen, setAdvOpen] = createSignal(false);
   const [allowTcp, setAllowTcp] = createSignal(true);
   const [allowUdp, setAllowUdp] = createSignal(true);
@@ -67,6 +78,10 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
     createSignal<SubprocessPolicy>("same_signer_or_dir");
   const [dnsText, setDnsText] = createSignal("");
   const [forceHash, setForceHash] = createSignal(false);
+
+  let inspectReqId = 0;
+
+  const isRefreshing = () => props.loadingRunning || props.loadingSteam;
 
   const isAlreadyAllowed = (exe: string) =>
     props.existingRules.some(
@@ -113,6 +128,40 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
     );
   });
 
+  async function ensureVerified(path: string) {
+    const norm = path.toLowerCase();
+    if (inspectedByPath()[norm]) {
+      setInspectError(null);
+      return;
+    }
+    const reqId = ++inspectReqId;
+    setInspectingPath(norm);
+    setInspectError(null);
+    try {
+      const inspected = await props.onInspectPath(path);
+      if (inspected) {
+        setInspectedByPath((prev) => ({ ...prev, [norm]: inspected }));
+      } else if (reqId === inspectReqId) {
+        setInspectError("Could not verify executable on disk.");
+      }
+    } finally {
+      if (reqId === inspectReqId) {
+        setInspectingPath(null);
+      }
+    }
+  }
+
+  function selectEntry(key: string, path: string, sha256: string) {
+    setSelectedKey(key);
+    setInspectError(null);
+    if (!sha256) {
+      void ensureVerified(path);
+    } else {
+      inspectReqId++;
+      setInspectingPath(null);
+    }
+  }
+
   const selectedSummary = createMemo(() => {
     const key = selectedKey();
     if (!key) return null;
@@ -127,6 +176,7 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
         signed: b.signed,
         signer: b.signer,
         sha256: b.sha256,
+        verified: !!b.sha256,
         appId: null as number | null,
         installDir: null as string | null,
       };
@@ -134,14 +184,17 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
 
     const run = props.runningApps.find((a) => a.key === key);
     if (run) {
+      const verified = inspectedByPath()[run.path.toLowerCase()];
+      const sha256 = verified?.sha256 || run.sha256;
       return {
         kind: "app" as const,
         name: run.name,
         exe: run.exe,
         path: run.path,
-        signed: run.signed,
-        signer: run.signer,
-        sha256: run.sha256,
+        signed: verified ? verified.signed : run.signed,
+        signer: verified ? verified.signer : run.signer,
+        sha256,
+        verified: !!sha256,
         appId: null as number | null,
         installDir: null as string | null,
       };
@@ -149,14 +202,17 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
 
     const game = props.steamGames.find((g) => `steam-${g.app_id}` === key);
     if (game) {
+      const verified = inspectedByPath()[game.exe_path.toLowerCase()];
+      const sha256 = verified?.sha256 || game.sha256;
       return {
         kind: "steam" as const,
         name: game.name,
         exe: game.exe_name,
         path: game.exe_path,
-        signed: game.signed,
-        signer: game.signer,
-        sha256: game.sha256,
+        signed: verified ? verified.signed : game.signed,
+        signer: verified ? verified.signer : game.signer,
+        sha256,
+        verified: !!sha256,
         appId: game.app_id,
         installDir: game.install_dir,
       };
@@ -164,22 +220,34 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
     return null;
   });
 
+  const isInspectingSelected = () => {
+    const sel = selectedSummary();
+    return !!sel && inspectingPath() === sel.path.toLowerCase();
+  };
+
   async function handleBrowse() {
+    if (browsing() || saving()) return;
     const path = window.prompt(
       "Enter the full path to an executable (.exe):",
       "C:\\Program Files\\Example\\App.exe"
     );
     if (!path || !path.trim()) return;
-    const inspected = await props.onInspectPath(path.trim());
-    if (inspected) {
-      setBrowsed(inspected);
-      setSelectedKey(inspected.key);
+    setBrowsing(true);
+    try {
+      const inspected = await props.onInspectPath(path.trim());
+      if (inspected) {
+        setBrowsed(inspected);
+        setSelectedKey(inspected.key);
+        setInspectError(null);
+      }
+    } finally {
+      setBrowsing(false);
     }
   }
 
-  function handleConfirm() {
+  async function handleConfirm() {
     const sel = selectedSummary();
-    if (!sel) return;
+    if (!sel || !sel.verified || saving() || isInspectingSelected()) return;
 
     const dnsList = dnsText()
       .split(",")
@@ -235,7 +303,12 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
       created_at: new Date().toISOString(),
     };
 
-    props.onConfirm(rule);
+    setSaving(true);
+    try {
+      await props.onConfirm(rule);
+    } finally {
+      setSaving(false);
+    }
   }
 
   function renderAppRow(app: RunningAppInfo) {
@@ -245,10 +318,10 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
     return (
       <button
         type="button"
-        disabled={already()}
+        disabled={already() || saving()}
         role="radio"
         aria-checked={active() ? "true" : "false"}
-        onClick={() => setSelectedKey(app.key)}
+        onClick={() => selectEntry(app.key, app.path, app.sha256)}
         class={`w-full text-left px-3 py-2.5 rounded-xl flex items-center gap-3 transition-colors ${
           already() ? "cursor-default" : "cursor-pointer"
         }`}
@@ -373,8 +446,9 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
         <div class="flex items-center justify-between">
           <button
             type="button"
+            disabled={saving()}
             onClick={props.onCancel}
-            class="inline-flex items-center gap-1 text-xs font-semibold px-1.5 py-1 -ml-1.5 rounded-md cursor-pointer"
+            class="inline-flex items-center gap-1 text-xs font-semibold px-1.5 py-1 -ml-1.5 rounded-md cursor-pointer disabled:opacity-55"
             style={{ color: "var(--c-text-sec)" }}
           >
             <BackIcon />
@@ -388,12 +462,14 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
           </h1>
           <button
             type="button"
+            disabled={isRefreshing() || saving()}
+            aria-busy={isRefreshing() ? "true" : "false"}
             onClick={props.onRefresh}
-            aria-label="Refresh running apps"
-            class="w-8 h-8 rounded-md flex items-center justify-center cursor-pointer"
+            aria-label="Refresh running apps and Steam games"
+            class="w-8 h-8 rounded-md flex items-center justify-center cursor-pointer disabled:opacity-60"
             style={{ color: "var(--c-text-sec)" }}
           >
-            <RefreshIcon />
+            <RefreshIcon spinning={isRefreshing()} />
           </button>
         </div>
 
@@ -408,7 +484,7 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
             role="tab"
             aria-selected={tab() === "running" ? "true" : "false"}
             onClick={() => setTab("running")}
-            class="py-1.5 rounded-md cursor-pointer"
+            class="py-1.5 rounded-md cursor-pointer inline-flex items-center justify-center gap-1.5"
             style={{
               background:
                 tab() === "running" ? "var(--c-surface)" : "transparent",
@@ -416,14 +492,17 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
                 tab() === "running" ? "var(--c-text)" : "var(--c-text-muted)",
             }}
           >
-            Running Apps
+            <span>Running Apps</span>
+            <Show when={props.loadingRunning}>
+              <SpinnerIcon size={11} />
+            </Show>
           </button>
           <button
             type="button"
             role="tab"
             aria-selected={tab() === "steam" ? "true" : "false"}
             onClick={() => setTab("steam")}
-            class="py-1.5 rounded-md cursor-pointer"
+            class="py-1.5 rounded-md cursor-pointer inline-flex items-center justify-center gap-1.5"
             style={{
               background:
                 tab() === "steam" ? "var(--c-surface)" : "transparent",
@@ -431,7 +510,10 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
                 tab() === "steam" ? "var(--c-text)" : "var(--c-text-muted)",
             }}
           >
-            Steam Games
+            <span>Steam Games</span>
+            <Show when={props.loadingSteam}>
+              <SpinnerIcon size={11} />
+            </Show>
           </button>
         </div>
 
@@ -471,110 +553,150 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
           when={tab() === "running"}
           fallback={
             <div class="space-y-2">
-              <p class="text-xs px-0.5" style={{ color: "var(--c-text-sec)" }}>
-                Installed games found in your Steam library:
-              </p>
               <div
-                class="space-y-1.5"
-                role="radiogroup"
-                aria-label="Installed Steam games"
+                class="text-xs px-0.5 flex items-center justify-between gap-2"
+                style={{ color: "var(--c-text-sec)" }}
               >
-                <For each={filteredSteam()}>
-                  {(game) => {
-                    const key = `steam-${game.app_id}`;
-                    const already = () => isAlreadyAllowed(game.exe_name);
-                    const active = () => selectedKey() === key && !already();
-                    return (
-                      <button
-                        type="button"
-                        disabled={already()}
-                        role="radio"
-                        aria-checked={active() ? "true" : "false"}
-                        onClick={() => setSelectedKey(key)}
-                        class={`w-full text-left px-3 py-2.5 rounded-xl flex items-center gap-3 ${
-                          already() ? "cursor-default" : "cursor-pointer"
-                        }`}
-                        style={{
-                          background: active()
-                            ? "var(--c-accent-soft)"
-                            : "var(--c-card)",
-                          border: `1px solid ${
-                            active() ? "var(--c-focus)" : "var(--c-border)"
-                          }`,
-                        }}
-                      >
-                        <div
-                          aria-hidden="true"
-                          class="w-9 h-9 rounded-lg flex items-center justify-center text-white text-xs font-bold shrink-0"
-                          style={{ background: colorFor(game.name) }}
-                        >
-                          {initialsFor(game.name)}
-                        </div>
-                        <div class="min-w-0 flex-1">
-                          <div
-                            class="text-[13px] font-semibold truncate"
-                            style={{ color: "var(--c-text)" }}
-                          >
-                            {game.name}
-                          </div>
-                          <div
-                            class="text-xs truncate mt-0.5 inline-flex items-center gap-1"
+                <span>Installed games found in your Steam library:</span>
+                <Show when={props.loadingSteam && props.steamGames.length > 0}>
+                  <span
+                    class="inline-flex items-center gap-1 text-xs"
+                    style={{ color: "var(--c-text-muted)" }}
+                  >
+                    <SpinnerIcon size={11} />
+                    <span>Updating…</span>
+                  </span>
+                </Show>
+              </div>
+              <Show
+                when={!(props.loadingSteam && props.steamGames.length === 0)}
+                fallback={
+                  <div
+                    role="status"
+                    class="py-10 flex items-center justify-center gap-2 text-xs"
+                    style={{ color: "var(--c-text-sec)" }}
+                  >
+                    <SpinnerIcon size={15} />
+                    <span>Scanning Steam library…</span>
+                  </div>
+                }
+              >
+                <Show
+                  when={filteredSteam().length > 0}
+                  fallback={
+                    <div
+                      class="text-center py-8 text-xs"
+                      style={{ color: "var(--c-text-muted)" }}
+                    >
+                      No matching Steam games found.
+                    </div>
+                  }
+                >
+                  <div
+                    class="space-y-1.5"
+                    role="radiogroup"
+                    aria-label="Installed Steam games"
+                  >
+                    <For each={filteredSteam()}>
+                      {(game) => {
+                        const key = `steam-${game.app_id}`;
+                        const already = () => isAlreadyAllowed(game.exe_name);
+                        const active = () => selectedKey() === key && !already();
+                        return (
+                          <button
+                            type="button"
+                            disabled={already() || saving()}
+                            role="radio"
+                            aria-checked={active() ? "true" : "false"}
+                            onClick={() =>
+                              selectEntry(key, game.exe_path, game.sha256)
+                            }
+                            class={`w-full text-left px-3 py-2.5 rounded-xl flex items-center gap-3 ${
+                              already() ? "cursor-default" : "cursor-pointer"
+                            }`}
                             style={{
-                              color: game.signed
-                                ? "var(--c-green-text)"
-                                : "var(--c-amber-text)",
+                              background: active()
+                                ? "var(--c-accent-soft)"
+                                : "var(--c-card)",
+                              border: `1px solid ${
+                                active() ? "var(--c-focus)" : "var(--c-border)"
+                              }`,
                             }}
                           >
-                            {game.signed ? <CheckIcon /> : <WarnIcon />}
-                            <span>
-                              {game.signed
-                                ? "Updates automatically"
-                                : "Unsigned · Re-approve after updates"}
-                            </span>
-                          </div>
-                        </div>
-                        <div class="shrink-0">
-                          <Show
-                            when={already()}
-                            fallback={
-                              <span
-                                aria-hidden="true"
-                                class="w-5 h-5 rounded-full flex items-center justify-center"
+                            <div
+                              aria-hidden="true"
+                              class="w-9 h-9 rounded-lg flex items-center justify-center text-white text-xs font-bold shrink-0"
+                              style={{ background: colorFor(game.name) }}
+                            >
+                              {initialsFor(game.name)}
+                            </div>
+                            <div class="min-w-0 flex-1">
+                              <div
+                                class="text-[13px] font-semibold truncate"
+                                style={{ color: "var(--c-text)" }}
+                              >
+                                {game.name}
+                              </div>
+                              <div
+                                class="text-xs truncate mt-0.5 inline-flex items-center gap-1"
                                 style={{
-                                  border: `2px solid ${
-                                    active()
-                                      ? "var(--c-accent)"
-                                      : "var(--c-border-strong)"
-                                  }`,
-                                  background: active()
-                                    ? "var(--c-accent)"
-                                    : "transparent",
-                                  color: "#ffffff",
+                                  color: game.signed
+                                    ? "var(--c-green-text)"
+                                    : "var(--c-amber-text)",
                                 }}
                               >
-                                <Show when={active()}>
+                                {game.signed ? <CheckIcon /> : <WarnIcon />}
+                                <span>
+                                  {game.signed
+                                    ? "Updates automatically"
+                                    : "Unsigned · Re-approve after updates"}
+                                </span>
+                              </div>
+                            </div>
+                            <div class="shrink-0">
+                              <Show
+                                when={already()}
+                                fallback={
+                                  <span
+                                    aria-hidden="true"
+                                    class="w-5 h-5 rounded-full flex items-center justify-center"
+                                    style={{
+                                      border: `2px solid ${
+                                        active()
+                                          ? "var(--c-accent)"
+                                          : "var(--c-border-strong)"
+                                      }`,
+                                      background: active()
+                                        ? "var(--c-accent)"
+                                        : "transparent",
+                                      color: "#ffffff",
+                                    }}
+                                  >
+                                    <Show when={active()}>
+                                      <CheckIcon />
+                                    </Show>
+                                  </span>
+                                }
+                              >
+                                <span
+                                  class="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full"
+                                  style={{
+                                    background: "var(--c-green-soft)",
+                                    color: "var(--c-green-text)",
+                                  }}
+                                >
                                   <CheckIcon />
-                                </Show>
-                              </span>
-                            }
-                          >
-                            <span
-                              class="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full"
-                              style={{
-                                background: "var(--c-green-soft)",
-                                color: "var(--c-green-text)",
-                              }}
-                            >
-                              <CheckIcon />
-                              <span>Allowed</span>
-                            </span>
-                          </Show>
-                        </div>
-                      </button>
-                    );
-                  }}
-                </For>
-              </div>
+                                  <span>Allowed</span>
+                                </span>
+                              </Show>
+                            </div>
+                          </button>
+                        );
+                      }}
+                    </For>
+                  </div>
+                </Show>
+              </Show>
             </div>
           }
         >
@@ -618,7 +740,12 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
               class="text-xs font-semibold px-1 flex items-center justify-between gap-2"
               style={{ color: "var(--c-text-sec)" }}
             >
-              <span>Open on this computer</span>
+              <span class="inline-flex items-center gap-1.5">
+                <span>Open on this computer</span>
+                <Show when={props.loadingRunning && props.runningApps.length > 0}>
+                  <SpinnerIcon size={11} />
+                </Show>
+              </span>
               <label class="inline-flex items-center gap-1.5 cursor-pointer font-medium">
                 <input
                   type="checkbox"
@@ -633,32 +760,54 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
               </label>
             </div>
             <Show
-              when={otherApps().length > 0}
+              when={!(props.loadingRunning && props.runningApps.length === 0)}
               fallback={
                 <div
-                  class="text-center py-6 text-xs"
-                  style={{ color: "var(--c-text-muted)" }}
+                  role="status"
+                  class="py-8 flex items-center justify-center gap-2 text-xs"
+                  style={{ color: "var(--c-text-sec)" }}
                 >
-                  No matching running apps.
+                  <SpinnerIcon size={15} />
+                  <span>Scanning running apps…</span>
                 </div>
               }
             >
-              <For each={otherApps()}>{(app) => renderAppRow(app)}</For>
+              <Show
+                when={otherApps().length > 0}
+                fallback={
+                  <div
+                    class="text-center py-6 text-xs"
+                    style={{ color: "var(--c-text-muted)" }}
+                  >
+                    No matching running apps.
+                  </div>
+                }
+              >
+                <For each={otherApps()}>{(app) => renderAppRow(app)}</For>
+              </Show>
             </Show>
           </div>
 
           <button
             type="button"
-            onClick={handleBrowse}
-            class="w-full py-2.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center gap-2 cursor-pointer"
+            disabled={browsing() || saving()}
+            aria-busy={browsing() ? "true" : "false"}
+            onClick={() => void handleBrowse()}
+            class="w-full py-2.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
             style={{
               background: "transparent",
               border: "1px dashed var(--c-border-strong)",
               color: "var(--c-text-sec)",
             }}
           >
-            <FolderIcon />
-            App not open? Browse for a file (.exe)&hellip;
+            <Show when={browsing()} fallback={<FolderIcon />}>
+              <SpinnerIcon size={13} />
+            </Show>
+            <span>
+              {browsing()
+                ? "Inspecting executable…"
+                : "App not open? Browse for a file (.exe)…"}
+            </span>
           </button>
         </Show>
       </div>
@@ -680,8 +829,9 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
               </span>
               <button
                 type="button"
+                disabled={saving()}
                 onClick={props.onCancel}
-                class="px-3 py-1.5 rounded-lg font-semibold cursor-pointer"
+                class="px-3 py-1.5 rounded-lg font-semibold cursor-pointer disabled:opacity-55"
                 style={{ color: "var(--c-text-sec)" }}
               >
                 Cancel
@@ -691,6 +841,9 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
         >
           {(sel) => {
             const useSigned = () => sel().signed && !forceHash();
+            const verifying = () => isInspectingSelected();
+            const canConfirm = () =>
+              sel().verified && !verifying() && !saving() && !inspectError();
             return (
               <>
                 <div class="flex items-start justify-between gap-2">
@@ -701,27 +854,62 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
                     >
                       {sel().name}
                     </div>
-                    <div
-                      class="text-xs mt-0.5 flex items-center gap-1"
-                      style={{
-                        color: useSigned()
-                          ? "var(--c-green-text)"
-                          : "var(--c-amber-text)",
-                      }}
+                    <Show
+                      when={!verifying()}
+                      fallback={
+                        <div
+                          class="text-xs mt-0.5 flex items-center gap-1.5"
+                          style={{ color: "var(--c-text-sec)" }}
+                        >
+                          <SpinnerIcon size={12} />
+                          <span>Verifying signature &amp; hash…</span>
+                        </div>
+                      }
                     >
-                      {useSigned() ? <CheckIcon /> : <WarnIcon />}
-                      <span class="truncate">
-                        {useSigned()
-                          ? `Verified (${sel().signer}) · updates automatically`
-                          : "Exact file lock · re-approve after updates"}
-                      </span>
-                    </div>
+                      <Show
+                        when={!inspectError()}
+                        fallback={
+                          <div
+                            role="alert"
+                            class="text-xs mt-0.5 flex items-center gap-1.5"
+                            style={{ color: "var(--c-red-text)" }}
+                          >
+                            <WarnIcon />
+                            <span class="truncate">{inspectError()}</span>
+                            <button
+                              type="button"
+                              onClick={() => void ensureVerified(sel().path)}
+                              class="underline font-semibold shrink-0 cursor-pointer"
+                            >
+                              Retry
+                            </button>
+                          </div>
+                        }
+                      >
+                        <div
+                          class="text-xs mt-0.5 flex items-center gap-1"
+                          style={{
+                            color: useSigned()
+                              ? "var(--c-green-text)"
+                              : "var(--c-amber-text)",
+                          }}
+                        >
+                          {useSigned() ? <CheckIcon /> : <WarnIcon />}
+                          <span class="truncate">
+                            {useSigned()
+                              ? `Verified (${sel().signer}) · updates automatically`
+                              : "Exact file lock · re-approve after updates"}
+                          </span>
+                        </div>
+                      </Show>
+                    </Show>
                   </div>
                   <button
                     type="button"
+                    disabled={saving()}
                     aria-expanded={advOpen() ? "true" : "false"}
                     onClick={() => setAdvOpen((v) => !v)}
-                    class="text-xs font-semibold shrink-0 px-2.5 py-1.5 rounded-lg cursor-pointer"
+                    class="text-xs font-semibold shrink-0 px-2.5 py-1.5 rounded-lg cursor-pointer disabled:opacity-55"
                     style={{
                       background: "var(--c-card)",
                       border: "1px solid var(--c-border-strong)",
@@ -747,9 +935,10 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
                       <div class="flex gap-1.5">
                         <button
                           type="button"
+                          disabled={saving()}
                           aria-pressed={allowTcp() ? "true" : "false"}
                           onClick={() => setAllowTcp((v) => !v)}
-                          class="px-2.5 py-1 rounded-md font-semibold cursor-pointer"
+                          class="px-2.5 py-1 rounded-md font-semibold cursor-pointer disabled:opacity-55"
                           style={{
                             background: allowTcp()
                               ? "var(--c-accent)"
@@ -761,9 +950,10 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
                         </button>
                         <button
                           type="button"
+                          disabled={saving()}
                           aria-pressed={allowUdp() ? "true" : "false"}
                           onClick={() => setAllowUdp((v) => !v)}
-                          class="px-2.5 py-1 rounded-md font-semibold cursor-pointer"
+                          class="px-2.5 py-1 rounded-md font-semibold cursor-pointer disabled:opacity-55"
                           style={{
                             background: allowUdp()
                               ? "var(--c-accent)"
@@ -785,13 +975,14 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
                       </label>
                       <select
                         id="curb-adv-sub"
+                        disabled={saving()}
                         value={subPolicy()}
                         onChange={(e) =>
                           setSubPolicy(
                             e.currentTarget.value as SubprocessPolicy
                           )
                         }
-                        class="rounded-md px-2 py-1 text-xs"
+                        class="rounded-md px-2 py-1 text-xs disabled:opacity-55"
                         style={{
                           background: "var(--c-bg)",
                           border: "1px solid var(--c-border-strong)",
@@ -815,6 +1006,7 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
                         </span>
                         <input
                           type="checkbox"
+                          disabled={saving()}
                           checked={forceHash()}
                           onChange={(e) =>
                             setForceHash(e.currentTarget.checked)
@@ -834,10 +1026,11 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
                       </label>
                       <input
                         id="curb-adv-dns"
+                        disabled={saving()}
                         value={dnsText()}
                         onInput={(e) => setDnsText(e.currentTarget.value)}
                         placeholder="Leave blank for any destination IP"
-                        class="w-full px-2.5 py-1.5 rounded-md font-mono text-xs"
+                        class="w-full px-2.5 py-1.5 rounded-md font-mono text-xs disabled:opacity-60"
                         style={{
                           background: "var(--c-bg)",
                           border: "1px solid var(--c-border-strong)",
@@ -861,19 +1054,31 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
                 <div class="flex items-center justify-end gap-2">
                   <button
                     type="button"
+                    disabled={saving()}
                     onClick={props.onCancel}
-                    class="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer"
+                    class="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-55"
                     style={{ color: "var(--c-text-sec)" }}
                   >
                     Cancel
                   </button>
                   <button
                     type="button"
-                    onClick={handleConfirm}
-                    class="px-4 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                    disabled={!canConfirm()}
+                    aria-busy={verifying() || saving() ? "true" : "false"}
+                    onClick={() => void handleConfirm()}
+                    class="px-4 py-2 rounded-lg text-xs font-semibold cursor-pointer inline-flex items-center gap-1.5 disabled:opacity-60"
                     style={{ background: "var(--c-accent)", color: "#ffffff" }}
                   >
-                    Allow {sel().name}
+                    <Show when={verifying() || saving()}>
+                      <SpinnerIcon size={12} />
+                    </Show>
+                    <span>
+                      {saving()
+                        ? "Allowing…"
+                        : verifying()
+                        ? "Verifying…"
+                        : `Allow ${sel().name}`}
+                    </span>
                   </button>
                 </div>
               </>
