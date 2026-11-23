@@ -90,7 +90,17 @@ async fn setup_standard_mode(
 async fn list_running_apps(
     local: State<'_, LocalStandardRuntime>,
 ) -> Result<Vec<RunningAppInfo>, String> {
-    match dispatch_request(IpcRequest::ListRunningApps, &local).await? {
+    let visible_pids = tokio::task::spawn_blocking(curb_core::processes::visible_window_pids)
+        .await
+        .map_err(|e| format!("Internal error: {e}"))?;
+    match dispatch_request(
+        IpcRequest::ListRunningApps {
+            visible_pids: Some(visible_pids),
+        },
+        &local,
+    )
+    .await?
+    {
         IpcResponse::RunningApps { apps } => Ok(apps),
         IpcResponse::Error { message } => Err(message),
         _ => Err("Unexpected response from Curb".into()),

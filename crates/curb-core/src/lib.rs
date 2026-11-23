@@ -4,6 +4,7 @@ pub mod config;
 pub mod dns;
 pub mod ipc;
 pub mod presets;
+pub mod processes;
 pub mod steam;
 pub mod store;
 pub mod verify;

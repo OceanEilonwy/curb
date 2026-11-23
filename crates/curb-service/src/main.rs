@@ -1,7 +1,6 @@
 mod dns_proxy;
 mod engine;
 mod ipc_server;
-mod processes;
 mod windows;
 
 use std::net::SocketAddr;

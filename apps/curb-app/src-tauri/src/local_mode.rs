@@ -7,7 +7,7 @@ use curb_core::auth::{hash_password, verify_password, AuthRecord, SessionManager
 use curb_core::config::Config;
 use curb_core::dns::domain_matches_any;
 use curb_core::ipc::{
-    BlockedEvent, IpcRequest, IpcResponse, ProtectionTier, RunningAppInfo, ServiceSnapshot,
+    BlockedEvent, IpcRequest, IpcResponse, ProtectionTier, ServiceSnapshot,
 };
 use curb_core::steam::{discover_steam_games, find_default_steam_root};
 use curb_core::store::{load_auth, load_config, save_auth, save_config};
@@ -196,9 +196,17 @@ impl LocalStandardRuntime {
             IpcRequest::GetSnapshot => IpcResponse::Snapshot {
                 data: self.snapshot(is_standard_mode_configured()),
             },
-            IpcRequest::ListRunningApps => IpcResponse::RunningApps {
-                apps: Vec::<RunningAppInfo>::new(),
-            },
+            IpcRequest::ListRunningApps { visible_pids } => {
+                let blocked_snapshot = {
+                    let guard = self.state.lock().unwrap();
+                    guard.blocked_events.iter().cloned().collect::<Vec<_>>()
+                };
+                let apps = curb_core::processes::collect_running_apps(
+                    &blocked_snapshot,
+                    visible_pids.as_deref(),
+                );
+                IpcResponse::RunningApps { apps }
+            }
             IpcRequest::ListSteamGames => {
                 let games = find_default_steam_root()
                     .and_then(|root| discover_steam_games(&root).ok())

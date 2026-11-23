@@ -73,7 +73,13 @@ pub struct ServiceSnapshot {
 pub enum IpcRequest {
     // --- Read-only operations (no session token required) ---
     GetSnapshot,
-    ListRunningApps,
+    ListRunningApps {
+        /// PIDs of processes with visible top-level windows in the caller's interactive
+        /// desktop session. Needed because `CurbService` runs in isolated Session 0 on
+        /// Windows and cannot observe user desktop windows via `EnumWindows`.
+        #[serde(default)]
+        visible_pids: Option<Vec<u32>>,
+    },
     ListSteamGames,
     InspectExecutable {
         path: String,
@@ -138,4 +144,36 @@ pub enum IpcResponse {
     Error {
         message: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_running_apps_deserializes_with_and_without_visible_pids() {
+        let legacy: IpcRequest = serde_json::from_str(r#"{"op":"list_running_apps"}"#).unwrap();
+        assert!(matches!(
+            legacy,
+            IpcRequest::ListRunningApps { visible_pids: None }
+        ));
+
+        let with_pids: IpcRequest =
+            serde_json::from_str(r#"{"op":"list_running_apps","visible_pids":[101,202]}"#).unwrap();
+        assert!(matches!(
+            with_pids,
+            IpcRequest::ListRunningApps {
+                visible_pids: Some(ref pids)
+            } if pids == &[101, 202]
+        ));
+
+        let empty_pids: IpcRequest =
+            serde_json::from_str(r#"{"op":"list_running_apps","visible_pids":[]}"#).unwrap();
+        assert!(matches!(
+            empty_pids,
+            IpcRequest::ListRunningApps {
+                visible_pids: Some(ref pids)
+            } if pids.is_empty()
+        ));
+    }
 }

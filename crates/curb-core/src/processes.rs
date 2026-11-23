@@ -1,18 +1,47 @@
-use curb_core::ipc::{BlockedEvent, RunningAppInfo};
+use crate::ipc::{BlockedEvent, RunningAppInfo};
+
+/// Returns PIDs of processes that currently own a visible user-facing window
+/// on the **calling process's** desktop session.
+///
+/// Important on Windows: a LocalSystem service runs in isolated Session 0 and
+/// cannot see interactive user windows via `EnumWindows`. Call this from the
+/// interactive UI process (`curb-app`) and pass the resulting PIDs to
+/// [`collect_running_apps`] over IPC.
+pub fn visible_window_pids() -> Vec<u32> {
+    #[cfg(windows)]
+    {
+        let mut pids: Vec<u32> = windows_impl::visible_window_pids().into_iter().collect();
+        pids.sort_unstable();
+        pids
+    }
+
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
 
 /// Enumerates currently running applications grouped by executable path
 /// (Activity Monitor / Task Manager style), separating foreground windowed
 /// apps from background processes and annotating apps that recently tried
 /// to go online.
-pub fn collect_running_apps(recent_blocked: &[BlockedEvent]) -> Vec<RunningAppInfo> {
+///
+/// When `caller_visible_pids` is `Some`, those PIDs (collected in the
+/// interactive user desktop session) determine whether an app is foreground
+/// (`background = false`) or background (`background = true`). When `None`,
+/// falls back to enumerating windows in the current session.
+pub fn collect_running_apps(
+    recent_blocked: &[BlockedEvent],
+    caller_visible_pids: Option<&[u32]>,
+) -> Vec<RunningAppInfo> {
     #[cfg(windows)]
     {
-        windows_impl::collect(recent_blocked)
+        windows_impl::collect(recent_blocked, caller_visible_pids)
     }
 
     #[cfg(not(windows))]
     {
-        let _ = recent_blocked;
+        let _ = (recent_blocked, caller_visible_pids);
         Vec::new()
     }
 }
@@ -22,10 +51,8 @@ mod windows_impl {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
-    use curb_core::ipc::{BlockedEvent, RunningAppInfo};
-    use curb_core::verify::peek_binary;
     use windows::core::PWSTR;
-    use windows::Win32::Foundation::{BOOL, CloseHandle, HWND, LPARAM};
+    use windows::Win32::Foundation::{BOOL, CloseHandle, HWND, LPARAM, RECT};
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
@@ -35,8 +62,13 @@ mod windows_impl {
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+        EnumChildWindows, EnumWindows, GetClassNameW, GetWindowLongW, GetWindowRect,
+        GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE,
+        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
+
+    use crate::ipc::{BlockedEvent, RunningAppInfo};
+    use crate::verify::peek_binary;
 
     const SYSTEM_EXCLUDED: &[&str] = &[
         "svchost.exe",
@@ -54,12 +86,19 @@ mod windows_impl {
         "searchhost.exe",
         "ctfmon.exe",
         "conhost.exe",
+        "applicationframehost.exe",
         "curb-service.exe",
         "curb-app.exe",
     ];
 
-    pub fn collect(recent_blocked: &[BlockedEvent]) -> Vec<RunningAppInfo> {
-        let visible_pids = visible_window_pids();
+    pub fn collect(
+        recent_blocked: &[BlockedEvent],
+        caller_visible_pids: Option<&[u32]>,
+    ) -> Vec<RunningAppInfo> {
+        let visible_pids: HashSet<u32> = match caller_visible_pids {
+            Some(pids) => pids.iter().copied().collect(),
+            None => visible_window_pids(),
+        };
         let mut grouped: HashMap<String, (u32, bool)> = HashMap::new();
 
         unsafe {
@@ -171,9 +210,10 @@ mod windows_impl {
         }
     }
 
-    fn visible_window_pids() -> HashSet<u32> {
+    pub fn visible_window_pids() -> HashSet<u32> {
         let mut pids = HashSet::new();
-        unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+
+        unsafe extern "system" fn uwp_child_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
             if IsWindowVisible(hwnd).as_bool() {
                 let mut pid = 0u32;
                 GetWindowThreadProcessId(hwnd, Some(&mut pid));
@@ -184,6 +224,47 @@ mod windows_impl {
             }
             BOOL(1)
         }
+
+        unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            if !IsWindowVisible(hwnd).as_bool() {
+                return BOOL(1);
+            }
+
+            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            if (ex_style & WS_EX_TOOLWINDOW.0) != 0 && (ex_style & WS_EX_APPWINDOW.0) == 0 {
+                return BOOL(1);
+            }
+
+            let has_title = GetWindowTextLengthW(hwnd) > 0;
+            let mut rect = RECT::default();
+            let has_size = GetWindowRect(hwnd, &mut rect).is_ok()
+                && rect.right > rect.left
+                && rect.bottom > rect.top;
+            if !has_title && !has_size {
+                return BOOL(1);
+            }
+
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid != 0 {
+                let set = &mut *(lparam.0 as *mut HashSet<u32>);
+                set.insert(pid);
+            }
+
+            // UWP / Microsoft Store apps are hosted inside ApplicationFrameHost.exe;
+            // their actual app process owns a visible child window inside the frame.
+            let mut class_buf = [0u16; 64];
+            let class_len = GetClassNameW(hwnd, &mut class_buf);
+            if class_len > 0 {
+                let class_name = String::from_utf16_lossy(&class_buf[..class_len as usize]);
+                if class_name == "ApplicationFrameWindow" {
+                    let _ = EnumChildWindows(hwnd, Some(uwp_child_cb), lparam);
+                }
+            }
+
+            BOOL(1)
+        }
+
         unsafe {
             let _ = EnumWindows(Some(enum_cb), LPARAM(&mut pids as *mut _ as isize));
         }

@@ -10,12 +10,11 @@ use curb_core::config::{Config, NetworkPolicy};
 use curb_core::dns::{domain_matches_any, DnsCache};
 use curb_core::ipc::{BlockedEvent, IpcRequest, IpcResponse, ServiceSnapshot};
 use curb_core::presets::EffectiveRule;
+use curb_core::processes::collect_running_apps;
 use curb_core::steam::{discover_steam_games, find_default_steam_root};
 use curb_core::store::{load_auth, load_config, save_auth, save_config};
 use curb_core::verify::{inspect_binary, BinaryIdentity};
 use tokio::sync::Notify;
-
-use crate::processes::collect_running_apps;
 
 const MAX_BLOCKED_HISTORY: usize = 100;
 
@@ -273,12 +272,12 @@ impl ServiceEngine {
                 }
             }
 
-            IpcRequest::ListRunningApps => {
+            IpcRequest::ListRunningApps { visible_pids } => {
                 let blocked_snapshot = {
                     let guard = self.state.lock().unwrap();
                     guard.blocked_events.iter().cloned().collect::<Vec<_>>()
                 };
-                let apps = collect_running_apps(&blocked_snapshot);
+                let apps = collect_running_apps(&blocked_snapshot, visible_pids.as_deref());
                 IpcResponse::RunningApps { apps }
             }
 
