@@ -1,0 +1,17 @@
+# Rust
+/target
+**/target
+Cargo.lock
+
+# Node / Frontend
+node_modules/
+apps/curb-app/dist/
+apps/curb-app/.vite/
+apps/curb-app/src-tauri/gen/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
