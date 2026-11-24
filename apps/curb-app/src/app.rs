@@ -173,6 +173,7 @@ struct AppController {
 
     prompt_purpose: PromptPurpose,
     toast_timer: Timer,
+    poll_timer: Timer,
 }
 
 thread_local! {
@@ -255,6 +256,7 @@ pub fn create_main_window(
         saving_rule: false,
         prompt_purpose: PromptPurpose::None,
         toast_timer: Timer::default(),
+        poll_timer: Timer::default(),
     }));
 
     ACTIVE_CONTROLLER.with(|cell| {
@@ -269,8 +271,15 @@ pub fn create_main_window(
         slint::CloseRequestResponse::KeepWindowShown
     });
 
-    // Kick off initial snapshot fetch
-    ctrl.borrow_mut().refresh_snapshot();
+    // Kick off initial snapshot fetch + 3s silent background polling while window is open
+    {
+        let mut c = ctrl.borrow_mut();
+        c.refresh_snapshot_opts(false);
+        c.poll_timer
+            .start(TimerMode::Repeated, Duration::from_secs(3), move || {
+                with_controller(gen_id, |c| c.refresh_snapshot_opts(true));
+            });
+    }
 
     Ok((gen_id, win))
 }
@@ -489,8 +498,9 @@ impl AppController {
             win.set_screen(2);
         }
 
-        // Mode visual
+        // Mode visual (treat expired PausedUntil as Enforcing)
         let is_standard = snap.protection_tier == ProtectionTier::StandardUser;
+        let now = Utc::now();
         let (mode_kind, mode_label) = match snap.config.mode {
             EnforcementMode::Enforcing => (
                 0,
@@ -500,7 +510,15 @@ impl AppController {
                     "Internet limited"
                 },
             ),
-            EnforcementMode::PausedUntil { .. } => (1, "Paused (15 min)"),
+            EnforcementMode::PausedUntil { until } if until > now => (1, "Paused (15 min)"),
+            EnforcementMode::PausedUntil { .. } => (
+                0,
+                if is_standard {
+                    "Standard mode"
+                } else {
+                    "Internet limited"
+                },
+            ),
             EnforcementMode::Disabled => (2, "Protection off"),
         };
         win.set_mode_kind(mode_kind);
@@ -591,18 +609,34 @@ impl AppController {
         self.sync_picker();
     }
 
-    fn is_already_allowed(&self, exe: &str) -> bool {
+    fn is_already_allowed(
+        &self,
+        exe: &str,
+        path: Option<&str>,
+        steam_app_id: Option<u32>,
+    ) -> bool {
         let Some(snap) = &self.snapshot else {
             return false;
         };
-        snap.config
-            .rules
-            .iter()
-            .any(|r| r.exe_hint.eq_ignore_ascii_case(exe))
+        snap.config.rules.iter().any(|r| {
+            if let Some(app_id) = steam_app_id {
+                if matches!(r.matcher, ExecutableMatcher::SteamGame { app_id: id, .. } if id == app_id)
+                {
+                    return true;
+                }
+            }
+            if let (Some(p), Some(rule_path)) = (path, r.exe_path.as_deref()) {
+                return rule_path.eq_ignore_ascii_case(p);
+            }
+            if r.exe_path.is_none() {
+                return r.exe_hint.eq_ignore_ascii_case(exe);
+            }
+            false
+        })
     }
 
     fn to_running_item(&self, app: &RunningAppInfo) -> RunningAppItem {
-        let already = self.is_already_allowed(&app.exe);
+        let already = self.is_already_allowed(&app.exe, Some(&app.path), None);
         let selected = !already && self.selected_key.as_deref() == Some(app.key.as_str());
         RunningAppItem {
             key: app.key.clone().into(),
@@ -727,7 +761,7 @@ impl AppController {
             .collect();
 
         filtered.sort_by_key(|a| {
-            let already = u8::from(self.is_already_allowed(&a.exe));
+            let already = u8::from(self.is_already_allowed(&a.exe, Some(&a.path), None));
             let not_tried = u8::from(!a.tried_connect);
             (already, not_tried)
         });
@@ -755,7 +789,9 @@ impl AppController {
             })
             .map(|g| {
                 let key = format!("steam-{}", g.app_id);
-                let already = self.is_already_allowed(&g.exe_name);
+                let exe_path_str = g.exe_path.to_string_lossy().into_owned();
+                let already =
+                    self.is_already_allowed(&g.exe_name, Some(&exe_path_str), Some(g.app_id));
                 let selected = !already && self.selected_key.as_deref() == Some(key.as_str());
                 SteamGameItem {
                     key: key.into(),
@@ -764,7 +800,7 @@ impl AppController {
                     initials: initials_for(&g.name).into(),
                     avatar_color: avatar_color_for(&g.name),
                     exe_name: g.exe_name.clone().into(),
-                    exe_path: g.exe_path.to_string_lossy().into_owned().into(),
+                    exe_path: exe_path_str.into(),
                     signed: g.signed,
                     already_allowed: already,
                     selected,
@@ -794,6 +830,10 @@ impl AppController {
     // ---------- Actions ----------
 
     fn refresh_snapshot(&mut self) {
+        self.refresh_snapshot_opts(false);
+    }
+
+    fn refresh_snapshot_opts(&mut self, silent: bool) {
         let gen_id = self.gen_id;
         let backend = self.backend.clone();
         self.backend.spawn(async move {
@@ -804,7 +844,11 @@ impl AppController {
                         c.snapshot = Some(snap);
                         c.sync_all();
                     }
-                    Err(e) => c.show_toast(format!("Service error: {e}")),
+                    Err(e) => {
+                        if !silent {
+                            c.show_toast(format!("Service error: {e}"));
+                        }
+                    }
                 });
             });
         });
@@ -1269,6 +1313,34 @@ impl AppController {
             return;
         }
 
+        if !ev.path.is_empty() {
+            self.allowing_blocked = Some(ev.id);
+            self.sync_all();
+            let path = ev.path;
+            let gen_id = self.gen_id;
+            let backend = self.backend.clone();
+            self.backend.spawn(async move {
+                let res = backend.inspect_executable(path).await;
+                let _ = slint::invoke_from_event_loop(move || {
+                    with_controller(gen_id, |c| {
+                        c.allowing_blocked = None;
+                        c.sync_all();
+                        match res {
+                            Ok(identity) => {
+                                let pre = identity_to_running_app(identity);
+                                c.enter_allow_sheet_with(Some(pre));
+                            }
+                            Err(e) => {
+                                c.show_toast(format!("Could not read file: {e}"));
+                                c.enter_allow_sheet_with(None);
+                            }
+                        }
+                    });
+                });
+            });
+            return;
+        }
+
         self.open_allow_sheet();
     }
 
@@ -1492,9 +1564,13 @@ impl AppController {
     }
 
     fn enter_allow_sheet(&mut self) {
+        self.enter_allow_sheet_with(None);
+    }
+
+    fn enter_allow_sheet_with(&mut self, preselected: Option<RunningAppInfo>) {
         self.search.clear();
-        self.selected_key = None;
-        self.browsed = None;
+        self.selected_key = preselected.as_ref().map(|p| p.key.clone());
+        self.browsed = preselected;
         self.inspect_error = None;
         self.inspecting_path = None;
         self.saving_rule = false;

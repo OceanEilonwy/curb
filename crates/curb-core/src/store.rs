@@ -70,17 +70,31 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-/// Writes JSON via a temporary sibling file and atomic rename so crashes never
-/// leave a half-written config file on disk.
+/// Writes JSON via a unique temporary sibling file and atomic rename (with brief
+/// retries for transient Windows file locks / AV scanners) so concurrent writers
+/// or crashes never corrupt config files on disk.
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
     let json = serde_json::to_vec_pretty(value)?;
     fs::write(&tmp, json)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+
+    let mut last_err = None;
+    for attempt in 0..10 {
+        match fs::rename(&tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 9 {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
+    }
+    let _ = fs::remove_file(&tmp);
+    Err(last_err.unwrap().into())
 }
 
 #[cfg(test)]

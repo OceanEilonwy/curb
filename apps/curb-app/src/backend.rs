@@ -337,9 +337,11 @@ impl CurbBackend {
                     && elevate::is_service_outdated(&data.service_version)
                     && !AUTO_UPGRADE_ATTEMPTED.swap(true, Ordering::SeqCst)
                 {
-                    if elevate::launch_elevated_service_install().is_ok() {
+                    if tokio::task::spawn_blocking(elevate::launch_elevated_service_install)
+                        .await
+                        .is_ok_and(|r| r.is_ok())
+                    {
                         for _ in 0..24 {
-                            tokio::time::sleep(Duration::from_millis(500)).await;
                             if let Ok(IpcResponse::Snapshot { data: upgraded }) =
                                 ipc_client::send_request(&IpcRequest::GetSnapshot).await
                             {
@@ -347,6 +349,7 @@ impl CurbBackend {
                                     return Ok(upgraded);
                                 }
                             }
+                            tokio::time::sleep(Duration::from_millis(500)).await;
                         }
                     }
                 }
@@ -364,11 +367,12 @@ impl CurbBackend {
             return Ok(g.snapshot.clone());
         }
 
-        elevate::launch_elevated_service_install()?;
+        tokio::task::spawn_blocking(elevate::launch_elevated_service_install)
+            .await
+            .map_err(|e| format!("Internal error: {e}"))??;
         elevate::ensure_tray_autostart();
 
         for _ in 0..24 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
             if let Ok(IpcResponse::Snapshot { data }) =
                 ipc_client::send_request(&IpcRequest::GetSnapshot).await
             {
@@ -377,6 +381,7 @@ impl CurbBackend {
                     return Ok(data);
                 }
             }
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
         Err(
@@ -391,7 +396,9 @@ impl CurbBackend {
             g.snapshot.protection_tier = ProtectionTier::Unconfigured;
             return Ok(());
         }
-        elevate::launch_elevated_service_uninstall()
+        tokio::task::spawn_blocking(elevate::launch_elevated_service_uninstall)
+            .await
+            .map_err(|e| format!("Internal error: {e}"))?
     }
 
     pub async fn setup_standard_mode(

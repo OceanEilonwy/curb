@@ -1,28 +1,31 @@
 use std::ffi::OsStr;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
 
 use curb_core::config::{BaselinePolicy, NetworkPolicy};
 use tracing::{info, warn};
-use windows::core::{GUID, PWSTR};
-use windows::Win32::Foundation::HANDLE;
+use windows::core::{GUID, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{FILETIME, HANDLE};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterDeleteById0, FwpmFreeMemory0,
-    FwpmGetAppIdFromFileName0, FwpmProviderAdd0, FwpmSubLayerAdd0, FwpmTransactionAbort0,
-    FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID,
-    FWPM_CONDITION_FLAGS, FWPM_CONDITION_IP_LOCAL_PORT, FWPM_CONDITION_IP_PROTOCOL,
+    FwpmEngineClose0, FwpmEngineOpen0, FwpmEngineSetOption0, FwpmFilterAdd0, FwpmFilterDeleteById0,
+    FwpmFreeMemory0, FwpmGetAppIdFromFileName0, FwpmNetEventCreateEnumHandle0,
+    FwpmNetEventDestroyEnumHandle0, FwpmNetEventEnum0, FwpmProviderAdd0, FwpmSubLayerAdd0,
+    FwpmTransactionAbort0, FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_ACTION0,
+    FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_FLAGS, FWPM_CONDITION_IP_PROTOCOL,
     FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT, FWPM_DISPLAY_DATA0,
-    FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_FLAG_PERSISTENT,
-    FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_PROVIDER0,
-    FWPM_PROVIDER_FLAG_PERSISTENT, FWPM_SESSION0, FWPM_SESSION_FLAG_DYNAMIC, FWPM_SUBLAYER0,
-    FWPM_SUBLAYER_FLAG_PERSISTENT, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_ARRAY16,
-    FWP_BYTE_ARRAY16_TYPE, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_FLAG_IS_LOOPBACK,
-    FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0, FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ALL_SET,
-    FWP_UINT16, FWP_UINT32, FWP_UINT8, FWP_VALUE0, FWP_VALUE0_0,
+    FWPM_ENGINE_COLLECT_NET_EVENTS, FWPM_FILTER0, FWPM_FILTER_CONDITION0,
+    FWPM_FILTER_FLAG_PERSISTENT, FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+    FWPM_NET_EVENT0, FWPM_NET_EVENT_ENUM_TEMPLATE0, FWPM_NET_EVENT_TYPE_CLASSIFY_DROP,
+    FWPM_PROVIDER0, FWPM_PROVIDER_FLAG_PERSISTENT, FWPM_SESSION0, FWPM_SESSION_FLAG_DYNAMIC,
+    FWPM_SUBLAYER0, FWPM_SUBLAYER_FLAG_PERSISTENT, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT,
+    FWP_BYTE_ARRAY16, FWP_BYTE_ARRAY16_TYPE, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE,
+    FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0,
+    FWP_IP_VERSION_V4, FWP_IP_VERSION_V6, FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ALL_SET, FWP_UINT16,
+    FWP_UINT32, FWP_UINT8, FWP_VALUE0, FWP_VALUE0_0,
 };
+use windows::Win32::Storage::FileSystem::QueryDosDeviceW;
 use windows::Win32::System::Rpc::RPC_C_AUTHN_DEFAULT;
 
 use curb_core::cleanup::{CURB_PROVIDER_UUID, CURB_SUBLAYER_UUID};
@@ -49,12 +52,26 @@ unsafe impl Send for WfpController {}
 
 impl WfpController {
     /// Opens persistent + dynamic WFP sessions, purges any stale persistent filters
-    /// from prior runs, and registers Curb's provider & sublayer.
+    /// from prior runs, registers Curb's provider & sublayer, and enables WFP net event
+    /// collection so classify drops against Curb's default-deny filters can be surfaced.
     pub fn open() -> Result<Self, String> {
         let _ = curb_core::cleanup::purge_all_curb_wfp_objects();
 
         let persistent_engine = open_engine(false)?;
         let dynamic_engine = open_engine(true)?;
+
+        // Enable WFP net event collection so blocked connection attempts can be enumerated.
+        let collect_val = FWP_VALUE0 {
+            r#type: FWP_UINT32,
+            Anonymous: FWP_VALUE0_0 { uint32: 1 },
+        };
+        unsafe {
+            let _ = FwpmEngineSetOption0(
+                persistent_engine,
+                FWPM_ENGINE_COLLECT_NET_EVENTS,
+                &collect_val,
+            );
+        }
 
         let ctrl = Self {
             persistent_engine,
@@ -450,6 +467,100 @@ impl WfpController {
         self.remove_dynamic_filters(&svc_ids);
     }
 
+    /// Polls recent WFP `FWPM_NET_EVENT_TYPE_CLASSIFY_DROP` events triggered by Curb's
+    /// persistent default-deny filters between `start_ft` and `end_ft`, returning
+    /// `(win32_exe_path, remote_ip, remote_port)` tuples.
+    pub fn poll_classify_drops(
+        &self,
+        start_ft: FILETIME,
+        end_ft: FILETIME,
+    ) -> Vec<(String, IpAddr, u16)> {
+        if self.persistent_filter_ids.is_empty() {
+            return Vec::new();
+        }
+        let template = FWPM_NET_EVENT_ENUM_TEMPLATE0 {
+            startTime: start_ft,
+            endTime: end_ft,
+            numFilterConditions: 0,
+            filterCondition: ptr::null_mut(),
+        };
+
+        let mut out = Vec::new();
+        unsafe {
+            let mut enum_handle = HANDLE::default();
+            if FwpmNetEventCreateEnumHandle0(
+                self.persistent_engine,
+                Some(&template),
+                &mut enum_handle,
+            ) != 0
+            {
+                return out;
+            }
+
+            let mut entries: *mut *mut FWPM_NET_EVENT0 = ptr::null_mut();
+            let mut num_entries = 0u32;
+            let code = FwpmNetEventEnum0(
+                self.persistent_engine,
+                enum_handle,
+                64,
+                &mut entries,
+                &mut num_entries,
+            );
+            if code == 0 && !entries.is_null() {
+                let slice = std::slice::from_raw_parts(entries, num_entries as usize);
+                for &ev_ptr in slice {
+                    if ev_ptr.is_null() {
+                        continue;
+                    }
+                    let ev = &*ev_ptr;
+                    if ev.r#type != FWPM_NET_EVENT_TYPE_CLASSIFY_DROP {
+                        continue;
+                    }
+                    let drop_ptr = ev.Anonymous.classifyDrop;
+                    if drop_ptr.is_null() {
+                        continue;
+                    }
+                    let filter_id = (*drop_ptr).filterId;
+                    if !self.persistent_filter_ids.contains(&filter_id) {
+                        continue;
+                    }
+
+                    let app_blob = &ev.header.appId;
+                    if app_blob.size < 4 || app_blob.data.is_null() {
+                        continue;
+                    }
+                    let u16_len = (app_blob.size as usize) / 2;
+                    let u16_slice =
+                        std::slice::from_raw_parts(app_blob.data as *const u16, u16_len);
+                    let raw_path = String::from_utf16_lossy(u16_slice)
+                        .trim_end_matches('\0')
+                        .to_string();
+                    if raw_path.is_empty() || raw_path.eq_ignore_ascii_case("System") {
+                        continue;
+                    }
+
+                    let remote_ip = if ev.header.ipVersion == FWP_IP_VERSION_V4 {
+                        IpAddr::V4(Ipv4Addr::from(ev.header.Anonymous2.remoteAddrV4))
+                    } else if ev.header.ipVersion == FWP_IP_VERSION_V6 {
+                        IpAddr::V6(Ipv6Addr::from(
+                            ev.header.Anonymous2.remoteAddrV6.byteArray16,
+                        ))
+                    } else {
+                        continue;
+                    };
+
+                    let win32_path = nt_device_path_to_win32(&raw_path);
+                    out.push((win32_path, remote_ip, ev.header.remotePort));
+                }
+                let mut raw = entries as *mut std::ffi::c_void;
+                FwpmFreeMemory0(&mut raw);
+            }
+
+            let _ = FwpmNetEventDestroyEnumHandle0(self.persistent_engine, enum_handle);
+        }
+        out
+    }
+
     fn add_filter(
         &self,
         engine: HANDLE,
@@ -594,6 +705,38 @@ fn remote_port_condition(port: u16) -> FWPM_FILTER_CONDITION0 {
             Anonymous: FWP_CONDITION_VALUE0_0 { uint16: port },
         },
     }
+}
+
+/// Converts a lowercased NT device path (e.g. `\device\harddiskvolume3\windows\system32\curl.exe`)
+/// returned by WFP `ALE_APP_ID` blobs into a Win32 drive path (`C:\windows\system32\curl.exe`).
+fn nt_device_path_to_win32(nt_path: &str) -> String {
+    let norm = nt_path.replace('/', "\\");
+    if !norm.to_ascii_lowercase().starts_with("\\device\\") {
+        return norm;
+    }
+    for letter in b'A'..=b'Z' {
+        let drive = format!("{}:", letter as char);
+        let wide_drive: Vec<u16> = drive.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut target_buf = [0u16; 260];
+        let len = unsafe { QueryDosDeviceW(PCWSTR(wide_drive.as_ptr()), Some(&mut target_buf)) };
+        if len == 0 {
+            continue;
+        }
+        let target = String::from_utf16_lossy(&target_buf[..len as usize])
+            .split('\0')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if target.is_empty() {
+            continue;
+        }
+        let prefix = format!("{}\\", target.to_ascii_lowercase());
+        if norm.to_ascii_lowercase().starts_with(&prefix) {
+            let rest = &norm[target.len()..];
+            return format!("{drive}{rest}");
+        }
+    }
+    norm
 }
 
 #[cfg(test)]

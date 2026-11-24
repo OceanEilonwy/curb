@@ -348,30 +348,38 @@ async fn handle_proxy_conn(
     mut client: TcpStream,
     runtime: LocalStandardRuntime,
 ) -> std::io::Result<()> {
-    let mut reader = BufReader::new(&mut client);
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).await? == 0 {
-        return Ok(());
-    }
-
-    // Drain remaining request headers
-    let mut headers = Vec::new();
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 || line == "\r\n" || line == "\n" {
-            break;
+    let (request_line, headers) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut reader = BufReader::new(&mut client);
+        let mut req_line = String::new();
+        if reader.read_line(&mut req_line).await? == 0 {
+            return Ok::<_, std::io::Error>((String::new(), Vec::new()));
         }
-        headers.push(line);
+
+        let mut hdrs = Vec::new();
+        while hdrs.len() < 64 {
+            let mut line = String::new();
+            let n = reader.read_line(&mut line).await?;
+            if n == 0 || line == "\r\n" || line == "\n" {
+                break;
+            }
+            hdrs.push(line);
+        }
+        Ok((req_line, hdrs))
+    })
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "proxy header read timeout"))??;
+
+    if request_line.is_empty() {
+        return Ok(());
     }
 
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let target = parts.next().unwrap_or_default();
 
-    let (host, port) = if method.eq_ignore_ascii_case("CONNECT") {
+    let (raw_host, port) = if method.eq_ignore_ascii_case("CONNECT") {
         let (h, p) = target.rsplit_once(':').unwrap_or((target, "443"));
-        (h.to_string(), p.parse::<u16>().unwrap_or(443))
+        (h, p.parse::<u16>().unwrap_or(443))
     } else {
         let stripped = target
             .strip_prefix("http://")
@@ -379,10 +387,12 @@ async fn handle_proxy_conn(
             .unwrap_or(target);
         let authority = stripped.split('/').next().unwrap_or(stripped);
         let (h, p) = authority.rsplit_once(':').unwrap_or((authority, "80"));
-        (h.to_string(), p.parse::<u16>().unwrap_or(80))
+        (h, p.parse::<u16>().unwrap_or(80))
     };
-
-    drop(reader);
+    let host = raw_host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
 
     if !runtime.is_host_allowed(&host) {
         runtime.record_blocked(host);

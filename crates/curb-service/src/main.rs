@@ -72,14 +72,16 @@ async fn run_service_runtime(args: Args, shutdown_rx: tokio::sync::watch::Receiv
     };
 
     #[cfg(windows)]
-    {
+    let wf_task = {
         let wf_engine = engine.clone();
         let wf_dir = data_dir.clone();
         let wf_upstream = args.dns_upstream;
+        let wf_shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
-            windows::run_windows_enforcement_loop(wf_engine, wf_dir, wf_upstream).await;
-        });
-    }
+            windows::run_windows_enforcement_loop(wf_engine, wf_dir, wf_upstream, wf_shutdown)
+                .await;
+        })
+    };
 
     if !args.no_dns {
         let dns_engine = engine.clone();
@@ -94,6 +96,11 @@ async fn run_service_runtime(args: Args, shutdown_rx: tokio::sync::watch::Receiv
 
     if let Err(e) = ipc_server::run_ipc_server(engine, shutdown_rx).await {
         error!("IPC server failed: {e}");
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = wf_task.await;
     }
 }
 

@@ -16,13 +16,28 @@ pub fn enable_local_dns_redirect(
     include_ipv6: bool,
 ) -> Result<Vec<SocketAddr>, String> {
     let backup_file = dns_backup_path(data_dir);
+    let snapshot = capture_adapter_dns_snapshot().unwrap_or_default();
     let backups = if !backup_file.exists() {
-        let snapshot = capture_adapter_dns_snapshot()?;
         write_json_atomic(&backup_file, &snapshot).map_err(|e| e.to_string())?;
         info!("Backed up DNS settings for {} adapters", snapshot.len());
         snapshot
     } else {
-        read_json::<Vec<AdapterDnsBackup>>(&backup_file).unwrap_or_default()
+        let mut existing = read_json::<Vec<AdapterDnsBackup>>(&backup_file).unwrap_or_default();
+        let mut added = 0usize;
+        for item in snapshot {
+            if !existing
+                .iter()
+                .any(|e| e.interface_index == item.interface_index)
+            {
+                existing.push(item);
+                added += 1;
+            }
+        }
+        if added > 0 {
+            let _ = write_json_atomic(&backup_file, &existing);
+            info!("Added {added} newly active adapter(s) to DNS backup");
+        }
+        existing
     };
 
     let upstreams = extract_upstream_servers(&backups);
@@ -124,6 +139,13 @@ fn extract_upstream_servers(backups: &[AdapterDnsBackup]) -> Vec<SocketAddr> {
 fn capture_adapter_dns_snapshot() -> Result<Vec<AdapterDnsBackup>, String> {
     let ps = r#"
         $items = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
+            $guid = $_.InterfaceGuid
+            $v4Key = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$guid"
+            $v6Key = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$guid"
+            $v4Ns = (Get-ItemProperty -Path $v4Key -Name NameServer -ErrorAction SilentlyContinue).NameServer
+            $v6Ns = (Get-ItemProperty -Path $v6Key -Name NameServer -ErrorAction SilentlyContinue).NameServer
+            $v4Static = [bool]($v4Ns -and ($v4Ns.Trim() -ne '') -and ($v4Ns.Trim() -ne '127.0.0.1'))
+            $v6Static = [bool]($v6Ns -and ($v6Ns.Trim() -ne '') -and ($v6Ns.Trim() -ne '::1'))
             $dns = Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ErrorAction SilentlyContinue
             [PSCustomObject]@{
                 interface_alias = $_.Name
@@ -131,6 +153,8 @@ fn capture_adapter_dns_snapshot() -> Result<Vec<AdapterDnsBackup>, String> {
                 original_servers = @($dns | ForEach-Object { $_.ServerAddresses } | Where-Object {
                     $_ -and $_ -ne '127.0.0.1' -and $_ -ne '::1' -and $_ -notlike 'fec0:*' -and $_ -notlike 'fe80:*'
                 })
+                v4_static = $v4Static
+                v6_static = $v6Static
             }
         })
         ConvertTo-Json -InputObject $items -Depth 4 -Compress
@@ -174,6 +198,8 @@ mod tests {
                 "2606:4700:4700::1111".into(),
                 "192.168.1.1".into(),
             ],
+            v4_static: false,
+            v6_static: false,
         }];
 
         let upstreams = extract_upstream_servers(&backups);

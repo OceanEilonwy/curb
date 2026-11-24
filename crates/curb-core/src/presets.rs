@@ -48,8 +48,15 @@ pub const STEAM_STORE_DOMAINS: &[&str] = &[
     "login.steampowered.com",
     "api.steampowered.com",
     "media.steampowered.com",
+    "help.steampowered.com",
+    "cmp.steampowered.com",
+    "ssa.steampowered.com",
+    "partner.steamgames.com",
+    "steamgames.com",
     "*.steamstatic.com",
     "*.steamcontent.com",
+    "steamcdn-a.akamaihd.net",
+    "*.akamaihd.net",
 ];
 
 pub const STEAM_COMMUNITY_DOMAINS: &[&str] = &[
@@ -61,11 +68,16 @@ pub const STEAM_COMMUNITY_DOMAINS: &[&str] = &[
 pub const STEAM_FRIENDS_DOMAINS: &[&str] = &[
     "*.steam-chat.com",
     "steam-chat.com",
+    "*.cm.steampowered.com",
+    "*.steamserver.net",
 ];
 
 impl SteamPresetConfig {
     /// Returns the DNS whitelist currently active for `steamwebhelper.exe`.
     pub fn webhelper_domains(&self) -> Vec<String> {
+        if !self.enabled {
+            return Vec::new();
+        }
         let mut domains = Vec::new();
         if self.store_and_library {
             domains.extend(STEAM_STORE_DOMAINS.iter().map(|s| (*s).to_string()));
