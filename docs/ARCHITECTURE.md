@@ -16,11 +16,17 @@ Curb is a default-deny, application-centric Windows internet limiter designed fo
 ```text
 curb/
 ├── crates/
-│   ├── curb-core/       # Shared schema, presets, DNS wildcard matcher, Argon2id auth, Steam VDF parser, verification, IPC protocol
-│   ├── curb-service/    # LocalSystem Windows Service (WFP, ETW, Adapter DNS manager, local DNS proxy, Named Pipe IPC server)
-│   └── curb-cli/        # Elevated admin CLI (install, uninstall, reset-password, emergency-disable, status)
+│   ├── curb-core/            # Domain schema, presets, DNS matcher/cache, Argon2id auth, Steam VDF parser, IPC types, & common adaptor traits
+│   ├── curb-service/         # System enforcement daemon (wires OS adaptors + DNS proxy + IPC server)
+│   ├── curb-cli/             # Elevated admin & recovery CLI (wires ServiceManager + FirewallManager + DnsManager)
+│   └── adaptors/
+│       ├── windows/          # curb-windows (WFP, ETW, SCM, WinTrust, UAC, Registry)
+│       ├── linux/            # curb-linux (/proc, ELF, Steam, resolv.conf, SO_MARK)
+│       ├── nftables/         # curb-nftables (nftables table inet curb + Netlink NFQUEUE)
+│       ├── systemd/          # curb-systemd (systemctl curb.service lifecycle)
+│       └── xdg/              # curb-xdg (Polkit pkexec, .desktop names, autostart, GNOME/KDE proxy)
 └── apps/
-    └── curb-app/        # Unprivileged pure-Rust Slint system tray app (software renderer)
+    └── curb-app/             # Unprivileged pure-Rust Slint system tray app (software renderer)
 ```
 
 ---
@@ -54,6 +60,22 @@ curb/
   - **Friends & Voice:** adds `*.steam-chat.com`
 
 ### 5. Security & Auth Flow
-- **IPC Channel:** Named Pipe `\\.\pipe\curb-ipc` (unprivileged tray UI connects as standard user).
+- **IPC Channel:** Named Pipe `\\.\pipe\curb-ipc` on Windows, or Unix domain socket `/run/curb/ipc.sock` on Linux (unprivileged tray UI connects as standard user).
 - **Read-only by default:** Status, rules, blocked events, running apps, and Steam library scan are readable without unlocking.
-- **Admin Unlock:** Password verified against Argon2id hash in `C:\ProgramData\Curb\auth.json` with exponential backoff on failed attempts. Returns an in-memory 256-bit session token with 10-minute idle timeout; closing the tray window immediately revokes the token and drops the Slint window while keeping only the native `SystemTrayIcon` alive so idle RAM stays minimal.
+- **Admin Unlock:** Password verified against Argon2id hash in `C:\ProgramData\Curb\auth.json` (Windows) or `/var/lib/curb/auth.json` (`0600`, Linux) with exponential backoff on failed attempts. Returns an in-memory 256-bit session token with 10-minute idle timeout; closing the tray window immediately revokes the token and drops the Slint window while keeping only the native `SystemTrayIcon` alive so idle RAM stays minimal.
+
+---
+
+## Linux Enforcement Architecture
+
+On Linux (`systemd` + `nftables` distributions including Ubuntu, Debian, Linux Mint, Pop!_OS, Fedora, RHEL, openSUSE, Arch, Manjaro, and SteamOS), `curb-service` provides full parity without a custom kernel module:
+
+1. **`nftables` (`table inet curb`) + `NFQUEUE`:**
+   - Installs an atomic `inet` output filter chain allowing loopback, `ct state established,related`, Curb's own marked upstream DNS sockets (`meta mark 0x43555242`), DHCP, NTP, and IPv6 Neighbor Discovery while dropping external DoT/DNS (ports 853/53) and queueing new outbound TCP/UDP flows (`ct state new`) to userspace `NFQUEUE` #42 (fail-closed).
+   - Pure-Rust Netlink `nfnetlink_queue` consumer (`crates/curb-service/src/linux/nfqueue.rs`) resolves the originating socket inode via `/proc/net/{tcp,tcp6,udp,udp6}`, maps it to `/proc/<pid>/exe` + `ppid`, verifies the binary against Curb's rules + `DnsCache`, and returns `NF_ACCEPT` or `NF_DROP` (recording a `BlockedEvent` on drop).
+2. **Transparent DNS Interception (`nat_output`):**
+   - Redirects non-Curb outbound UDP/TCP port 53 traffic to Curb's local DNS proxy (`127.0.0.1:5353`), avoiding conflicts with `systemd-resolved` (`127.0.0.53:53`) and never modifying `/etc/resolv.conf`.
+   - Upstream resolvers are read from `/run/systemd/resolve/resolv.conf`, `/run/NetworkManager/resolv.conf`, and `/etc/resolv.conf`, and `curb-service` sets `SO_MARK = 0x43555242` on its own upstream sockets so they bypass the redirect.
+3. **Desktop & Service Integration:**
+   - Managed via `curb.service` (`systemd`), with one-click GUI elevation via Polkit (`pkexec` + `org.curb.policy`) and XDG autostart (`~/.config/autostart/curb.desktop`).
+   - Discovers running apps from `/proc` with friendly names from `.desktop` files, and discovers Steam games across native, Flatpak, and Snap installations (supporting both native ELF and Proton `.exe` binaries).

@@ -205,18 +205,29 @@ async fn run_unix_socket_server(
     engine: ServiceEngine,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> std::io::Result<()> {
-    use curb_core::ipc::DEV_UNIX_SOCKET_PATH;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
     use tokio::net::UnixListener;
 
-    let _ = std::fs::remove_file(DEV_UNIX_SOCKET_PATH);
-    let listener = UnixListener::bind(DEV_UNIX_SOCKET_PATH)?;
-    info!("Curb IPC dev server listening on {DEV_UNIX_SOCKET_PATH}");
+    let socket_path = curb_core::ipc::default_unix_socket_path();
+    if let Some(parent) = Path::new(socket_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755));
+    }
+
+    let _ = std::fs::remove_file(socket_path);
+    let listener = UnixListener::bind(socket_path)?;
+    // Allow unprivileged desktop users (`curb-app`) to connect to the IPC socket;
+    // all state-changing IPC calls enforce Argon2id password + session token auth.
+    let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666));
+    info!("Curb IPC server listening on {socket_path}");
 
     loop {
         tokio::select! {
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
-                    info!("Curb IPC dev server shutting down");
+                    info!("Curb IPC server shutting down");
+                    let _ = std::fs::remove_file(socket_path);
                     return Ok(());
                 }
             }

@@ -9,4 +9,9 @@ clap.workspace = true
 curb-core = { path = "../curb-core" }
 
 [target.'cfg(windows)'.dependencies]
-windows-service.workspace = true
+curb-windows = { path = "../adaptors/windows" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+curb-linux = { path = "../adaptors/linux" }
+curb-nftables = { path = "../adaptors/nftables" }
+curb-systemd = { path = "../adaptors/systemd" }

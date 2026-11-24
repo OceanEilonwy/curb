@@ -33,6 +33,56 @@ pub const RESTRICTED_SUBPROCESS_NAMES: &[&str] = &[
     "python.exe",
     "pythonw.exe",
     "node.exe",
+    // Linux / Unix browsers, shells, and transfer/package tools
+    "firefox",
+    "firefox-bin",
+    "firefox-esr",
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "google-chrome-stable",
+    "chrome",
+    "brave",
+    "brave-browser",
+    "opera",
+    "vivaldi",
+    "vivaldi-bin",
+    "epiphany",
+    "bash",
+    "sh",
+    "dash",
+    "zsh",
+    "fish",
+    "ksh",
+    "csh",
+    "tcsh",
+    "curl",
+    "wget",
+    "python",
+    "python3",
+    "node",
+    "perl",
+    "ruby",
+    "nc",
+    "ncat",
+    "netcat",
+    "socat",
+    "ssh",
+    "scp",
+    "sftp",
+    "rsync",
+    "apt",
+    "apt-get",
+    "dpkg",
+    "dnf",
+    "yum",
+    "rpm",
+    "pacman",
+    "yay",
+    "paru",
+    "zypper",
+    "flatpak",
+    "snap",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,6 +172,13 @@ pub enum ExecutableMatcher {
         sha256: String,
         filename_hint: String,
     },
+    /// Matches an executable by canonical path (e.g. `"/usr/bin/discord"`) or
+    /// relative path suffix (e.g. `"ubuntu12_32/steam"`). Used on Linux where
+    /// ELF binaries do not carry Authenticode signatures.
+    Path {
+        path: String,
+        filename_hint: String,
+    },
 }
 
 impl ExecutableMatcher {
@@ -153,6 +210,22 @@ impl ExecutableMatcher {
                 binary,
             ),
             Self::Hash { sha256, .. } => binary.sha256.eq_ignore_ascii_case(sha256),
+            Self::Path {
+                path,
+                filename_hint,
+            } => {
+                if !filename_hint.is_empty() && !binary.filename.eq_ignore_ascii_case(filename_hint)
+                {
+                    return false;
+                }
+                let expected = path.replace('\\', "/");
+                let actual = binary.path.replace('\\', "/");
+                if expected.starts_with('/') {
+                    actual == expected
+                } else {
+                    actual.ends_with(&format!("/{expected}")) || actual == expected
+                }
+            }
         }
     }
 }

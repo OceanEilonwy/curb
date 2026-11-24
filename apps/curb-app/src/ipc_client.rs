@@ -50,12 +50,12 @@ pub async fn send_request(req: &IpcRequest) -> Result<IpcResponse, String> {
 
     #[cfg(not(windows))]
     {
-        use curb_core::ipc::DEV_UNIX_SOCKET_PATH;
         use tokio::net::UnixStream;
 
-        let mut stream = UnixStream::connect(DEV_UNIX_SOCKET_PATH)
+        let socket_path = curb_core::ipc::default_unix_socket_path();
+        let mut stream = UnixStream::connect(socket_path)
             .await
-            .map_err(|e| format!("Could not connect to curb-service ({DEV_UNIX_SOCKET_PATH}): {e}"))?;
+            .map_err(|e| format!("Could not connect to curb-service ({socket_path}): {e}"))?;
 
         stream
             .write_all(payload.as_bytes())

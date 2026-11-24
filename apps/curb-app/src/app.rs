@@ -69,6 +69,7 @@ pub fn matcher_detail(matcher: &ExecutableMatcher) -> String {
             let short: String = sha256.chars().take(12).collect();
             format!("SHA-256: {short}…")
         }
+        ExecutableMatcher::Path { path, .. } => format!("Path: {path}"),
         ExecutableMatcher::SteamGame { verification, .. } => match verification {
             VerificationMethod::Signature { subject_cn, .. } => format!("Signer: {subject_cn}"),
             VerificationMethod::Hash { sha256, .. } => {
@@ -1750,10 +1751,20 @@ impl AppController {
         }
         self.prompt_purpose = PromptPurpose::BrowseExe;
         win.set_prompt_title("Add Executable by Path".into());
-        win.set_prompt_description(
-            "Enter or paste the full path to an executable (.exe) on this computer.".into(),
-        );
-        win.set_prompt_placeholder(r"C:\Program Files\Example\App.exe".into());
+        #[cfg(windows)]
+        {
+            win.set_prompt_description(
+                "Enter or paste the full path to an executable (.exe) on this computer.".into(),
+            );
+            win.set_prompt_placeholder(r"C:\Program Files\Example\App.exe".into());
+        }
+        #[cfg(not(windows))]
+        {
+            win.set_prompt_description(
+                "Enter or paste the full path to an executable binary on this computer.".into(),
+            );
+            win.set_prompt_placeholder("/usr/bin/example".into());
+        }
         win.set_prompt_submit_label("Inspect File".into());
         win.set_prompt_busy_label("Inspecting…".into());
         win.set_prompt_mono(true);

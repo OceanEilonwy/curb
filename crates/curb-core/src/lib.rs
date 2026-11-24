@@ -1,3 +1,4 @@
+pub mod adaptors;
 pub mod auth;
 pub mod cleanup;
 pub mod config;

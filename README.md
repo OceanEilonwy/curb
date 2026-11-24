@@ -4,14 +4,14 @@
 
 **Block everything. Allow only what matters.**
 
-A lightweight, default-deny Windows internet limiter designed for setups where a trusted admin (a friend, partner, or parent) controls what can go online.
+A lightweight, default-deny Windows & Linux internet limiter designed for setups where a trusted admin (a friend, partner, or parent) controls what can go online.
 
 [![Latest Release](https://img.shields.io/github/v/release/OceanEilonwy/curb?style=flat-square&color=4e5be6&label=Download)](https://github.com/OceanEilonwy/curb/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-28b463?style=flat-square)](https://github.com/OceanEilonwy/curb/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20%7C%20Linux-28b463?style=flat-square)](https://github.com/OceanEilonwy/curb/releases/latest)
 [![License](https://img.shields.io/github/license/OceanEilonwy/curb?style=flat-square)](LICENSE)
 
 <h3>
-  <a href="https://github.com/OceanEilonwy/curb/releases/latest">Download Latest Release for Windows &rarr;</a>
+  <a href="https://github.com/OceanEilonwy/curb/releases/latest">Download Latest Release (Windows & Linux) &rarr;</a>
 </h3>
 
 <br />
@@ -43,10 +43,34 @@ Most internet blockers rely on browser extensions or domain blocklists that are 
    - **Standard Mode (No Admin):** Starts immediately in your user account with zero admin needed (upgrade to Full Protection anytime in Settings).
 3. Pick your **Curb password** right in the app and toggle on **Steam** or any apps and games you want online.
 
+## Quick Setup (Linux)
+
+Supported on all major `systemd` + `nftables` distributions (Ubuntu 22.04+, Debian 11+, Linux Mint, Pop!_OS, Fedora, RHEL/Rocky/Alma, openSUSE, Arch Linux, Manjaro, EndeavourOS, SteamOS):
+
+- **Ubuntu / Debian / Linux Mint / Pop!_OS (`.deb`):**
+  ```bash
+  sudo apt install ./curb_*_amd64.deb
+  ```
+- **Fedora / RHEL / openSUSE (`.rpm`):**
+  ```bash
+  sudo dnf install ./curb-*.x86_64.rpm   # or: sudo zypper install ./curb-*.x86_64.rpm
+  ```
+- **Arch Linux / Manjaro / EndeavourOS (`PKGBUILD`):**
+  ```bash
+  cd packaging/linux && makepkg -si
+  ```
+- **Any other systemd Linux distro (`.tar.gz`):**
+  ```bash
+  tar -xzf curb-*-linux-x86_64.tar.gz && cd curb-*-linux-x86_64 && sudo ./install.sh
+  ```
+
+Then launch **Curb** from your application menu (or `curb-app`) and click **Full Protection** (prompts once via Polkit `pkexec` to enable `curb.service`).
+
 <details>
 <summary>Admin recovery (forgot Curb password?)</summary>
 
-Any Windows Administrator can reset the Curb password or pause protection from an elevated PowerShell prompt using the bundled CLI (`C:\ProgramData\Curb\bin\curb-cli.exe set-password` or `curb-cli.exe emergency-disable`).
+- **Windows:** From an elevated PowerShell prompt: `C:\ProgramData\Curb\bin\curb-cli.exe set-password` or `curb-cli.exe emergency-disable`.
+- **Linux:** From a terminal: `sudo curb-cli set-password` or `sudo curb-cli emergency-disable`.
 
 </details>
 
