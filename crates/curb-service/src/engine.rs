@@ -8,15 +8,16 @@ use chrono::Utc;
 use curb_core::auth::{hash_password, verify_password, AuthRecord, SessionManager};
 use curb_core::config::{Config, NetworkPolicy};
 use curb_core::dns::{domain_matches_any, DnsCache};
-use curb_core::ipc::{BlockedEvent, IpcRequest, IpcResponse, ServiceSnapshot};
+use curb_core::ipc::{
+    record_grouped_blocked_event, BlockedEvent, IpcRequest, IpcResponse, ServiceSnapshot,
+    MAX_BLOCKED_HISTORY,
+};
 use curb_core::presets::EffectiveRule;
 use curb_core::processes::collect_running_apps;
 use curb_core::steam::{discover_steam_games, find_default_steam_root};
 use curb_core::store::{load_auth, load_config, save_auth, save_config};
 use curb_core::verify::{inspect_binary, BinaryIdentity};
 use tokio::sync::Notify;
-
-const MAX_BLOCKED_HISTORY: usize = 100;
 
 /// Microsoft NCSI probe domains used by Windows to verify internet connectivity
 /// and keep Wi-Fi / Ethernet adapters from showing "No Internet" or bouncing.
@@ -276,19 +277,7 @@ impl EngineState {
     }
 
     pub fn record_blocked_event(&mut self, event: BlockedEvent) {
-        // Deduplicate burst events for the same executable and destination within 15 seconds.
-        let recent_dup = self.blocked_events.iter().take(16).any(|existing| {
-            existing.exe.eq_ignore_ascii_case(&event.exe)
-                && existing.destination.eq_ignore_ascii_case(&event.destination)
-                && (event.timestamp - existing.timestamp).num_seconds().abs() <= 15
-        });
-        if recent_dup {
-            return;
-        }
-        if self.blocked_events.len() >= MAX_BLOCKED_HISTORY {
-            self.blocked_events.pop_back();
-        }
-        self.blocked_events.push_front(event);
+        record_grouped_blocked_event(&mut self.blocked_events, event, MAX_BLOCKED_HISTORY);
     }
 
     pub fn snapshot(&self) -> ServiceSnapshot {

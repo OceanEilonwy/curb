@@ -7,7 +7,8 @@ use curb_core::auth::{hash_password, verify_password, AuthRecord, SessionManager
 use curb_core::config::Config;
 use curb_core::dns::domain_matches_any;
 use curb_core::ipc::{
-    BlockedEvent, IpcRequest, IpcResponse, ProtectionTier, ServiceSnapshot,
+    record_grouped_blocked_event, BlockedEvent, IpcRequest, IpcResponse, ProtectionTier,
+    ServiceSnapshot, MAX_BLOCKED_HISTORY,
 };
 use curb_core::steam::{discover_steam_games, find_default_steam_root};
 use curb_core::store::{load_auth, load_config, save_auth, save_config};
@@ -18,7 +19,6 @@ use tokio::runtime::Handle;
 use uuid::Uuid;
 
 pub const LOCAL_PROXY_PORT: u16 = 48921;
-const MAX_BLOCKED: usize = 100;
 
 /// Returns the per-user Curb data directory (`%LOCALAPPDATA%\Curb` on Windows).
 pub fn user_data_dir() -> PathBuf {
@@ -68,7 +68,7 @@ impl LocalStandardRuntime {
                 config,
                 auth,
                 sessions: SessionManager::default(),
-                blocked_events: VecDeque::with_capacity(MAX_BLOCKED),
+                blocked_events: VecDeque::with_capacity(MAX_BLOCKED_HISTORY),
                 proxy_started: false,
             })),
             rt_handle,
@@ -166,25 +166,26 @@ impl LocalStandardRuntime {
 
     fn record_blocked(&self, host: String) {
         let mut guard = self.state.lock().unwrap();
-        if guard.blocked_events.len() >= MAX_BLOCKED {
-            guard.blocked_events.pop_back();
-        }
         let is_steam_community = host.to_ascii_lowercase().contains("steamcommunity.com");
-        guard.blocked_events.push_front(BlockedEvent {
-            id: Uuid::new_v4(),
-            timestamp: Utc::now(),
-            app_name: if is_steam_community {
-                "Steam Community".into()
-            } else {
-                "Browser / App".into()
+        record_grouped_blocked_event(
+            &mut guard.blocked_events,
+            BlockedEvent {
+                id: Uuid::new_v4(),
+                timestamp: Utc::now(),
+                app_name: if is_steam_community {
+                    "Steam Community".into()
+                } else {
+                    "Browser / App".into()
+                },
+                exe: "proxy".into(),
+                path: String::new(),
+                destination: host,
+                signed: false,
+                signer: None,
+                is_steam_community,
             },
-            exe: "proxy".into(),
-            path: String::new(),
-            destination: host,
-            signed: false,
-            signer: None,
-            is_steam_community,
-        });
+            MAX_BLOCKED_HISTORY,
+        );
     }
 
     pub fn snapshot(&self, configured: bool) -> ServiceSnapshot {
