@@ -353,20 +353,65 @@ pub struct ServiceEngine {
     pub reconcile_notify: Arc<Notify>,
     pub dns_v4_ready: Arc<AtomicBool>,
     pub dns_v6_ready: Arc<AtomicBool>,
+    pub wfp_loop_active: Arc<AtomicBool>,
+    wfp_dns_sync_tx: Arc<tokio::sync::watch::Sender<u64>>,
+    wfp_dns_sync_rx: tokio::sync::watch::Receiver<u64>,
 }
 
 impl ServiceEngine {
     pub fn new(data_dir: PathBuf) -> curb_core::Result<Self> {
+        let (wfp_dns_sync_tx, wfp_dns_sync_rx) = tokio::sync::watch::channel(0u64);
         Ok(Self {
             state: Arc::new(Mutex::new(EngineState::load(data_dir)?)),
             reconcile_notify: Arc::new(Notify::new()),
             dns_v4_ready: Arc::new(AtomicBool::new(false)),
             dns_v6_ready: Arc::new(AtomicBool::new(false)),
+            wfp_loop_active: Arc::new(AtomicBool::new(false)),
+            wfp_dns_sync_tx: Arc::new(wfp_dns_sync_tx),
+            wfp_dns_sync_rx,
         })
     }
 
     pub fn notify_reconcile(&self) {
         self.reconcile_notify.notify_one();
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn set_wfp_loop_active(&self, active: bool) {
+        self.wfp_loop_active.store(active, Ordering::Release);
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn mark_wfp_dns_applied(&self, dns_version: u64) {
+        self.wfp_dns_sync_tx.send_if_modified(|current| {
+            if *current != dns_version {
+                *current = dns_version;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    /// Waits until the WFP enforcement loop has installed permit filters for at least
+    /// `target_version` of `DnsCache` (or `timeout` elapses). Returns immediately when
+    /// WFP enforcement is not active (e.g. non-Windows or paused mode).
+    pub async fn wait_for_wfp_dns_sync(&self, target_version: u64, timeout: std::time::Duration) {
+        if !self.wfp_loop_active.load(Ordering::Acquire) {
+            return;
+        }
+        let mut rx = self.wfp_dns_sync_rx.clone();
+        if *rx.borrow_and_update() >= target_version {
+            return;
+        }
+        let _ = tokio::time::timeout(timeout, async {
+            while rx.changed().await.is_ok() {
+                if *rx.borrow() >= target_version {
+                    break;
+                }
+            }
+        })
+        .await;
     }
 
     pub fn set_dns_ready(&self, v4: bool, v6: bool) {
@@ -874,6 +919,34 @@ mod tests {
             }),
             IpcResponse::Unlocked { .. }
         ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn wfp_dns_sync_waits_when_active_and_returns_immediately_when_inactive() {
+        let dir = std::env::temp_dir().join(format!("curb_dns_sync_{}", Uuid::new_v4()));
+        let engine = ServiceEngine::new(dir.clone()).unwrap();
+
+        // Inactive loop should never block DNS replies.
+        engine
+            .wait_for_wfp_dns_sync(5, std::time::Duration::from_secs(2))
+            .await;
+
+        // Active loop should wait until mark_wfp_dns_applied reaches target_version.
+        engine.set_wfp_loop_active(true);
+        let eng_bg = engine.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            eng_bg.mark_wfp_dns_applied(5);
+        });
+
+        let start = std::time::Instant::now();
+        engine
+            .wait_for_wfp_dns_sync(5, std::time::Duration::from_secs(2))
+            .await;
+        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+        handle.await.unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -97,7 +97,7 @@ impl DnsCache {
     }
 
     fn record_single_key(&mut self, key: &str, ips: &[IpAddr], ttl_secs: u32) -> bool {
-        let ttl = Duration::from_secs(ttl_secs.max(30) as u64);
+        let ttl = Duration::from_secs(ttl_secs.max(300) as u64);
         let now = Instant::now();
         let expires_at = now + ttl;
 

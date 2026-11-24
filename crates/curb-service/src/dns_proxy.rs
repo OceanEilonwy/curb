@@ -265,21 +265,23 @@ async fn handle_dns_packet(
         }
         if (!ips.is_empty() || !cnames.is_empty()) && !queried_domain.is_empty() {
             let ttl = if min_ttl == u32::MAX { 60 } else { min_ttl };
-            let changed = {
+            let sync_target = {
                 let mut guard = engine.state.lock().unwrap();
                 for (owner, target) in &cnames {
                     guard.dns_cache.record_cname(owner, &queried_domain);
                     guard.dns_cache.record_cname(target, owner);
                 }
-                if !ips.is_empty() {
-                    guard.dns_cache.record(&queried_domain, &ips, ttl)
+                if !ips.is_empty() && guard.dns_cache.record(&queried_domain, &ips, ttl) {
+                    Some(guard.dns_cache.version())
                 } else {
-                    false
+                    None
                 }
             };
-            if changed {
+            if let Some(target_version) = sync_target {
                 engine.notify_reconcile();
-                tokio::task::yield_now().await;
+                engine
+                    .wait_for_wfp_dns_sync(target_version, Duration::from_millis(400))
+                    .await;
             }
         }
     }

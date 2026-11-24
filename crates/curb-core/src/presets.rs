@@ -51,12 +51,16 @@ pub const STEAM_STORE_DOMAINS: &[&str] = &[
     "help.steampowered.com",
     "cmp.steampowered.com",
     "ssa.steampowered.com",
+    "*.steampowered.com",
     "partner.steamgames.com",
     "steamgames.com",
+    "*.steamgames.com",
     "*.steamstatic.com",
     "*.steamcontent.com",
+    "*.steamserver.net",
     "steamcdn-a.akamaihd.net",
     "*.akamaihd.net",
+    "*.akamaized.net",
 ];
 
 pub const STEAM_COMMUNITY_DOMAINS: &[&str] = &[
@@ -79,14 +83,21 @@ impl SteamPresetConfig {
             return Vec::new();
         }
         let mut domains = Vec::new();
+        let mut push_unique = |list: &[&str]| {
+            for &item in list {
+                if !domains.iter().any(|d: &String| d.eq_ignore_ascii_case(item)) {
+                    domains.push(item.to_string());
+                }
+            }
+        };
         if self.store_and_library {
-            domains.extend(STEAM_STORE_DOMAINS.iter().map(|s| (*s).to_string()));
+            push_unique(STEAM_STORE_DOMAINS);
         }
         if self.community_and_workshop {
-            domains.extend(STEAM_COMMUNITY_DOMAINS.iter().map(|s| (*s).to_string()));
+            push_unique(STEAM_COMMUNITY_DOMAINS);
         }
         if self.friends_and_voice {
-            domains.extend(STEAM_FRIENDS_DOMAINS.iter().map(|s| (*s).to_string()));
+            push_unique(STEAM_FRIENDS_DOMAINS);
         }
         domains
     }
@@ -142,7 +153,10 @@ impl SteamPresetConfig {
                 },
                 network: NetworkPolicy {
                     allow_tcp: true,
-                    allow_udp: self.friends_and_voice,
+                    // UDP is scoped to `dns_whitelist` IPs (plus LAN SSDP/mDNS for Media
+                    // Router/Cast), allowing Chromium HTTP/3 (QUIC) to Steam CDNs without
+                    // permitting arbitrary UDP (such as direct DNS to 8.8.4.4:53).
+                    allow_udp: true,
                     dns_whitelist: Some(web_domains),
                 },
                 subprocesses: SubprocessPolicy::Disabled,
@@ -164,8 +178,13 @@ mod tests {
         assert_eq!(rules.len(), 3);
 
         let web = &rules[2];
+        assert!(web.network.allow_tcp);
+        assert!(web.network.allow_udp);
         let dns = web.network.dns_whitelist.as_ref().expect("DNS whitelist");
         assert!(dns.iter().any(|d| d == "store.steampowered.com"));
+        assert!(dns.iter().any(|d| d == "*.steampowered.com"));
+        assert!(dns.iter().any(|d| d == "*.steamserver.net"));
+        assert!(dns.iter().any(|d| d == "*.akamaized.net"));
         assert!(!dns.iter().any(|d| d == "steamcommunity.com"));
     }
 

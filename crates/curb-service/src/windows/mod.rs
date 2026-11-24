@@ -120,6 +120,7 @@ mod runtime {
         let mut was_enforcing = false;
         let mut last_baseline = None;
         let mut last_config_version: Option<u64> = None;
+        let mut last_dns_version: u64 = 0;
         let mut dns_redirected = false;
         let mut last_dns_attempt: Option<Instant> = None;
 
@@ -128,9 +129,12 @@ mod runtime {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
+            let mut woke_by_notify = false;
             tokio::select! {
                 _ = ticker.tick() => {}
-                _ = notify.notified() => {}
+                _ = notify.notified() => {
+                    woke_by_notify = true;
+                }
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         break;
@@ -141,13 +145,14 @@ mod runtime {
                 break;
             }
 
-            let (enforcing, baseline, config_version) = {
+            let (enforcing, baseline, config_version, dns_version) = {
                 let mut guard = engine.state.lock().unwrap();
                 guard.dns_cache.prune_expired();
                 (
                     guard.config.mode.is_actively_enforcing(Utc::now()),
                     guard.config.baseline.clone(),
                     guard.config_version,
+                    guard.dns_cache.version(),
                 )
             };
 
@@ -166,8 +171,10 @@ mod runtime {
                 }
                 st.ncsi_ips = None; // force NCSI permit refresh
                 was_enforcing = true;
+                engine.set_wfp_loop_active(true);
                 last_baseline = Some(baseline);
             } else if !enforcing && was_enforcing {
+                engine.set_wfp_loop_active(false);
                 tokio::task::block_in_place(|| {
                     release_everything(&engine, &mut wfp, &mut st);
                     wfp.clear_persistent_filters();
@@ -184,6 +191,22 @@ mod runtime {
             }
 
             if !enforcing {
+                continue;
+            }
+
+            let config_changed = last_config_version != Some(config_version);
+
+            // Fast path: when woken up by a new DNS resolution while rules are unchanged,
+            // immediately update DNS-scoped WFP permit filters (e.g. steamwebhelper.exe &
+            // NCSI) and signal the DNS proxy BEFORE returning the DNS reply to the app.
+            // This avoids the race where Chromium receives an IP and connects before WFP
+            // permits it (causing immediate WSAEACCES page load failures).
+            if woke_by_notify && !config_changed && dns_version != last_dns_version {
+                tokio::task::block_in_place(|| {
+                    sync_dns_scoped_filters(&engine, &wfp, &mut st);
+                });
+                last_dns_version = dns_version;
+                engine.mark_wfp_dns_applied(dns_version);
                 continue;
             }
 
@@ -218,17 +241,19 @@ mod runtime {
                 }
             }
 
-            let config_changed = last_config_version != Some(config_version);
             last_config_version = Some(config_version);
 
             tokio::task::block_in_place(|| {
                 reconcile(&engine, &wfp, &mut st, config_changed);
             });
+            last_dns_version = dns_version;
+            engine.mark_wfp_dns_applied(dns_version);
         }
 
         // Clean teardown when CurbService stops or shuts down so the machine is never left
         // stranded with 127.0.0.1 adapter DNS or persistent default-deny filters while the
         // service is stopped.
+        engine.set_wfp_loop_active(false);
         if was_enforcing {
             info!("CurbService stopping — restoring adapter DNS and clearing WFP filters");
             tokio::task::block_in_place(|| {
@@ -238,6 +263,69 @@ mod runtime {
                     warn!("Failed to restore adapter DNS on service stop: {e}");
                 }
             });
+        }
+    }
+
+    /// Fast-path WFP update for DNS-scoped app groups (e.g. `steamwebhelper.exe`) and
+    /// Windows NCSI probes when a new DNS answer arrives, skipping process enumeration.
+    fn sync_dns_scoped_filters(engine: &ServiceEngine, wfp: &WfpController, st: &mut LoopState) {
+        let (updates, ncsi_ips) = {
+            let guard = engine.state.lock().unwrap();
+            let mut updates = Vec::new();
+            for (key, g) in &st.groups {
+                if g.network.dns_whitelist.is_some() {
+                    let new_ips = guard.allowed_ips_for_network(&g.network);
+                    if g.ips != new_ips {
+                        updates.push((key.clone(), new_ips));
+                    }
+                }
+            }
+            (updates, guard.ncsi_allowed_ips())
+        };
+
+        for (key, new_ips) in updates {
+            if let Some(g) = st.groups.get_mut(&key) {
+                match wfp.replace_app_dynamic(
+                    &g.filter_ids,
+                    Path::new(&g.exe_path),
+                    &g.network,
+                    new_ips.as_deref(),
+                    None,
+                ) {
+                    Ok(ids) => {
+                        g.ips = new_ips;
+                        g.filter_ids = ids;
+                    }
+                    Err(e) => warn!("Failed fast-path WFP DNS update for {}: {e}", g.exe_path),
+                }
+            }
+        }
+
+        if st.ncsi_ips.as_ref() != Some(&ncsi_ips) {
+            let svchost = system32_path("svchost.exe");
+            let res = if ncsi_ips.is_empty() {
+                wfp.remove_dynamic_filters(&st.ncsi_filter_ids);
+                Ok(Vec::new())
+            } else {
+                wfp.replace_app_dynamic(
+                    &st.ncsi_filter_ids,
+                    &svchost,
+                    &NetworkPolicy {
+                        allow_tcp: true,
+                        allow_udp: false,
+                        dns_whitelist: None,
+                    },
+                    Some(&ncsi_ips),
+                    Some(80),
+                )
+            };
+            match res {
+                Ok(ids) => {
+                    st.ncsi_filter_ids = ids;
+                    st.ncsi_ips = Some(ncsi_ips);
+                }
+                Err(e) => warn!("Failed fast-path NCSI WFP update: {e}"),
+            }
         }
     }
 
@@ -509,6 +597,11 @@ mod runtime {
 
             let drops = wfp.poll_classify_drops(start_ft, end_ft);
             for (win32_path, remote_ip, remote_port) in drops {
+                // Skip LAN multicast discovery noise (e.g. SSDP 239.255.255.250:1900, mDNS
+                // 224.0.0.251:5353) from the UI feed; WFP still blocks it cleanly.
+                if remote_ip.is_multicast() {
+                    continue;
+                }
                 let key = win32_path.to_ascii_lowercase();
                 // Skip if the app is already in an unrestricted allowed group.
                 if st

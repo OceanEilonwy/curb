@@ -424,6 +424,96 @@ impl WfpController {
                 }
             }
 
+            // Permit Media Router / Cast LAN multicast discovery (SSDP + mDNS) for
+            // DNS-scoped apps with UDP enabled (such as `steamwebhelper.exe`), without
+            // opening arbitrary UDP destinations.
+            if allowed_ips.is_some() && network.allow_udp && fixed_remote_port.is_none() {
+                for (v4, port, label) in [
+                    (
+                        Ipv4Addr::new(239, 255, 255, 250),
+                        1900u16,
+                        "Curb Dynamic Media Router SSDP v4",
+                    ),
+                    (
+                        Ipv4Addr::new(224, 0, 0, 251),
+                        5353u16,
+                        "Curb Dynamic Media Router mDNS v4",
+                    ),
+                ] {
+                    let ip_cond = FWPM_FILTER_CONDITION0 {
+                        fieldKey: FWPM_CONDITION_IP_REMOTE_ADDRESS,
+                        matchType: FWP_MATCH_EQUAL,
+                        conditionValue: FWP_CONDITION_VALUE0 {
+                            r#type: FWP_UINT32,
+                            Anonymous: FWP_CONDITION_VALUE0_0 {
+                                uint32: u32::from(v4),
+                            },
+                        },
+                    };
+                    let conds = [
+                        app_cond,
+                        proto_condition(IPPROTO_UDP),
+                        ip_cond,
+                        remote_port_condition(port),
+                    ];
+                    if let Ok(id) = self.add_filter(
+                        self.dynamic_engine,
+                        FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+                        label,
+                        FWP_ACTION_PERMIT,
+                        15,
+                        Default::default(),
+                        &conds,
+                    ) {
+                        ids.push(id);
+                    }
+                }
+
+                for (v6, port, label) in [
+                    (
+                        Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x000c),
+                        1900u16,
+                        "Curb Dynamic Media Router SSDP v6",
+                    ),
+                    (
+                        Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb),
+                        5353u16,
+                        "Curb Dynamic Media Router mDNS v6",
+                    ),
+                ] {
+                    let mut arr = FWP_BYTE_ARRAY16 {
+                        byteArray16: v6.octets(),
+                    };
+                    let ip_cond = FWPM_FILTER_CONDITION0 {
+                        fieldKey: FWPM_CONDITION_IP_REMOTE_ADDRESS,
+                        matchType: FWP_MATCH_EQUAL,
+                        conditionValue: FWP_CONDITION_VALUE0 {
+                            r#type: FWP_BYTE_ARRAY16_TYPE,
+                            Anonymous: FWP_CONDITION_VALUE0_0 {
+                                byteArray16: &mut arr,
+                            },
+                        },
+                    };
+                    let conds = [
+                        app_cond,
+                        proto_condition(IPPROTO_UDP),
+                        ip_cond,
+                        remote_port_condition(port),
+                    ];
+                    if let Ok(id) = self.add_filter(
+                        self.dynamic_engine,
+                        FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+                        label,
+                        FWP_ACTION_PERMIT,
+                        15,
+                        Default::default(),
+                        &conds,
+                    ) {
+                        ids.push(id);
+                    }
+                }
+            }
+
             Ok::<(), String>(())
         });
 
@@ -774,8 +864,14 @@ mod tests {
             .expect("atomically replace with IP+port scoped dynamic permit filters");
         assert_eq!(replaced_ids.len(), 4);
 
-        // 3. Clean removal
-        ctrl.remove_dynamic_filters(&replaced_ids);
+        // 3. DNS-scoped app without fixed port also receives 4 Media Router SSDP/mDNS filters
+        let media_router_ids = ctrl
+            .replace_app_dynamic(&replaced_ids, &target_exe, &policy, Some(&scoped_ips), None)
+            .expect("atomically replace with DNS-scoped + Media Router dynamic permit filters");
+        assert_eq!(media_router_ids.len(), 8);
+
+        // 4. Clean removal
+        ctrl.remove_dynamic_filters(&media_router_ids);
         drop(ctrl);
         let _ = curb_core::cleanup::purge_all_curb_wfp_objects();
     }
