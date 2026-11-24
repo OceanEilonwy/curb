@@ -88,8 +88,11 @@ async fn run_service_runtime(args: Args, shutdown_rx: tokio::sync::watch::Receiv
         let bind = args.dns_bind;
         let upstream = args.dns_upstream;
         tokio::spawn(async move {
-            if let Err(e) = dns_proxy::run_dns_proxy(dns_engine, bind, upstream).await {
-                warn!("Local DNS proxy stopped ({bind}): {e}");
+            loop {
+                if let Err(e) = dns_proxy::run_dns_proxy(dns_engine.clone(), bind, upstream).await {
+                    warn!("Local DNS proxy stopped ({bind}): {e}; restarting in 2s");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         });
     }

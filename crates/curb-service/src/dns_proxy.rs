@@ -97,7 +97,17 @@ async fn run_udp_loop(
 ) -> std::io::Result<()> {
     let mut buf = [0u8; 4096];
     loop {
-        let (len, peer) = socket.recv_from(&mut buf).await?;
+        let (len, peer) = match socket.recv_from(&mut buf).await {
+            Ok(res) => res,
+            Err(e) => {
+                // On Windows, an ICMP Port Unreachable for a previous `send_to` (e.g. a
+                // client that timed out and closed its ephemeral UDP port) surfaces as
+                // `WSAECONNRESET` (10054) on the next `recv_from`. Never terminate the
+                // DNS proxy on transient socket errors.
+                debug!("DNS UDP recv_from error (ignoring): {e}");
+                continue;
+            }
+        };
         let packet = buf[..len].to_vec();
         let sock = socket.clone();
         let eng = engine.clone();
@@ -119,11 +129,19 @@ async fn run_tcp_loop(
     engine: ServiceEngine,
     fallback_upstream: SocketAddr,
 ) {
-    while let Ok((stream, _peer)) = listener.accept().await {
-        let eng = engine.clone();
-        tokio::spawn(async move {
-            let _ = handle_tcp_client(stream, eng, fallback_upstream).await;
-        });
+    loop {
+        match listener.accept().await {
+            Ok((stream, _peer)) => {
+                let eng = engine.clone();
+                tokio::spawn(async move {
+                    let _ = handle_tcp_client(stream, eng, fallback_upstream).await;
+                });
+            }
+            Err(e) => {
+                debug!("DNS TCP accept error (ignoring): {e}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
     }
 }
 
