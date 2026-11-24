@@ -167,6 +167,12 @@ export component CurbInput inherits Rectangle {
         ti.focus();
     }
 
+    changed text => {
+        if flick.content-x < min(0px, flick.width - flick.content-width) {
+            flick.content-x = min(0px, flick.width - flick.content-width);
+        }
+    }
+
     height: 34px;
     border-radius: 8px;
     background: fill-color;
@@ -187,25 +193,43 @@ export component CurbInput inherits Rectangle {
         overflow: elide;
     }
 
-    ti := TextInput {
+    flick := Flickable {
         x: root.leading-padding;
-        width: parent.width - root.leading-padding - 10px;
+        y: 0px;
+        width: max(1px, parent.width - root.leading-padding - 10px);
         height: parent.height;
-        text <=> root.text;
-        color: Theme.text;
-        font-size: 12px;
-        font-family: root.mono ? "JetBrains Mono" : "";
-        vertical-alignment: center;
-        single-line: true;
-        enabled: root.enabled;
-        input-type: root.is-password ? InputType.password : InputType.text;
-        selection-background-color: Theme.accent;
-        selection-foreground-color: #ffffff;
-        accepted => {
-            root.accepted();
-        }
-        edited => {
-            root.edited(self.text);
+        content-width: max(self.width, ti.preferred-width + ti.text-cursor-width);
+        content-height: self.height;
+        interactive: false;
+
+        ti := TextInput {
+            x: 0px;
+            y: 0px;
+            width: max(flick.width - self.text-cursor-width, self.preferred-width);
+            height: flick.height;
+            text <=> root.text;
+            color: Theme.text;
+            font-size: 12px;
+            font-family: root.mono ? "JetBrains Mono" : "";
+            vertical-alignment: center;
+            single-line: true;
+            enabled: root.enabled;
+            input-type: root.is-password ? InputType.password : InputType.text;
+            selection-background-color: Theme.accent;
+            selection-foreground-color: #ffffff;
+            cursor-position-changed(cursor-position) => {
+                if cursor-position.x + flick.content-x < 0px {
+                    flick.content-x = min(0px, max(flick.width - flick.content-width, -cursor-position.x));
+                } else if cursor-position.x + flick.content-x > flick.width - self.text-cursor-width {
+                    flick.content-x = min(0px, max(flick.width - flick.content-width, flick.width - cursor-position.x - self.text-cursor-width));
+                }
+            }
+            accepted => {
+                root.accepted();
+            }
+            edited => {
+                root.edited(self.text);
+            }
         }
     }
 }
