@@ -3,11 +3,8 @@
 **/target
 Cargo.lock
 
-# Node / Frontend
-node_modules/
-apps/curb-app/dist/
-apps/curb-app/.vite/
-apps/curb-app/src-tauri/gen/
+# Release artifacts
+dist-release/
 
 # OS / Editor
 .DS_Store

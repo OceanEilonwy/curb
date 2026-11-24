@@ -1,0 +1,235 @@
+// Crisp vector icons compatible with Slint's software renderer (no rotation transforms).
+
+export component CheckIcon inherits Path {
+    in property <color> color: #ffffff;
+    in property <length> size: 13px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: color;
+    stroke-width: 2.6px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: "M 20 6 L 9 17 L 4 12";
+}
+
+export component WarnIcon inherits Path {
+    in property <color> color: #ffd670;
+    in property <length> size: 13px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: color;
+    stroke-width: 2.3px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: "M 10.29 3.86 L 1.82 18 A 2 2 0 0 0 3.53 21 L 20.47 21 A 2 2 0 0 0 22.18 18 L 13.71 3.86 A 2 2 0 0 0 10.29 3.86 Z M 12 9 L 12 13 M 12 17 L 12.01 17";
+}
+
+export component AlertCircleIcon inherits Path {
+    in property <color> color: #ffd670;
+    in property <length> size: 13px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: color;
+    stroke-width: 2.2px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: "M 21 12 A 9 9 0 1 1 3 12 A 9 9 0 1 1 21 12 Z M 12 8 L 12 12 M 12 16 L 12.01 16";
+}
+
+export component LockIcon inherits Path {
+    in property <color> color: #f5f6f8;
+    in property <length> size: 12px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: color;
+    stroke-width: 2.4px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: "M 5 11 L 19 11 A 2 2 0 0 1 21 13 L 21 20 A 2 2 0 0 1 19 22 L 5 22 A 2 2 0 0 1 3 20 L 3 13 A 2 2 0 0 1 5 11 Z M 7 11 L 7 7 A 5 5 0 0 1 17 7 L 17 11";
+}
+
+export component UnlockIcon inherits Path {
+    in property <color> color: #ffd670;
+    in property <length> size: 12px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: color;
+    stroke-width: 2.4px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: "M 5 11 L 19 11 A 2 2 0 0 1 21 13 L 21 20 A 2 2 0 0 1 19 22 L 5 22 A 2 2 0 0 1 3 20 L 3 13 A 2 2 0 0 1 5 11 Z M 7 11 L 7 7 A 5 5 0 0 1 16.9 6";
+}
+
+export component ShieldIcon inherits Path {
+    // 0 = on (check), 1 = paused (bars), 2 = off (cross)
+    in property <int> mode: 0;
+    in property <color> color: #74eea6;
+    in property <length> size: 15px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: color;
+    stroke-width: 2.3px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: mode == 0
+        ? "M 12 22 C 12 22 20 18 20 12 L 20 5 L 12 2 L 4 5 L 4 12 C 4 18 12 22 12 22 Z M 9 12 L 11 14 L 15 10"
+        : mode == 1
+        ? "M 12 22 C 12 22 20 18 20 12 L 20 5 L 12 2 L 4 5 L 4 12 C 4 18 12 22 12 22 Z M 10 9 L 10 15 M 14 9 L 14 15"
+        : "M 12 22 C 12 22 20 18 20 12 L 20 5 L 12 2 L 4 5 L 4 12 C 4 18 12 22 12 22 Z M 9 9 L 15 15 M 15 9 L 9 15";
+}
+
+export component ChevronIcon inherits Path {
+    in property <bool> rotated: false;
+    in property <color> color: #cfd4dc;
+    in property <length> size: 15px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: color;
+    stroke-width: 2.2px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: rotated ? "M 6 15 L 12 9 L 18 15" : "M 6 9 L 12 15 L 18 9";
+}
+
+export component BackIcon inherits Path {
+    in property <color> color: #cfd4dc;
+    in property <length> size: 15px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: color;
+    stroke-width: 2.3px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: "M 15 18 L 9 12 L 15 6";
+}
+
+export component SearchIcon inherits Path {
+    in property <color> color: #a6adb8;
+    in property <length> size: 14px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: color;
+    stroke-width: 2.1px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: "M 19 11 A 8 8 0 1 1 3 11 A 8 8 0 1 1 19 11 Z M 21 21 L 16.65 16.65";
+}
+
+export component RefreshIcon inherits Path {
+    in property <color> color: #cfd4dc;
+    in property <length> size: 14px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: color;
+    stroke-width: 2.2px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: "M 23 4 L 23 10 L 17 10 M 20.49 15 A 9 9 0 1 1 18.37 5.64 L 23 10";
+}
+
+export component PlusIcon inherits Path {
+    in property <color> color: #ffffff;
+    in property <length> size: 13px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: color;
+    stroke-width: 2.6px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: "M 12 5 L 12 19 M 5 12 L 19 12";
+}
+
+export component CloseIcon inherits Path {
+    in property <color> color: #cfd4dc;
+    in property <length> size: 13px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: color;
+    stroke-width: 2.2px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: "M 18 6 L 6 18 M 6 6 L 18 18";
+}
+
+export component FolderIcon inherits Path {
+    in property <color> color: #cfd4dc;
+    in property <length> size: 14px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: color;
+    stroke-width: 2px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: "M 22 19 A 2 2 0 0 1 20 21 L 4 21 A 2 2 0 0 1 2 19 L 2 5 A 2 2 0 0 1 4 3 L 9 3 L 11 6 L 20 6 A 2 2 0 0 1 22 8 Z";
+}
+
+export component LoadingDots inherits HorizontalLayout {
+    in property <color> color: #cfd4dc;
+    in property <length> dot-size: 4px;
+    spacing: 3px;
+    alignment: center;
+    cross-axis-alignment: center;
+
+    property <int> phase: mod(floor(animation-tick() / 220ms), 3);
+
+    Rectangle {
+        width: root.dot-size;
+        height: root.dot-size;
+        border-radius: root.dot-size / 2;
+        background: root.color;
+        opacity: root.phase == 0 ? 1.0 : 0.35;
+    }
+    Rectangle {
+        width: root.dot-size;
+        height: root.dot-size;
+        border-radius: root.dot-size / 2;
+        background: root.color;
+        opacity: root.phase == 1 ? 1.0 : 0.35;
+    }
+    Rectangle {
+        width: root.dot-size;
+        height: root.dot-size;
+        border-radius: root.dot-size / 2;
+        background: root.color;
+        opacity: root.phase == 2 ? 1.0 : 0.35;
+    }
+}

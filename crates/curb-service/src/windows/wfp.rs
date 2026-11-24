@@ -352,7 +352,7 @@ impl WfpController {
                                 layer,
                                 "Curb Dynamic App Allow",
                                 FWP_ACTION_PERMIT,
-                                20,
+                                15,
                                 Default::default(),
                                 &conds,
                             )?;
@@ -381,7 +381,7 @@ impl WfpController {
                                         FWPM_LAYER_ALE_AUTH_CONNECT_V4,
                                         "Curb Dynamic DNS-Scoped Allow v4",
                                         FWP_ACTION_PERMIT,
-                                        20,
+                                        15,
                                         Default::default(),
                                         &conds,
                                     ) {
@@ -411,7 +411,7 @@ impl WfpController {
                                         FWPM_LAYER_ALE_AUTH_CONNECT_V6,
                                         "Curb Dynamic DNS-Scoped Allow v6",
                                         FWP_ACTION_PERMIT,
-                                        20,
+                                        15,
                                         Default::default(),
                                         &conds,
                                     ) {

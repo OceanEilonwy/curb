@@ -533,6 +533,16 @@ mod runtime {
                     .as_ref()
                     .and_then(|i| i.signature.as_ref())
                     .is_some();
+                let app_name = peeked
+                    .as_ref()
+                    .and_then(|i| i.product_name.clone())
+                    .unwrap_or_else(|| {
+                        filename
+                            .strip_suffix(".exe")
+                            .or_else(|| filename.strip_suffix(".EXE"))
+                            .unwrap_or(&filename)
+                            .to_string()
+                    });
                 let signer = peeked
                     .and_then(|i| i.signature)
                     .map(|s| s.subject_cn);
@@ -542,20 +552,23 @@ mod runtime {
                     .dns_cache
                     .domain_for_ip(remote_ip)
                     .unwrap_or_else(|| format!("{remote_ip}:{remote_port}"));
-                let reason = if st.groups.contains_key(&key) {
-                    "Not in app's allowed domain list".into()
-                } else {
-                    "Blocked by Curb".into()
-                };
+                let is_steam_community = destination
+                    .to_ascii_lowercase()
+                    .contains("steamcommunity.com");
                 guard.record_blocked_event(BlockedEvent {
                     id: Uuid::new_v4(),
                     timestamp: now_utc,
+                    app_name: if is_steam_community {
+                        "Steam Community".into()
+                    } else {
+                        app_name
+                    },
                     exe: filename,
                     path: win32_path,
+                    destination,
                     signed,
                     signer,
-                    destination,
-                    reason,
+                    is_steam_community,
                 });
             }
         }

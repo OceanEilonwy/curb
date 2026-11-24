@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   test:
-    name: Core & Frontend Tests
+    name: Workspace & Slint UI Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,27 +25,11 @@ jobs:
           shared-key: curb-linux
           cache-on-failure: true
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 12
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/curb-app/pnpm-lock.yaml
+      - name: Install Linux fontconfig dev headers (for Slint)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev pkg-config
 
       - name: Run Rust workspace tests
         run: cargo test --workspace
-
-      - name: Type-check & build SolidJS 2 frontend
-        working-directory: apps/curb-app
-        run: |
-          pnpm install --frozen-lockfile || pnpm install
-          pnpm typecheck
-          pnpm build
 
   release-windows:
     name: Build Windows Release
@@ -57,45 +41,31 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Rust dependencies (workspace + Tauri)
+      - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: curb-windows
-          workspaces: |
-            . -> target
-            apps/curb-app/src-tauri -> target
           cache-on-failure: true
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 12
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/curb-app/pnpm-lock.yaml
 
       - name: Run Rust workspace tests (Windows)
         run: cargo test --workspace
 
-      - name: Build curb-service & curb-cli (release)
+      - name: Build curb-service, curb-cli & Slint curb-app (release)
         run: cargo build --release --workspace
 
-      - name: Stage service & CLI binaries into Tauri bundle resources
+      - name: Build Curb Per-User NSIS Installer (zero UAC to install)
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path apps/curb-app/src-tauri/resources | Out-Null
-          Copy-Item target/release/curb-service.exe apps/curb-app/src-tauri/resources/
-          Copy-Item target/release/curb-cli.exe apps/curb-app/src-tauri/resources/
-
-      - name: Build Curb Tauri v2 Per-User NSIS Installer (zero UAC to install)
-        working-directory: apps/curb-app
-        run: |
-          pnpm install --frozen-lockfile || pnpm install
-          pnpm tauri build --bundles nsis
+          $makensis = Get-Command makensis -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          if (-not $makensis -and (Test-Path "C:\Program Files (x86)\NSIS\makensis.exe")) {
+            $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          }
+          if (-not $makensis) {
+            choco install -y nsis
+            $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          }
+          & $makensis apps/curb-app/windows/installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
 
       - name: Package Windows Release Bundle
         shell: pwsh
@@ -103,14 +73,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist-release/curb-windows-x64 | Out-Null
           Copy-Item target/release/curb-service.exe dist-release/curb-windows-x64/
           Copy-Item target/release/curb-cli.exe dist-release/curb-windows-x64/
-          Copy-Item apps/curb-app/src-tauri/target/release/curb-app.exe dist-release/curb-windows-x64/
+          Copy-Item target/release/curb-app.exe dist-release/curb-windows-x64/
           Copy-Item README.md dist-release/curb-windows-x64/
           Copy-Item LICENSE dist-release/curb-windows-x64/
-
-          $setup = Get-ChildItem apps/curb-app/src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
-          if ($setup) {
-            Copy-Item $setup.FullName dist-release/curb-windows-x64-setup.exe
-          }
+          Copy-Item target/release/curb-windows-x64-setup.exe dist-release/curb-windows-x64-setup.exe
 
           Compress-Archive -Path dist-release/curb-windows-x64/* -DestinationPath dist-release/curb-windows-x64-portable.zip -Force
           Get-ChildItem dist-release

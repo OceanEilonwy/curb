@@ -1,0 +1,135 @@
+import { Theme } from "theme.slint";
+import { BlockedEventItem } from "types.slint";
+import { LoadingDots } from "icons.slint";
+import { CurbScrollView } from "components.slint";
+
+export component BlockedView inherits CurbScrollView {
+    in property <[BlockedEventItem]> events: [];
+    in property <bool> any-allowing: false;
+
+    callback allow-event(string);
+
+    content-padding: 16px;
+    content-spacing: 12px;
+
+    if root.events.length == 0: Rectangle {
+        height: 160px;
+        background: transparent;
+
+        Text {
+            text: "Nothing blocked recently.";
+            color: Theme.text-muted;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    if root.events.length > 0: VerticalLayout {
+        spacing: 12px;
+
+        Text {
+            text: "Apps that recently tried to go online. Helpful when setting up a new game.";
+            color: Theme.text-sec;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+
+        VerticalLayout {
+            spacing: 8px;
+
+            for ev in root.events: Rectangle {
+                border-radius: 12px;
+                background: Theme.card;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    padding-top: 10px;
+                    padding-bottom: 10px;
+                    spacing: 10px;
+                    cross-axis-alignment: center;
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 3px;
+
+                        HorizontalLayout {
+                            spacing: 5px;
+                            alignment: start;
+                            cross-axis-alignment: center;
+
+                            Text {
+                                text: ev.app-name;
+                                color: Theme.text;
+                                font-size: 13px;
+                                font-weight: 600;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: "· " + ev.relative-time;
+                                color: Theme.text-muted;
+                                font-size: 12px;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 4px;
+                            alignment: start;
+
+                            Text {
+                                text: "Tried to reach";
+                                color: Theme.text-sec;
+                                font-size: 12px;
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: ev.destination;
+                                color: Theme.text;
+                                font-size: 12px;
+                                font-weight: 500;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 0;
+                        height: 28px;
+                        border-radius: 8px;
+                        background: allow-ta.has-hover && !root.any-allowing ? Theme.card-hover : Theme.pill;
+                        opacity: root.any-allowing ? 0.60 : 1.0;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 5px;
+                            cross-axis-alignment: center;
+
+                            if ev.allowing: LoadingDots {
+                                color: Theme.text;
+                                dot-size: 3.5px;
+                            }
+
+                            Text {
+                                text: ev.allowing ? "Allowing…" : "Allow";
+                                color: Theme.text;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        allow-ta := TouchArea {
+                            enabled: !root.any-allowing;
+                            mouse-cursor: root.any-allowing ? default : pointer;
+                            clicked => { root.allow-event(ev.id); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

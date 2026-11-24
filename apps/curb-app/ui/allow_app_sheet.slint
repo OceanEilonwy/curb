@@ -1,0 +1,1125 @@
+import { Theme } from "theme.slint";
+import { RunningAppItem, SteamGameItem } from "types.slint";
+import {
+    AlertCircleIcon,
+    BackIcon,
+    CheckIcon,
+    FolderIcon,
+    LoadingDots,
+    RefreshIcon,
+    SearchIcon,
+    WarnIcon,
+} from "icons.slint";
+import {
+    CurbCheckbox,
+    CurbInput,
+    CurbScrollView,
+    RadioCircle,
+    SubprocessSelector,
+} from "components.slint";
+
+component RunningAppRow inherits Rectangle {
+    in property <RunningAppItem> app;
+    in property <bool> saving: false;
+    callback clicked();
+
+    border-radius: 12px;
+    background: app.selected ? Theme.accent-soft : (row-ta.has-hover && !app.already-allowed && !saving ? Theme.card-hover : Theme.card);
+    border-width: 1px;
+    border-color: app.selected ? Theme.focus : Theme.border;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 12px;
+        cross-axis-alignment: center;
+
+        // Colored avatar square
+        Rectangle {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            background: app.avatar-color;
+
+            Text {
+                text: app.initials;
+                color: #ffffff;
+                font-size: 12px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        // Info column
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 3px;
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                cross-axis-alignment: center;
+
+                Text {
+                    text: app.name;
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+
+                if app.background: Rectangle {
+                    height: 18px;
+                    border-radius: 4px;
+                    background: Theme.pill;
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        cross-axis-alignment: center;
+                        Text {
+                            text: "Background";
+                            color: Theme.text-sec;
+                            font-size: 11px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                if app.process-count > 1 && !app.background: Text {
+                    text: app.process-count + " tasks";
+                    color: Theme.text-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+
+            if app.tried-connect && !app.already-allowed && app.tried-host != "": HorizontalLayout {
+                spacing: 5px;
+                alignment: start;
+                cross-axis-alignment: center;
+
+                AlertCircleIcon {
+                    color: Theme.amber-text;
+                    size: 12px;
+                }
+                Text {
+                    text: "Tried to reach " + app.tried-host;
+                    color: Theme.amber-text;
+                    font-size: 12px;
+                    font-weight: 500;
+                    overflow: elide;
+                }
+            }
+
+            if !(app.tried-connect && !app.already-allowed && app.tried-host != ""): HorizontalLayout {
+                spacing: 5px;
+                alignment: start;
+                cross-axis-alignment: center;
+
+                if app.signed: CheckIcon {
+                    color: Theme.green-text;
+                    size: 12px;
+                }
+                if !app.signed: WarnIcon {
+                    color: Theme.amber-text;
+                    size: 12px;
+                }
+                Text {
+                    text: app.signed ? "Updates automatically" : "Re-approve after updates";
+                    color: app.signed ? Theme.green-text : Theme.amber-text;
+                    font-size: 12px;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // Right indicator
+        if app.already-allowed: Rectangle {
+            height: 24px;
+            border-radius: 12px;
+            background: Theme.green-soft;
+
+            HorizontalLayout {
+                padding-left: 9px;
+                padding-right: 9px;
+                spacing: 4px;
+                cross-axis-alignment: center;
+
+                CheckIcon {
+                    color: Theme.green-text;
+                    size: 11px;
+                }
+                Text {
+                    text: "Allowed";
+                    color: Theme.green-text;
+                    font-size: 11px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        if !app.already-allowed: RadioCircle {
+            selected: app.selected;
+        }
+    }
+
+    row-ta := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: !app.already-allowed && !saving;
+        mouse-cursor: (!app.already-allowed && !saving) ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
+
+component SteamGameRow inherits Rectangle {
+    in property <SteamGameItem> game;
+    in property <bool> saving: false;
+    callback clicked();
+
+    border-radius: 12px;
+    background: game.selected ? Theme.accent-soft : (row-ta.has-hover && !game.already-allowed && !saving ? Theme.card-hover : Theme.card);
+    border-width: 1px;
+    border-color: game.selected ? Theme.focus : Theme.border;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 12px;
+        cross-axis-alignment: center;
+
+        Rectangle {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            background: game.avatar-color;
+
+            Text {
+                text: game.initials;
+                color: #ffffff;
+                font-size: 12px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 3px;
+
+            Text {
+                text: game.name;
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+                overflow: elide;
+            }
+
+            HorizontalLayout {
+                spacing: 5px;
+                alignment: start;
+                cross-axis-alignment: center;
+
+                if game.signed: CheckIcon {
+                    color: Theme.green-text;
+                    size: 12px;
+                }
+                if !game.signed: WarnIcon {
+                    color: Theme.amber-text;
+                    size: 12px;
+                }
+                Text {
+                    text: game.signed ? "Updates automatically" : "Unsigned · Re-approve after updates";
+                    color: game.signed ? Theme.green-text : Theme.amber-text;
+                    font-size: 12px;
+                    overflow: elide;
+                }
+            }
+        }
+
+        if game.already-allowed: Rectangle {
+            height: 24px;
+            border-radius: 12px;
+            background: Theme.green-soft;
+
+            HorizontalLayout {
+                padding-left: 9px;
+                padding-right: 9px;
+                spacing: 4px;
+                cross-axis-alignment: center;
+
+                CheckIcon {
+                    color: Theme.green-text;
+                    size: 11px;
+                }
+                Text {
+                    text: "Allowed";
+                    color: Theme.green-text;
+                    font-size: 11px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        if !game.already-allowed: RadioCircle {
+            selected: game.selected;
+        }
+    }
+
+    row-ta := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: !game.already-allowed && !saving;
+        mouse-cursor: (!game.already-allowed && !saving) ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component AllowAppSheet inherits Rectangle {
+    // 0 = Running Apps, 1 = Steam Games
+    in-out property <int> source-tab: 0;
+    in-out property <string> search-text: "";
+    in property <bool> show-background: false;
+    in property <int> background-count: 0;
+
+    in property <bool> loading-running: false;
+    in property <bool> loading-steam: false;
+    in property <int> total-running-count: 0;
+    in property <int> total-steam-count: 0;
+
+    in property <bool> has-browsed: false;
+    in property <RunningAppItem> browsed-app;
+    in property <[RunningAppItem]> tried-apps: [];
+    in property <[RunningAppItem]> other-apps: [];
+    in property <[SteamGameItem]> steam-games: [];
+
+    in property <bool> browsing: false;
+    in property <bool> saving: false;
+
+    // Selected entry summary
+    in property <bool> has-selection: false;
+    in property <string> selected-name: "";
+    in property <string> selected-path: "";
+    in property <bool> selected-signed: false;
+    in property <string> selected-signer: "";
+    in property <bool> selected-verified: false;
+    in property <bool> inspecting-selected: false;
+    in property <string> inspect-error: "";
+
+    // Advanced options for new rule
+    in-out property <bool> adv-open: false;
+    in-out property <bool> allow-tcp: true;
+    in-out property <bool> allow-udp: true;
+    in-out property <int> subprocess-policy: 1;
+    in-out property <bool> force-hash: false;
+    in-out property <string> dns-text: "";
+
+    callback cancel();
+    callback refresh();
+    callback search-changed(string);
+    callback toggle-show-background();
+    callback select-entry(string);
+    callback retry-inspect();
+    callback open-browse();
+    callback confirm();
+
+    property <bool> is-refreshing: loading-running || loading-steam;
+    property <bool> use-signed: selected-signed && !force-hash && selected-signer != "";
+    property <bool> can-confirm: has-selection && selected-verified && !inspecting-selected && !saving && inspect-error == "";
+
+    background: Theme.surface;
+
+    VerticalLayout {
+        // Header
+        Rectangle {
+            background: Theme.bg;
+
+            WindowMoveArea {
+                width: 100%;
+                height: 44px;
+            }
+
+            VerticalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 10px;
+
+                // Top Row: Back | Title | Refresh
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+
+                    Rectangle {
+                        horizontal-stretch: 0;
+                        height: 28px;
+                        border-radius: 6px;
+                        background: back-ta.has-hover && !root.saving ? Theme.card : transparent;
+                        opacity: root.saving ? 0.55 : 1.0;
+
+                        HorizontalLayout {
+                            padding-left: 4px;
+                            padding-right: 8px;
+                            spacing: 4px;
+                            cross-axis-alignment: center;
+
+                            BackIcon {
+                                color: Theme.text-sec;
+                                size: 15px;
+                            }
+                            Text {
+                                text: "Back";
+                                color: Theme.text-sec;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        back-ta := TouchArea {
+                            enabled: !root.saving;
+                            mouse-cursor: root.saving ? default : pointer;
+                            clicked => { root.cancel(); }
+                        }
+                    }
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Allow an App or Game";
+                        color: Theme.text;
+                        font-size: 14px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: 6px;
+                        background: ref-ta.has-hover && !root.is-refreshing && !root.saving ? Theme.card : transparent;
+                        opacity: (root.is-refreshing || root.saving) ? 0.60 : 1.0;
+
+                        if root.is-refreshing: LoadingDots {
+                            color: Theme.text-sec;
+                            dot-size: 3.5px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        if !root.is-refreshing: RefreshIcon {
+                            color: Theme.text-sec;
+                            size: 14px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+
+                        ref-ta := TouchArea {
+                            enabled: !root.is-refreshing && !root.saving;
+                            mouse-cursor: (!root.is-refreshing && !root.saving) ? pointer : default;
+                            clicked => { root.refresh(); }
+                        }
+                    }
+                }
+
+                // Segmented tab: Running Apps | Steam Games
+                Rectangle {
+                    height: 34px;
+                    border-radius: 8px;
+                    background: Theme.sub;
+
+                    HorizontalLayout {
+                        padding: 4px;
+                        spacing: 4px;
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 6px;
+                            background: root.source-tab == 0 ? Theme.surface : transparent;
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 6px;
+                                cross-axis-alignment: center;
+                                Text {
+                                    text: "Running Apps";
+                                    color: root.source-tab == 0 ? Theme.text : Theme.text-muted;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                                if root.loading-running: LoadingDots {
+                                    color: Theme.text-muted;
+                                    dot-size: 3px;
+                                }
+                            }
+
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.source-tab = 0; }
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 6px;
+                            background: root.source-tab == 1 ? Theme.surface : transparent;
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 6px;
+                                cross-axis-alignment: center;
+                                Text {
+                                    text: "Steam Games";
+                                    color: root.source-tab == 1 ? Theme.text : Theme.text-muted;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                                if root.loading-steam: LoadingDots {
+                                    color: Theme.text-muted;
+                                    dot-size: 3px;
+                                }
+                            }
+
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.source-tab = 1; }
+                            }
+                        }
+                    }
+                }
+
+                // Search input
+                Rectangle {
+                    height: 34px;
+                    background: transparent;
+
+                    CurbInput {
+                        width: 100%;
+                        height: 100%;
+                        text <=> root.search-text;
+                        fill-color: Theme.sub;
+                        leading-padding: 32px;
+                        placeholder: root.source-tab == 0 ? "Search running apps…" : "Search installed Steam games…";
+                        edited(q) => { root.search-changed(q); }
+                    }
+
+                    SearchIcon {
+                        x: 10px;
+                        y: (parent.height - self.height) / 2;
+                        color: Theme.text-muted;
+                        size: 14px;
+                    }
+                }
+            }
+
+            Rectangle {
+                y: parent.height - 1px;
+                width: 100%;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        // Scrollable Picker List
+        CurbScrollView {
+            vertical-stretch: 1;
+            content-padding: 14px;
+            content-spacing: 14px;
+
+            // TAB 0: Running Apps
+            if root.source-tab == 0: VerticalLayout {
+                spacing: 14px;
+
+                if root.has-browsed: VerticalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "Chosen file";
+                        color: Theme.text-sec;
+                        font-size: 12px;
+                        font-weight: 600;
+                    }
+                    RunningAppRow {
+                        app: root.browsed-app;
+                        saving: root.saving;
+                        clicked => { root.select-entry(root.browsed-app.key); }
+                    }
+                }
+
+                if root.tried-apps.length > 0: VerticalLayout {
+                    spacing: 6px;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        cross-axis-alignment: center;
+
+                        AlertCircleIcon {
+                            color: Theme.amber-text;
+                            size: 13px;
+                        }
+                        Text {
+                            text: "Recently tried to go online";
+                            color: Theme.amber-text;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+                    }
+
+                    for app in root.tried-apps: RunningAppRow {
+                        app: app;
+                        saving: root.saving;
+                        clicked => { root.select-entry(app.key); }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+
+                        HorizontalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 6px;
+                            alignment: start;
+                            cross-axis-alignment: center;
+
+                            Text {
+                                text: "Open on this computer";
+                                color: Theme.text-sec;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            if root.loading-running && root.total-running-count > 0: LoadingDots {
+                                color: Theme.text-sec;
+                                dot-size: 3px;
+                            }
+                        }
+
+                        CurbCheckbox {
+                            checked: root.show-background;
+                            label: "Show background (" + root.background-count + ")";
+                            toggled => { root.toggle-show-background(); }
+                        }
+                    }
+
+                    if root.loading-running && root.total-running-count == 0: Rectangle {
+                        height: 84px;
+                        background: transparent;
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            cross-axis-alignment: center;
+                            LoadingDots { color: Theme.text-sec; }
+                            Text {
+                                text: "Scanning running apps…";
+                                color: Theme.text-sec;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    if !(root.loading-running && root.total-running-count == 0) && root.other-apps.length == 0: Rectangle {
+                        height: 64px;
+                        background: transparent;
+                        Text {
+                            text: "No matching running apps.";
+                            color: Theme.text-muted;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    if !(root.loading-running && root.total-running-count == 0) && root.other-apps.length > 0: VerticalLayout {
+                        spacing: 6px;
+                        for app in root.other-apps: RunningAppRow {
+                            app: app;
+                            saving: root.saving;
+                            clicked => { root.select-entry(app.key); }
+                        }
+                    }
+                }
+
+                // Browse for file (.exe)
+                Rectangle {
+                    height: 38px;
+                    border-radius: 12px;
+                    background: browse-ta.has-hover && !root.browsing && !root.saving ? Theme.card : transparent;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+                    opacity: (root.browsing || root.saving) ? 0.60 : 1.0;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+
+                        if root.browsing: LoadingDots {
+                            color: Theme.text-sec;
+                            dot-size: 3.5px;
+                        }
+                        if !root.browsing: FolderIcon {
+                            color: Theme.text-sec;
+                            size: 14px;
+                        }
+                        Text {
+                            text: root.browsing ? "Inspecting executable…" : "App not open? Browse for a file (.exe)…";
+                            color: Theme.text-sec;
+                            font-size: 12px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    browse-ta := TouchArea {
+                        enabled: !root.browsing && !root.saving;
+                        mouse-cursor: (!root.browsing && !root.saving) ? pointer : default;
+                        clicked => { root.open-browse(); }
+                    }
+                }
+            }
+
+            // TAB 1: Steam Games
+            if root.source-tab == 1: VerticalLayout {
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    cross-axis-alignment: center;
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Installed games found in your Steam library:";
+                        color: Theme.text-sec;
+                        font-size: 12px;
+                    }
+
+                    if root.loading-steam && root.total-steam-count > 0: HorizontalLayout {
+                        spacing: 5px;
+                        cross-axis-alignment: center;
+                        LoadingDots { color: Theme.text-muted; dot-size: 3px; }
+                        Text {
+                            text: "Updating…";
+                            color: Theme.text-muted;
+                            font-size: 12px;
+                        }
+                    }
+                }
+
+                if root.loading-steam && root.total-steam-count == 0: Rectangle {
+                    height: 110px;
+                    background: transparent;
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+                        LoadingDots { color: Theme.text-sec; }
+                        Text {
+                            text: "Scanning Steam library…";
+                            color: Theme.text-sec;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                if !(root.loading-steam && root.total-steam-count == 0) && root.steam-games.length == 0: Rectangle {
+                    height: 90px;
+                    background: transparent;
+                    Text {
+                        text: "No matching Steam games found.";
+                        color: Theme.text-muted;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                if !(root.loading-steam && root.total-steam-count == 0) && root.steam-games.length > 0: VerticalLayout {
+                    spacing: 6px;
+                    for game in root.steam-games: SteamGameRow {
+                        game: game;
+                        saving: root.saving;
+                        clicked => { root.select-entry(game.key); }
+                    }
+                }
+            }
+        }
+
+        // Bottom Sticky Confirmation & Collapsible Advanced
+        Rectangle {
+            background: Theme.bg;
+
+            Rectangle {
+                y: 0;
+                width: 100%;
+                height: 1px;
+                background: Theme.border;
+            }
+
+            VerticalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 10px;
+
+                if !root.has-selection: HorizontalLayout {
+                    cross-axis-alignment: center;
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Select an app above to allow it online";
+                        color: Theme.text-sec;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 0;
+                        height: 30px;
+                        border-radius: 8px;
+                        background: c1-ta.has-hover && !root.saving ? Theme.card : transparent;
+                        opacity: root.saving ? 0.55 : 1.0;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            cross-axis-alignment: center;
+                            Text {
+                                text: "Cancel";
+                                color: Theme.text-sec;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        c1-ta := TouchArea {
+                            enabled: !root.saving;
+                            mouse-cursor: root.saving ? default : pointer;
+                            clicked => { root.cancel(); }
+                        }
+                    }
+                }
+
+                if root.has-selection: VerticalLayout {
+                    spacing: 10px;
+
+                    // Summary + Advanced toggle
+                    HorizontalLayout {
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 3px;
+
+                            Text {
+                                text: root.selected-name;
+                                color: Theme.text;
+                                font-size: 13px;
+                                font-weight: 600;
+                                overflow: elide;
+                            }
+
+                            if root.inspecting-selected: HorizontalLayout {
+                                spacing: 6px;
+                                alignment: start;
+                                cross-axis-alignment: center;
+                                LoadingDots { color: Theme.text-sec; dot-size: 3.5px; }
+                                Text {
+                                    text: "Verifying signature & hash…";
+                                    color: Theme.text-sec;
+                                    font-size: 12px;
+                                }
+                            }
+
+                            if !root.inspecting-selected && root.inspect-error != "": HorizontalLayout {
+                                spacing: 6px;
+                                alignment: start;
+                                cross-axis-alignment: center;
+
+                                WarnIcon { color: Theme.red-text; size: 12px; }
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: root.inspect-error;
+                                    color: Theme.red-text;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                }
+                                Rectangle {
+                                    background: transparent;
+                                    height: 18px;
+                                    Text {
+                                        text: "Retry";
+                                        color: Theme.red-text;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                    TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.retry-inspect(); }
+                                    }
+                                }
+                            }
+
+                            if !root.inspecting-selected && root.inspect-error == "": HorizontalLayout {
+                                spacing: 5px;
+                                alignment: start;
+                                cross-axis-alignment: center;
+
+                                if root.use-signed: CheckIcon { color: Theme.green-text; size: 12px; }
+                                if !root.use-signed: WarnIcon { color: Theme.amber-text; size: 12px; }
+                                Text {
+                                    text: root.use-signed
+                                        ? ("Verified (" + root.selected-signer + ") · updates automatically")
+                                        : "Exact file lock · re-approve after updates";
+                                    color: root.use-signed ? Theme.green-text : Theme.amber-text;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 0;
+                            height: 28px;
+                            border-radius: 8px;
+                            background: adv-ta.has-hover && !root.saving ? Theme.card-hover : Theme.card;
+                            border-width: 1px;
+                            border-color: Theme.border-strong;
+                            opacity: root.saving ? 0.55 : 1.0;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                cross-axis-alignment: center;
+                                Text {
+                                    text: root.adv-open ? "Hide advanced" : "Advanced";
+                                    color: Theme.text;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            adv-ta := TouchArea {
+                                enabled: !root.saving;
+                                mouse-cursor: root.saving ? default : pointer;
+                                clicked => { root.adv-open = !root.adv-open; }
+                            }
+                        }
+                    }
+
+                    // Collapsible Advanced Panel
+                    if root.adv-open: Rectangle {
+                        border-radius: 10px;
+                        background: Theme.surface;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 10px;
+
+                            HorizontalLayout {
+                                cross-axis-alignment: center;
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: "Protocols";
+                                    color: Theme.text-sec;
+                                    font-size: 12px;
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Rectangle {
+                                        height: 24px;
+                                        border-radius: 6px;
+                                        background: root.allow-tcp ? Theme.accent : Theme.pill;
+                                        opacity: root.saving ? 0.55 : 1.0;
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            cross-axis-alignment: center;
+                                            Text {
+                                                text: "TCP";
+                                                color: root.allow-tcp ? #ffffff : Theme.text;
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        TouchArea {
+                                            enabled: !root.saving;
+                                            mouse-cursor: root.saving ? default : pointer;
+                                            clicked => { root.allow-tcp = !root.allow-tcp; }
+                                        }
+                                    }
+                                    Rectangle {
+                                        height: 24px;
+                                        border-radius: 6px;
+                                        background: root.allow-udp ? Theme.accent : Theme.pill;
+                                        opacity: root.saving ? 0.55 : 1.0;
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            cross-axis-alignment: center;
+                                            Text {
+                                                text: "UDP";
+                                                color: root.allow-udp ? #ffffff : Theme.text;
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        TouchArea {
+                                            enabled: !root.saving;
+                                            mouse-cursor: root.saving ? default : pointer;
+                                            clicked => { root.allow-udp = !root.allow-udp; }
+                                        }
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                cross-axis-alignment: center;
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: "Sub-processes";
+                                    color: Theme.text-sec;
+                                    font-size: 12px;
+                                }
+                                SubprocessSelector {
+                                    current: root.subprocess-policy;
+                                    enabled: !root.saving;
+                                    selected(v) => { root.subprocess-policy = v; }
+                                }
+                            }
+
+                            if root.selected-signed: CurbCheckbox {
+                                checked: root.force-hash;
+                                enabled: !root.saving;
+                                label: "Lock by SHA-256 hash instead of signer";
+                                toggled => { root.force-hash = !root.force-hash; }
+                            }
+
+                            VerticalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: "DNS whitelist (optional)";
+                                    color: Theme.text-sec;
+                                    font-size: 12px;
+                                }
+                                CurbInput {
+                                    text <=> root.dns-text;
+                                    fill-color: Theme.bg;
+                                    mono: true;
+                                    enabled: !root.saving;
+                                    placeholder: "Leave blank for any destination IP";
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: Theme.border; }
+
+                            Text {
+                                text: root.selected-path;
+                                color: Theme.text-muted;
+                                font-size: 11px;
+                                font-family: "JetBrains Mono";
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    // Bottom Action Buttons
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+
+                        Rectangle {
+                            horizontal-stretch: 0;
+                            height: 32px;
+                            border-radius: 8px;
+                            background: c2-ta.has-hover && !root.saving ? Theme.card : transparent;
+                            opacity: root.saving ? 0.55 : 1.0;
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                cross-axis-alignment: center;
+                                Text {
+                                    text: "Cancel";
+                                    color: Theme.text-sec;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            c2-ta := TouchArea {
+                                enabled: !root.saving;
+                                mouse-cursor: root.saving ? default : pointer;
+                                clicked => { root.cancel(); }
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 0;
+                            height: 34px;
+                            border-radius: 8px;
+                            background: conf-ta.has-hover && root.can-confirm ? Theme.accent-hover : Theme.accent;
+                            opacity: root.can-confirm ? 1.0 : 0.60;
+
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                spacing: 6px;
+                                cross-axis-alignment: center;
+
+                                if root.inspecting-selected || root.saving: LoadingDots {
+                                    color: #ffffff;
+                                    dot-size: 3.5px;
+                                }
+
+                                Text {
+                                    text: root.saving
+                                        ? "Allowing…"
+                                        : root.inspecting-selected
+                                        ? "Verifying…"
+                                        : ("Allow " + root.selected-name);
+                                    color: #ffffff;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            conf-ta := TouchArea {
+                                enabled: root.can-confirm;
+                                mouse-cursor: root.can-confirm ? pointer : default;
+                                clicked => { root.confirm(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

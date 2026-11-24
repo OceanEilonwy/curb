@@ -31,7 +31,7 @@ Most internet blockers rely on browser extensions or domain blocklists that are 
 - **Survives game & app updates:** Automatically verifies Authenticode signatures so signed apps keep working after patches; unsigned binaries lock cleanly by SHA-256 hash.
 - **Modular Steam preset:** Keeps downloads and multiplayer working reliably while locking Steam's built-in browser (`steamwebhelper.exe`) to a strict DNS whitelist with toggles for **Store**, **Community**, and **Friends**.
 - **Separate Curb password:** Protected with Argon2id so a friend or accountability partner can hold the password without needing your Windows Administrator password.
-- **Quiet in the taskbar:** Runs as a tiny `LocalSystem` service; the tray window destroys its WebView on close to stay near zero RAM.
+- **Quiet in the taskbar:** Runs as a tiny `LocalSystem` service with a native **Slint** software-rendered UI (zero WebView2 or GPU overhead) that drops its window on close to stay at just a few megabytes of RAM.
 
 ---
 
@@ -54,20 +54,19 @@ Any Windows Administrator can reset the Curb password or pause protection from a
 
 ## Building from Source
 
-Built with **Rust**, **Tauri v2**, **SolidJS 2**, and **TypeScript**. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the technical deep dive.
+Built in pure **Rust** with **Slint** (software renderer + native system tray). See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the technical deep dive.
 
 ```bash
-# Run core & service unit tests
+# Run workspace tests (core, service, CLI, and Slint UI)
 cargo test --workspace
 
-# Build the SolidJS 2 UI
-cd apps/curb-app
-pnpm install && pnpm build
+# Build all binaries (curb-service, curb-cli, curb-app)
+cargo build --release --workspace
 
-# Run Tauri desktop dev mode (Windows)
-pnpm tauri dev
+# Run the Slint UI in interactive demo mode (no Windows service required)
+cargo run -p curb-app -- --demo
 ```
 
 ## License
 
-GNU General Public License v3.0 — see [LICENSE](LICENSE).
+GNU Affero General Public License v3.0 — see [LICENSE](LICENSE).

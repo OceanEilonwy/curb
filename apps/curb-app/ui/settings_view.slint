@@ -1,0 +1,716 @@
+import { Theme } from "theme.slint";
+import { LoadingDots } from "icons.slint";
+import { CurbCheckbox, CurbInput, CurbScrollView, CurbSwitch } from "components.slint";
+
+export component SettingsView inherits CurbScrollView {
+    in property <bool> unlocked: false;
+    in property <bool> password-configured: true;
+    in property <bool> is-full-service: true;
+    // 0 = enforcing, 1 = paused_until, 2 = disabled
+    in property <int> mode-kind: 0;
+    // -1 = none, 0 = enforcing, 1 = paused_until, 2 = disabled
+    in property <int> pending-mode: -1;
+
+    in property <bool> baseline-dhcp: true;
+    in property <bool> baseline-loopback: true;
+    in property <bool> baseline-ntp: true;
+    in property <bool> baseline-ncsi: true;
+    in property <bool> busy-baseline: false;
+
+    in property <bool> upgrading: false;
+    in property <bool> uninstalling: false;
+
+    in-out property <bool> pw-open: false;
+    in-out property <string> current-pw: "";
+    in-out property <string> new-pw: "";
+    in-out property <string> confirm-pw: "";
+    in-out property <bool> show-pw: false;
+    in property <bool> pw-busy: false;
+    in property <string> pw-error: "";
+
+    in-out property <bool> adv-open: false;
+
+    callback require-unlock();
+    callback upgrade-to-full();
+    callback uninstall-service();
+    callback toggle-theme();
+    callback set-mode(int);
+    callback toggle-baseline-dhcp();
+    callback toggle-baseline-loopback();
+    callback toggle-baseline-ntp();
+    callback toggle-baseline-ncsi();
+    callback toggle-pw-form();
+    callback submit-password-change(string, string, string);
+
+    content-padding: 16px;
+    content-spacing: 12px;
+
+    // Protection Tier Status / Upgrade
+    Rectangle {
+        border-radius: 12px;
+        background: Theme.card;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        HorizontalLayout {
+            padding: 14px;
+            spacing: 10px;
+            cross-axis-alignment: center;
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 3px;
+
+                Text {
+                    text: root.is-full-service ? "Full Protection" : "Standard Mode (No Admin)";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: root.is-full-service
+                        ? "System firewall active across all adapters"
+                        : "Voluntary browser proxy · upgrade anytime";
+                    color: Theme.text-sec;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+
+            if root.is-full-service: Rectangle {
+                horizontal-stretch: 0;
+                height: 24px;
+                border-radius: 12px;
+                background: Theme.green-soft;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    cross-axis-alignment: center;
+                    Text {
+                        text: "Active";
+                        color: Theme.green-text;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            if !root.is-full-service: Rectangle {
+                horizontal-stretch: 0;
+                height: 30px;
+                border-radius: 8px;
+                background: upg-ta.has-hover && !root.upgrading ? Theme.accent-hover : Theme.accent;
+                opacity: root.upgrading ? 0.60 : 1.0;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 5px;
+                    cross-axis-alignment: center;
+
+                    if root.upgrading: LoadingDots {
+                        color: #ffffff;
+                        dot-size: 3.5px;
+                    }
+                    Text {
+                        text: root.upgrading ? "Upgrading…" : "Upgrade";
+                        color: #ffffff;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+
+                upg-ta := TouchArea {
+                    enabled: !root.upgrading;
+                    mouse-cursor: root.upgrading ? default : pointer;
+                    clicked => { root.upgrade-to-full(); }
+                }
+            }
+        }
+    }
+
+    // Protection Switch (On / Pause 15m / Off)
+    Rectangle {
+        border-radius: 12px;
+        background: Theme.card;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        VerticalLayout {
+            padding: 14px;
+            spacing: 10px;
+
+            VerticalLayout {
+                spacing: 3px;
+                Text {
+                    text: "Internet Protection";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: "Blocks all apps except the ones you’ve allowed";
+                    color: Theme.text-sec;
+                    font-size: 12px;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                // On
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 34px;
+                    border-radius: 8px;
+                    background: root.mode-kind == 0 ? Theme.green-solid : Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+                    opacity: (root.unlocked && root.pending-mode < 0) ? 1.0 : 0.55;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 5px;
+                        cross-axis-alignment: center;
+                        if root.pending-mode == 0: LoadingDots {
+                            color: root.mode-kind == 0 ? #ffffff : Theme.text;
+                            dot-size: 3.5px;
+                        }
+                        Text {
+                            text: "On";
+                            color: root.mode-kind == 0 ? #ffffff : Theme.text;
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    TouchArea {
+                        enabled: root.unlocked && root.pending-mode < 0;
+                        mouse-cursor: (root.unlocked && root.pending-mode < 0) ? pointer : default;
+                        clicked => { root.set-mode(0); }
+                    }
+                }
+
+                // Pause 15m
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 34px;
+                    border-radius: 8px;
+                    background: root.mode-kind == 1 ? Theme.amber-solid : Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+                    opacity: (root.unlocked && root.pending-mode < 0) ? 1.0 : 0.55;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 5px;
+                        cross-axis-alignment: center;
+                        if root.pending-mode == 1: LoadingDots {
+                            color: root.mode-kind == 1 ? Theme.amber-on-solid : Theme.text;
+                            dot-size: 3.5px;
+                        }
+                        Text {
+                            text: "Pause 15m";
+                            color: root.mode-kind == 1 ? Theme.amber-on-solid : Theme.text;
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    TouchArea {
+                        enabled: root.unlocked && root.pending-mode < 0;
+                        mouse-cursor: (root.unlocked && root.pending-mode < 0) ? pointer : default;
+                        clicked => { root.set-mode(1); }
+                    }
+                }
+
+                // Off
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 34px;
+                    border-radius: 8px;
+                    background: root.mode-kind == 2 ? Theme.red-solid : Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+                    opacity: (root.unlocked && root.pending-mode < 0) ? 1.0 : 0.55;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 5px;
+                        cross-axis-alignment: center;
+                        if root.pending-mode == 2: LoadingDots {
+                            color: root.mode-kind == 2 ? #ffffff : Theme.text;
+                            dot-size: 3.5px;
+                        }
+                        Text {
+                            text: "Off";
+                            color: root.mode-kind == 2 ? #ffffff : Theme.text;
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    TouchArea {
+                        enabled: root.unlocked && root.pending-mode < 0;
+                        mouse-cursor: (root.unlocked && root.pending-mode < 0) ? pointer : default;
+                        clicked => { root.set-mode(2); }
+                    }
+                }
+            }
+        }
+    }
+
+    // Appearance
+    Rectangle {
+        border-radius: 12px;
+        background: Theme.card;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        HorizontalLayout {
+            padding: 14px;
+            spacing: 10px;
+            cross-axis-alignment: center;
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 2px;
+                Text {
+                    text: "Appearance";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: "Dark or light theme";
+                    color: Theme.text-sec;
+                    font-size: 12px;
+                }
+            }
+
+            Rectangle {
+                horizontal-stretch: 0;
+                height: 30px;
+                border-radius: 8px;
+                background: theme-ta.has-hover ? Theme.card-hover : Theme.pill;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    cross-axis-alignment: center;
+                    Text {
+                        text: Theme.is-dark ? "Switch to Light" : "Switch to Dark";
+                        color: Theme.text;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+
+                theme-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.toggle-theme(); }
+                }
+            }
+        }
+    }
+
+    // Curb Password
+    Rectangle {
+        border-radius: 12px;
+        background: Theme.card;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        VerticalLayout {
+            padding: 14px;
+            spacing: 10px;
+
+            HorizontalLayout {
+                spacing: 10px;
+                cross-axis-alignment: center;
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    Text {
+                        text: "Curb Password";
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: "Protects your rules & pause controls";
+                        color: Theme.text-sec;
+                        font-size: 12px;
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 0;
+                    height: 30px;
+                    border-radius: 8px;
+                    background: pw-btn-ta.has-hover && !root.pw-busy ? Theme.card-hover : Theme.pill;
+                    opacity: root.pw-busy ? 0.55 : 1.0;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        cross-axis-alignment: center;
+                        Text {
+                            text: (root.pw-open && root.unlocked) ? "Cancel" : "Change";
+                            color: Theme.text;
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    pw-btn-ta := TouchArea {
+                        enabled: !root.pw-busy;
+                        mouse-cursor: root.pw-busy ? default : pointer;
+                        clicked => { root.toggle-pw-form(); }
+                    }
+                }
+            }
+
+            if root.pw-open && root.unlocked: VerticalLayout {
+                spacing: 10px;
+
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
+                }
+
+                if root.password-configured: VerticalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "Current password";
+                        color: Theme.text-sec;
+                        font-size: 12px;
+                        font-weight: 500;
+                    }
+                    CurbInput {
+                        text <=> root.current-pw;
+                        placeholder: "Enter current password";
+                        is-password: !root.show-pw;
+                        enabled: !root.pw-busy;
+                        accepted => { new-pw-in.focus-input(); }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "New password";
+                        color: Theme.text-sec;
+                        font-size: 12px;
+                        font-weight: 500;
+                    }
+                    new-pw-in := CurbInput {
+                        text <=> root.new-pw;
+                        placeholder: "At least 4 characters";
+                        is-password: !root.show-pw;
+                        enabled: !root.pw-busy;
+                        accepted => { confirm-pw-in.focus-input(); }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "Confirm new password";
+                        color: Theme.text-sec;
+                        font-size: 12px;
+                        font-weight: 500;
+                    }
+                    confirm-pw-in := CurbInput {
+                        text <=> root.confirm-pw;
+                        placeholder: "Re-enter new password";
+                        is-password: !root.show-pw;
+                        enabled: !root.pw-busy;
+                        accepted => {
+                            if !root.pw-busy {
+                                root.submit-password-change(root.current-pw, root.new-pw, root.confirm-pw);
+                            }
+                        }
+                    }
+                }
+
+                if root.pw-error != "": Text {
+                    text: root.pw-error;
+                    color: Theme.red-text;
+                    font-size: 12px;
+                    font-weight: 500;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    padding-top: 2px;
+                    cross-axis-alignment: center;
+
+                    CurbCheckbox {
+                        checked: root.show-pw;
+                        enabled: !root.pw-busy;
+                        label: "Show passwords";
+                        toggled => { root.show-pw = !root.show-pw; }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    Rectangle {
+                        horizontal-stretch: 0;
+                        height: 30px;
+                        border-radius: 8px;
+                        background: pw-sub-ta.has-hover && !root.pw-busy ? Theme.accent-hover : Theme.accent;
+                        opacity: root.pw-busy ? 0.60 : 1.0;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 5px;
+                            cross-axis-alignment: center;
+                            if root.pw-busy: LoadingDots {
+                                color: #ffffff;
+                                dot-size: 3.5px;
+                            }
+                            Text {
+                                text: root.pw-busy ? "Updating…" : "Update Password";
+                                color: #ffffff;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        pw-sub-ta := TouchArea {
+                            enabled: !root.pw-busy;
+                            mouse-cursor: root.pw-busy ? default : pointer;
+                            clicked => {
+                                root.submit-password-change(root.current-pw, root.new-pw, root.confirm-pw);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Collapsible Advanced Settings
+    Rectangle {
+        border-radius: 12px;
+        background: Theme.card;
+        border-width: 1px;
+        border-color: Theme.border;
+        clip: true;
+
+        VerticalLayout {
+            Rectangle {
+                height: 38px;
+                background: transparent;
+
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    cross-axis-alignment: center;
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Advanced Settings";
+                        color: Theme.text;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.adv-open ? "Hide" : "Show";
+                        color: Theme.text-sec;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    mouse-cursor: pointer;
+                    clicked => { root.adv-open = !root.adv-open; }
+                }
+            }
+
+            if root.adv-open: Rectangle {
+                background: Theme.surface;
+
+                Rectangle {
+                    y: 0;
+                    width: 100%;
+                    height: 1px;
+                    background: Theme.border;
+                }
+
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 12px;
+
+                    Text {
+                        text: "Windows System Essentials (WFP Baseline)";
+                        color: Theme.text-sec;
+                        font-size: 12px;
+                        font-weight: 600;
+                    }
+
+                    // DHCP
+                    HorizontalLayout {
+                        spacing: 10px;
+                        cross-axis-alignment: center;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Text { text: "DHCP"; color: Theme.text; font-size: 12px; font-weight: 600; }
+                            Text { text: "Wi-Fi & Ethernet IP assignment"; color: Theme.text-muted; font-size: 12px; }
+                        }
+                        CurbSwitch {
+                            checked: root.baseline-dhcp;
+                            enabled: root.unlocked && !root.busy-baseline;
+                            toggled => { root.toggle-baseline-dhcp(); }
+                        }
+                    }
+
+                    // Loopback
+                    HorizontalLayout {
+                        spacing: 10px;
+                        cross-axis-alignment: center;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Text { text: "Loopback"; color: Theme.text; font-size: 12px; font-weight: 600; }
+                            Text { text: "127.0.0.1 / ::1 local app IPC"; color: Theme.text-muted; font-size: 12px; }
+                        }
+                        CurbSwitch {
+                            checked: root.baseline-loopback;
+                            enabled: root.unlocked && !root.busy-baseline;
+                            toggled => { root.toggle-baseline-loopback(); }
+                        }
+                    }
+
+                    // NTP
+                    HorizontalLayout {
+                        spacing: 10px;
+                        cross-axis-alignment: center;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Text { text: "NTP Time Sync"; color: Theme.text; font-size: 12px; font-weight: 600; }
+                            Text { text: "Clock accuracy for HTTPS certificates"; color: Theme.text-muted; font-size: 12px; }
+                        }
+                        CurbSwitch {
+                            checked: root.baseline-ntp;
+                            enabled: root.unlocked && !root.busy-baseline;
+                            toggled => { root.toggle-baseline-ntp(); }
+                        }
+                    }
+
+                    // NCSI
+                    HorizontalLayout {
+                        spacing: 10px;
+                        cross-axis-alignment: center;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Text { text: "Windows NCSI"; color: Theme.text; font-size: 12px; font-weight: 600; }
+                            Text { text: "Prevents false “No Internet” icon"; color: Theme.text-muted; font-size: 12px; }
+                        }
+                        CurbSwitch {
+                            checked: root.baseline-ncsi;
+                            enabled: root.unlocked && !root.busy-baseline;
+                            toggled => { root.toggle-baseline-ncsi(); }
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: Theme.border; }
+
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: "Firewall: Windows Filtering Platform (IPv4/IPv6)";
+                            color: Theme.text-muted;
+                            font-size: 11px;
+                            font-family: "JetBrains Mono";
+                        }
+                        Text {
+                            text: "Adapter DNS: 127.0.0.1 (auto-restored when off)";
+                            color: Theme.text-muted;
+                            font-size: 11px;
+                            font-family: "JetBrains Mono";
+                        }
+                    }
+
+                    if root.is-full-service: VerticalLayout {
+                        spacing: 10px;
+                        Rectangle { height: 1px; background: Theme.border; }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            cross-axis-alignment: center;
+
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                Text {
+                                    text: "Remove System Service";
+                                    color: Theme.text;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: "Stops and unregisters CurbService (Admin prompt)";
+                                    color: Theme.text-muted;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 0;
+                                height: 28px;
+                                border-radius: 8px;
+                                background: Theme.red-soft;
+                                opacity: (root.unlocked && !root.uninstalling) ? 1.0 : 0.55;
+
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 5px;
+                                    cross-axis-alignment: center;
+                                    if root.uninstalling: LoadingDots {
+                                        color: Theme.red-text;
+                                        dot-size: 3.5px;
+                                    }
+                                    Text {
+                                        text: root.uninstalling ? "Removing…" : "Remove";
+                                        color: Theme.red-text;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                TouchArea {
+                                    enabled: root.unlocked && !root.uninstalling;
+                                    mouse-cursor: (root.unlocked && !root.uninstalling) ? pointer : default;
+                                    clicked => { root.uninstall-service(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
