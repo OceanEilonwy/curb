@@ -209,7 +209,10 @@ async fn run_unix_socket_server(
     use std::path::Path;
     use tokio::net::UnixListener;
 
-    let socket_path = curb_core::ipc::default_unix_socket_path();
+    #[cfg(target_os = "linux")]
+    let socket_path = curb_linux::default_unix_socket_path();
+    #[cfg(not(target_os = "linux"))]
+    let socket_path = curb_core::ipc::DEV_UNIX_SOCKET_PATH;
     if let Some(parent) = Path::new(socket_path).parent() {
         let _ = std::fs::create_dir_all(parent);
         let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755));

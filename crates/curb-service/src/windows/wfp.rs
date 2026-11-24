@@ -55,7 +55,7 @@ impl WfpController {
     /// from prior runs, registers Curb's provider & sublayer, and enables WFP net event
     /// collection so classify drops against Curb's default-deny filters can be surfaced.
     pub fn open() -> Result<Self, String> {
-        let _ = curb_core::cleanup::purge_all_curb_wfp_objects();
+        let _ = curb_windows::purge_all_curb_wfp_objects();
 
         let persistent_engine = open_engine(false)?;
         let dynamic_engine = open_engine(true)?;
@@ -906,7 +906,7 @@ mod tests {
         // 4. Clean removal
         ctrl.remove_dynamic_filters(&media_router_ids);
         drop(ctrl);
-        let _ = curb_core::cleanup::purge_all_curb_wfp_objects();
+        let _ = curb_windows::purge_all_curb_wfp_objects();
     }
 
     #[test]
@@ -926,6 +926,6 @@ mod tests {
 
         ctrl.clear_persistent_filters();
         drop(ctrl);
-        let _ = curb_core::cleanup::purge_all_curb_wfp_objects();
+        let _ = curb_windows::purge_all_curb_wfp_objects();
     }
 }

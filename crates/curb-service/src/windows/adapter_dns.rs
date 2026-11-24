@@ -2,7 +2,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::process::Command;
 
-use curb_core::cleanup::{restore_adapter_dns_clean, AdapterDnsBackup};
+use curb_core::cleanup::AdapterDnsBackup;
+use curb_windows::restore_adapter_dns_clean;
 use curb_core::store::{dns_backup_path, read_json, write_json_atomic};
 use tracing::info;
 

@@ -13,7 +13,6 @@ pub async fn run_linux_enforcement_loop(
     use chrono::Utc;
     use curb_core::adaptors::{DnsManager, FirewallManager};
     use curb_core::ipc::BlockedEvent;
-    use curb_core::verify::inspect_binary;
     use curb_linux::LinuxDnsManager;
     use curb_nftables::{
         run_nfqueue_loop, L4Proto, NftablesFirewall, PacketContext, CURB_NFQUEUE_NUM,
@@ -141,7 +140,7 @@ pub async fn run_linux_enforcement_loop(
             let guard = engine.state.lock().unwrap();
             return !guard.config.mode.is_actively_enforcing(Utc::now());
         };
-        let Ok(identity) = inspect_binary(path) else {
+        let Ok(identity) = engine.adaptors.verifier.inspect_binary(path) else {
             return false;
         };
 

@@ -12,8 +12,8 @@ use curb_core::ipc::{
     record_grouped_blocked_event, BlockedEvent, IpcRequest, IpcResponse, ServiceSnapshot,
     MAX_BLOCKED_HISTORY,
 };
+use curb_core::adaptors::{DefaultSteamDiscoverer, SteamDiscoverer};
 use curb_core::presets::EffectiveRule;
-use curb_core::steam::find_default_steam_root;
 use curb_core::store::{load_auth, load_config, save_auth, save_config};
 use curb_core::verify::BinaryIdentity;
 use tokio::sync::Notify;
@@ -52,10 +52,19 @@ pub struct EngineState {
     pub blocked_events: VecDeque<BlockedEvent>,
     pub tracked_processes: HashMap<u32, TrackedProcess>,
     pub active_wfp_filters: usize,
+    pub steam: Arc<dyn SteamDiscoverer>,
 }
 
 impl EngineState {
+    #[allow(dead_code)]
     pub fn load(data_dir: PathBuf) -> curb_core::Result<Self> {
+        Self::load_with_steam(data_dir, Arc::new(DefaultSteamDiscoverer))
+    }
+
+    pub fn load_with_steam(
+        data_dir: PathBuf,
+        steam: Arc<dyn SteamDiscoverer>,
+    ) -> curb_core::Result<Self> {
         let config = load_config(&data_dir)?;
         let auth = load_auth(&data_dir)?;
         Ok(Self {
@@ -69,12 +78,13 @@ impl EngineState {
             blocked_events: VecDeque::with_capacity(MAX_BLOCKED_HISTORY),
             tracked_processes: HashMap::new(),
             active_wfp_filters: 0,
+            steam,
         })
     }
 
     /// Compiles all enabled presets and user rules into flat `EffectiveRule`s.
     pub fn effective_rules(&self) -> Vec<EffectiveRule> {
-        let mut out = self.config.presets.steam.expand_rules();
+        let mut out = self.steam.expand_steam_preset(&self.config.presets.steam);
         for rule in &self.config.rules {
             if rule.enabled {
                 out.push(EffectiveRule {
@@ -180,7 +190,10 @@ impl EngineState {
             if let curb_core::config::ExecutableMatcher::SteamGame { install_dir, .. } =
                 &rule.matcher
             {
-                for exe in curb_core::steam::collect_game_executables(std::path::Path::new(install_dir)) {
+                for exe in self
+                    .steam
+                    .collect_game_executables(std::path::Path::new(install_dir))
+                {
                     let s = exe.to_string_lossy().to_string();
                     if !paths.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
                         paths.push(s);
@@ -190,19 +203,11 @@ impl EngineState {
         }
 
         if self.config.presets.steam.enabled {
-            if let Some(root) = find_default_steam_root() {
-                for rel in [
-                    "steam.exe",
-                    r"bin\steamservice.exe",
-                    r"bin\cef\cef.win7x64\steamwebhelper.exe",
-                    r"bin\cef\steamwebhelper.exe",
-                ] {
-                    let candidate = root.join(rel);
-                    if candidate.exists() {
-                        let s = candidate.to_string_lossy().to_string();
-                        if !paths.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
-                            paths.push(s);
-                        }
+            if let Some(root) = self.steam.find_steam_root() {
+                for candidate in self.steam.steam_client_candidate_paths(&root) {
+                    let s = candidate.to_string_lossy().to_string();
+                    if !paths.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
+                        paths.push(s);
                     }
                 }
             }
@@ -360,7 +365,10 @@ impl ServiceEngine {
     ) -> curb_core::Result<Self> {
         let (wfp_dns_sync_tx, wfp_dns_sync_rx) = tokio::sync::watch::channel(0u64);
         Ok(Self {
-            state: Arc::new(Mutex::new(EngineState::load(data_dir)?)),
+            state: Arc::new(Mutex::new(EngineState::load_with_steam(
+                data_dir,
+                adaptors.steam.clone(),
+            )?)),
             adaptors,
             reconcile_notify: Arc::new(Notify::new()),
             dns_refresh_notify: Arc::new(Notify::new()),
@@ -673,17 +681,6 @@ mod tests {
         let mut state = EngineState::load(dir.clone()).unwrap();
 
         // Steam preset is enabled by default with Store DNS whitelist.
-        #[cfg(target_os = "linux")]
-        let webhelper = BinaryIdentity {
-            path: "/home/alice/.local/share/Steam/ubuntu12_64/steamwebhelper".into(),
-            filename: "steamwebhelper".into(),
-            sha256: "deadbeef".into(),
-            signature: None,
-            product_name: None,
-            original_filename: None,
-            file_description: None,
-        };
-        #[cfg(not(target_os = "linux"))]
         let webhelper = BinaryIdentity {
             path: r"C:\Program Files (x86)\Steam\bin\cef\steamwebhelper.exe".into(),
             filename: "steamwebhelper.exe".into(),

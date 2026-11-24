@@ -32,4 +32,5 @@ uuid.workspace = true
 curb-windows = { path = "../../crates/adaptors/windows" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+curb-linux = { path = "../../crates/adaptors/linux" }
 curb-xdg = { path = "../../crates/adaptors/xdg" }

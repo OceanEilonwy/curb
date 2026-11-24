@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use curb_core::adaptors::{DnsManager, FirewallManager, ServiceManager};
 use curb_core::auth::hash_password;
 use curb_core::config::EnforcementMode;
-use curb_core::store::{default_data_dir, load_auth, load_config, save_auth, save_config};
+use curb_core::store::{load_auth, load_config, save_auth, save_config};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -58,6 +58,7 @@ struct CliAdaptors {
     service: Box<dyn ServiceManager>,
     firewall: Box<dyn FirewallManager>,
     dns: Box<dyn DnsManager>,
+    default_data_dir: PathBuf,
 }
 
 fn build_adaptors() -> Option<CliAdaptors> {
@@ -67,6 +68,7 @@ fn build_adaptors() -> Option<CliAdaptors> {
             service: Box::new(curb_windows::WindowsServiceManager),
             firewall: Box::new(curb_windows::WindowsFirewallManager),
             dns: Box::new(curb_windows::WindowsDnsManager),
+            default_data_dir: curb_windows::default_data_dir(),
         })
     }
 
@@ -76,6 +78,7 @@ fn build_adaptors() -> Option<CliAdaptors> {
             service: Box::new(curb_systemd::SystemdServiceManager),
             firewall: Box::new(curb_nftables::NftablesFirewall),
             dns: Box::new(curb_linux::LinuxDnsManager),
+            default_data_dir: curb_linux::default_data_dir(),
         })
     }
 
@@ -87,8 +90,13 @@ fn build_adaptors() -> Option<CliAdaptors> {
 
 fn main() {
     let cli = Cli::parse();
-    let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
     let adaptors = build_adaptors();
+    let data_dir = cli.data_dir.unwrap_or_else(|| {
+        adaptors
+            .as_ref()
+            .map(|a| a.default_data_dir.clone())
+            .unwrap_or_else(|| PathBuf::from("/tmp/curb-data"))
+    });
 
     match cli.command {
         Commands::Status => {

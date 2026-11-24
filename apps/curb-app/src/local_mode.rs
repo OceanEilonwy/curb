@@ -10,9 +10,7 @@ use curb_core::ipc::{
     record_grouped_blocked_event, BlockedEvent, IpcRequest, IpcResponse, ProtectionTier,
     ServiceSnapshot, MAX_BLOCKED_HISTORY,
 };
-use curb_core::steam::{discover_steam_games, find_default_steam_root};
 use curb_core::store::{load_auth, load_config, save_auth, save_config};
-use curb_core::verify::inspect_binary;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
@@ -205,24 +203,30 @@ impl LocalStandardRuntime {
                     let guard = self.state.lock().unwrap();
                     guard.blocked_events.iter().cloned().collect::<Vec<_>>()
                 };
-                let apps = curb_core::processes::collect_running_apps(
-                    &blocked_snapshot,
-                    visible_pids.as_deref(),
-                );
+                let adaptors = crate::elevate::service_adaptors();
+                let apps = adaptors
+                    .processes
+                    .collect_running_apps(&blocked_snapshot, visible_pids.as_deref());
                 IpcResponse::RunningApps { apps }
             }
             IpcRequest::ListSteamGames => {
-                let games = find_default_steam_root()
-                    .and_then(|root| discover_steam_games(&root).ok())
+                let adaptors = crate::elevate::service_adaptors();
+                let games = adaptors
+                    .steam
+                    .find_steam_root()
+                    .and_then(|root| adaptors.steam.discover_games(&root).ok())
                     .unwrap_or_default();
                 IpcResponse::SteamGames { games }
             }
-            IpcRequest::InspectExecutable { path } => match inspect_binary(Path::new(&path)) {
-                Ok(identity) => IpcResponse::Inspected { identity },
-                Err(e) => IpcResponse::Error {
-                    message: format!("Could not inspect file: {e}"),
-                },
-            },
+            IpcRequest::InspectExecutable { path } => {
+                let adaptors = crate::elevate::service_adaptors();
+                match adaptors.verifier.inspect_binary(Path::new(&path)) {
+                    Ok(identity) => IpcResponse::Inspected { identity },
+                    Err(e) => IpcResponse::Error {
+                        message: format!("Could not inspect file: {e}"),
+                    },
+                }
+            }
             IpcRequest::Unlock { password } => {
                 let mut guard = self.state.lock().unwrap();
                 let Some(record) = guard.auth.clone() else {

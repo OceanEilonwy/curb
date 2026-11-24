@@ -132,14 +132,21 @@ impl DesktopIntegration for WindowsDesktopIntegration {
     }
 
     fn system_data_dir(&self) -> PathBuf {
-        curb_core::store::default_data_dir()
+        crate::default_data_dir()
     }
 
     fn user_data_dir(&self) -> PathBuf {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
             return PathBuf::from(local).join("Curb");
         }
-        PathBuf::from(r"C:\ProgramData\Curb")
+        crate::default_data_dir()
+    }
+
+    fn exe_path_prompt(&self) -> (&'static str, &'static str) {
+        (
+            "Enter or paste the full path to an executable (.exe) on this computer.",
+            r"C:\Program Files\Example\App.exe",
+        )
     }
 }
 

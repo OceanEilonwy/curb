@@ -8,44 +8,11 @@ use crate::auth::AuthRecord;
 use crate::config::Config;
 use crate::Result;
 
-/// Default system data directory on Linux when running as root (`curb-service` / `sudo curb-cli`).
+/// Default system data directory on Linux (`curb-service` / `sudo curb-cli`).
 pub const LINUX_SYSTEM_DATA_DIR: &str = "/var/lib/curb";
 
-/// Returns the default Curb data directory:
-/// - Windows: `C:\ProgramData\Curb`
-/// - Linux (root / systemd service): `/var/lib/curb`
-/// - Linux/Unix (non-root): `$XDG_DATA_HOME/curb` or `$HOME/.local/share/curb`
-pub fn default_data_dir() -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Ok(program_data) = std::env::var("ProgramData") {
-            return PathBuf::from(program_data).join("Curb");
-        }
-        PathBuf::from(r"C:\ProgramData\Curb")
-    }
-
-    #[cfg(unix)]
-    {
-        let is_root = unsafe { libc::geteuid() == 0 };
-        if is_root {
-            return PathBuf::from(LINUX_SYSTEM_DATA_DIR);
-        }
-        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-            if !xdg.is_empty() {
-                return PathBuf::from(xdg).join("curb");
-            }
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".local/share/curb");
-        }
-        PathBuf::from("/tmp/curb-data")
-    }
-
-    #[cfg(all(not(windows), not(unix)))]
-    {
-        PathBuf::from("/tmp/curb-data")
-    }
-}
+/// Default system data directory on Windows (`CurbService` / elevated `curb-cli`).
+pub const WINDOWS_SYSTEM_DATA_DIR: &str = r"C:\ProgramData\Curb";
 
 pub fn config_path(data_dir: &Path) -> PathBuf {
     data_dir.join("config.json")
