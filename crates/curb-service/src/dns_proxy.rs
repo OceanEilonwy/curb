@@ -164,13 +164,16 @@ async fn handle_tcp_client(
 
 /// Pre-resolves Microsoft NCSI probe hosts through Curb's upstream forwarder so
 /// `svchost.exe` receives dynamic WFP permission for NCSI HTTP checks immediately
-/// when Curb transitions into enforcing mode.
+/// when Curb transitions into enforcing mode and stays refreshed before TTL expiry.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub async fn prewarm_ncsi_dns(engine: &ServiceEngine, fallback_upstream: SocketAddr) {
-    for (idx, host) in ["www.msftconnecttest.com.", "www.msftncsi.com."]
-        .iter()
-        .enumerate()
-    {
+    let probes = [
+        ("www.msftconnecttest.com.", RecordType::A),
+        ("www.msftncsi.com.", RecordType::A),
+        ("ipv6.msftconnecttest.com.", RecordType::AAAA),
+        ("ipv6.msftncsi.com.", RecordType::AAAA),
+    ];
+    for (idx, (host, rtype)) in probes.iter().enumerate() {
         let Ok(name) = Name::from_utf8(*host) else {
             continue;
         };
@@ -178,7 +181,7 @@ pub async fn prewarm_ncsi_dns(engine: &ServiceEngine, fallback_upstream: SocketA
         msg.set_id(0x4355u16.wrapping_add(idx as u16));
         msg.set_message_type(MessageType::Query);
         msg.set_recursion_desired(true);
-        msg.add_query(Query::query(name, RecordType::A));
+        msg.add_query(Query::query(name, *rtype));
         if let Ok(packet) = msg.to_vec() {
             let _ = handle_dns_packet(engine, &packet, fallback_upstream, false).await;
         }
@@ -264,12 +267,24 @@ async fn handle_dns_packet(
             }
         }
         if (!ips.is_empty() || !cnames.is_empty()) && !queried_domain.is_empty() {
-            let ttl = if min_ttl == u32::MAX { 60 } else { min_ttl };
+            let mut ttl = if min_ttl == u32::MAX { 60 } else { min_ttl };
+            let ncsi_patterns: Vec<String> = crate::engine::NCSI_DOMAINS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
             let sync_target = {
                 let mut guard = engine.state.lock().unwrap();
                 for (owner, target) in &cnames {
                     guard.dns_cache.record_cname(owner, &queried_domain);
                     guard.dns_cache.record_cname(target, owner);
+                }
+                let origin = guard.dns_cache.origin_for_domain(&queried_domain);
+                if curb_core::dns::domain_matches_any(&queried_domain, &ncsi_patterns)
+                    || origin
+                        .as_deref()
+                        .is_some_and(|o| curb_core::dns::domain_matches_any(o, &ncsi_patterns))
+                {
+                    ttl = ttl.max(600);
                 }
                 if !ips.is_empty() && guard.dns_cache.record(&queried_domain, &ips, ttl) {
                     Some(guard.dns_cache.version())

@@ -9,7 +9,7 @@ SetCompressor /SOLID lzma
 !include "MUI2.nsh"
 
 !ifndef PRODUCT_VERSION
-  !define PRODUCT_VERSION "0.3.0"
+  !define PRODUCT_VERSION "0.3.1"
 !endif
 !ifndef BIN_DIR
   !define BIN_DIR "..\..\..\target\release"
@@ -36,6 +36,7 @@ ShowUninstDetails nevershow
 !define MUI_FINISHPAGE_RUN_TEXT "Launch Curb"
 
 !insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
@@ -45,7 +46,15 @@ ShowUninstDetails nevershow
 
 !insertmacro MUI_LANGUAGE "English"
 
-Section "Install" SecMain
+Var ResetConfig
+
+Function .onInit
+  StrCpy $ResetConfig "0"
+FunctionEnd
+
+Section "Curb (required)" SecMain
+  SectionIn RO
+
   ; Close any running Curb UI instance so files can be updated cleanly
   nsExec::ExecToStack 'taskkill /F /IM curb-app.exe'
   Pop $0
@@ -77,15 +86,53 @@ Section "Install" SecMain
   WriteRegStr HKCU "${UNINST_KEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
+SectionEnd
 
+Section /o "Reset existing configuration" SecReset
+  StrCpy $ResetConfig "1"
+
+  ; Clear per-user Standard Mode state in %LOCALAPPDATA%\Curb
+  Delete "$LOCALAPPDATA\Curb\config.json"
+  Delete "$LOCALAPPDATA\Curb\auth.json"
+  Delete "$LOCALAPPDATA\Curb\standard_mode.flag"
+
+  ; Reset HKCU Windows proxy ONLY if it points to Curb's Standard Mode proxy (127.0.0.1:48921)
+  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Internet Settings" "ProxyServer"
+  StrCmp $0 "127.0.0.1:48921" 0 +3
+    WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Internet Settings" "ProxyEnable" 0
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Internet Settings" "ProxyServer"
+SectionEnd
+
+Section -PostInstall
   ; On upgrade: if Full Protection (C:\ProgramData\Curb\bin\curb-service.exe) is already
-  ; installed, refresh the LocalSystem service binary automatically.
+  ; installed, refresh the LocalSystem service binary automatically (and reset config if chosen).
   ReadEnvStr $0 "ProgramData"
   StrCmp $0 "" 0 +2
     StrCpy $0 "C:\ProgramData"
-  IfFileExists "$0\Curb\bin\curb-service.exe" 0 +2
-    ExecShellWait "runas" "$INSTDIR\resources\curb-cli.exe" 'install --service-bin "$INSTDIR\resources\curb-service.exe"' SW_HIDE
+
+  IfFileExists "$0\Curb\bin\curb-service.exe" 0 CheckOrphanReset
+    StrCmp $ResetConfig "1" 0 UpgradeKeepConfig
+      ExecShellWait "runas" "$INSTDIR\resources\curb-cli.exe" 'install --reset --service-bin "$INSTDIR\resources\curb-service.exe"' SW_HIDE
+      Goto DoneService
+    UpgradeKeepConfig:
+      ExecShellWait "runas" "$INSTDIR\resources\curb-cli.exe" 'install --service-bin "$INSTDIR\resources\curb-service.exe"' SW_HIDE
+      Goto DoneService
+
+  CheckOrphanReset:
+    StrCmp $ResetConfig "1" 0 DoneService
+      IfFileExists "$0\Curb\config.json" DoReset 0
+      IfFileExists "$0\Curb\auth.json" DoReset 0
+      IfFileExists "$0\Curb\dns_backup.json" DoReset DoneService
+    DoReset:
+      ExecShellWait "runas" "$INSTDIR\resources\curb-cli.exe" "reset" SW_HIDE
+
+  DoneService:
 SectionEnd
+
+!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecMain} "Install the Curb desktop app and background protection service."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecReset} "Clear saved rules, admin password, and DNS backups from previous Curb versions for a clean start."
+!insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Section "Uninstall"
   ; Ensure curb-app.exe is not running

@@ -44,6 +44,9 @@ mod runtime {
     const DNS_REDIRECT_REFRESH: Duration = Duration::from_secs(60);
     /// Back-off before retrying a failed adapter DNS redirect.
     const DNS_REDIRECT_RETRY: Duration = Duration::from_secs(15);
+    /// How often to refresh Microsoft NCSI probe IPs (well under their 600s cache TTL floor)
+    /// so Windows never loses NCSI connectivity checks during WFP filter updates.
+    const NCSI_PREWARM_REFRESH: Duration = Duration::from_secs(240);
 
     /// Dynamic WFP permit filters shared by every running process of the same executable.
     /// `ALE_APP_ID` filters apply per executable path, so one filter set per exe avoids
@@ -123,6 +126,7 @@ mod runtime {
         let mut last_dns_version: u64 = 0;
         let mut dns_redirected = false;
         let mut last_dns_attempt: Option<Instant> = None;
+        let mut last_ncsi_prewarm: Option<Instant> = None;
 
         let notify = engine.reconcile_notify.clone();
         let mut ticker = tokio::time::interval(Duration::from_millis(300));
@@ -172,7 +176,7 @@ mod runtime {
                 st.ncsi_ips = None; // force NCSI permit refresh
                 was_enforcing = true;
                 engine.set_wfp_loop_active(true);
-                last_baseline = Some(baseline);
+                last_baseline = Some(baseline.clone());
             } else if !enforcing && was_enforcing {
                 engine.set_wfp_loop_active(false);
                 tokio::task::block_in_place(|| {
@@ -185,6 +189,7 @@ mod runtime {
                 engine.set_upstream_dns(Vec::new());
                 dns_redirected = false;
                 last_dns_attempt = None;
+                last_ncsi_prewarm = None;
                 last_config_version = None;
                 was_enforcing = false;
                 continue;
@@ -231,14 +236,23 @@ mod runtime {
                         engine.set_upstream_dns(upstreams);
                         if !dns_redirected {
                             dns_redirected = true;
-                            let eng = engine.clone();
-                            tokio::spawn(async move {
-                                crate::dns_proxy::prewarm_ncsi_dns(&eng, fallback_upstream).await;
-                            });
                         }
                     }
                     Err(e) => warn!("Failed to point adapter DNS to 127.0.0.1: {e}"),
                 }
+            }
+
+            // Keep Microsoft NCSI probe IPs warm before their 600s cache TTL floor expires
+            // so Windows never drops Wi-Fi / flags "No Internet" when WFP filters update.
+            let ncsi_refresh_due = dns_redirected
+                && baseline.ncsi
+                && last_ncsi_prewarm.is_none_or(|t| t.elapsed() >= NCSI_PREWARM_REFRESH);
+            if ncsi_refresh_due {
+                last_ncsi_prewarm = Some(Instant::now());
+                let eng = engine.clone();
+                tokio::spawn(async move {
+                    crate::dns_proxy::prewarm_ncsi_dns(&eng, fallback_upstream).await;
+                });
             }
 
             last_config_version = Some(config_version);
@@ -457,7 +471,7 @@ mod runtime {
         st.learned_paths = active_learned;
 
         // Compute desired per-executable groups and NCSI permit IPs.
-        let (desired, tracked_pids, ncsi_ips) = {
+        let (desired, tracked_pids, ncsi_enabled, ncsi_ips) = {
             let guard = engine.state.lock().unwrap();
             let mut pids: Vec<&u32> = guard.tracked_processes.keys().collect();
             pids.sort();
@@ -480,7 +494,12 @@ mod runtime {
                 });
             }
             let tracked: HashSet<u32> = guard.tracked_processes.keys().copied().collect();
-            (desired, tracked, guard.ncsi_allowed_ips())
+            (
+                desired,
+                tracked,
+                guard.config.baseline.ncsi,
+                guard.ncsi_allowed_ips(),
+            )
         };
 
         // Image locks: lock newly allowed processes, release ones no longer allowed.
@@ -560,9 +579,16 @@ mod runtime {
         // Windows NCSI: allow the Network List Service (svchost.exe) to reach the
         // resolved Microsoft connectivity-check hosts on TCP 80 so Windows does not
         // flag Wi-Fi as "No Internet" and bounce the connection.
-        if st.ncsi_ips.as_ref() != Some(&ncsi_ips) {
+        // While baseline.ncsi is enabled, keep existing NCSI permit filters pinned
+        // if the cache momentarily empties between refreshes rather than tearing them down.
+        let should_update_ncsi = if !ncsi_enabled {
+            !st.ncsi_filter_ids.is_empty() || st.ncsi_ips.as_ref().is_some_and(|v| !v.is_empty())
+        } else {
+            !ncsi_ips.is_empty() && st.ncsi_ips.as_ref() != Some(&ncsi_ips)
+        };
+        if should_update_ncsi {
             let svchost = system32_path("svchost.exe");
-            let res = if ncsi_ips.is_empty() {
+            let res = if !ncsi_enabled {
                 wfp.remove_dynamic_filters(&st.ncsi_filter_ids);
                 Ok(Vec::new())
             } else {
@@ -581,7 +607,7 @@ mod runtime {
             match res {
                 Ok(ids) => {
                     st.ncsi_filter_ids = ids;
-                    st.ncsi_ips = Some(ncsi_ips);
+                    st.ncsi_ips = Some(if ncsi_enabled { ncsi_ips } else { Vec::new() });
                 }
                 Err(e) => warn!("Failed to apply NCSI connectivity-check WFP filters: {e}"),
             }

@@ -43,7 +43,12 @@ enum Commands {
         /// Optional Standard Mode data directory to migrate config.json and auth.json from.
         #[arg(long)]
         migrate_from: Option<PathBuf>,
+        /// Reset existing Curb configuration, rules, password, and DNS backup before starting.
+        #[arg(long)]
+        reset: bool,
     },
+    /// Reset Curb configuration, rules, password, WFP filters, and DNS backups for a clean start.
+    Reset,
     /// Stop and unregister CurbService from Windows SCM.
     Uninstall,
 }
@@ -147,6 +152,7 @@ fn main() {
         Commands::Install {
             service_bin,
             migrate_from,
+            reset,
         } => {
             #[cfg(windows)]
             {
@@ -166,6 +172,10 @@ fn main() {
 
                 // Stop any prior CurbService instance and wait for it to release the binary.
                 let _ = win_scm::stop_service_if_running();
+
+                if reset {
+                    reset_data_dir(&data_dir);
+                }
 
                 let installed_service = bin_dir.join("curb-service.exe");
                 if source_service != installed_service {
@@ -193,13 +203,16 @@ fn main() {
                     }
                 }
 
-                // Optionally migrate config & password from Standard Mode (%LOCALAPPDATA%\Curb).
-                if let Some(src_dir) = migrate_from {
-                    for filename in ["config.json", "auth.json"] {
-                        let src = src_dir.join(filename);
-                        let dst = data_dir.join(filename);
-                        if src.exists() && !dst.exists() {
-                            let _ = std::fs::copy(&src, &dst);
+                // Optionally migrate config & password from Standard Mode (%LOCALAPPDATA%\Curb)
+                // unless the user explicitly requested a clean reset.
+                if !reset {
+                    if let Some(src_dir) = migrate_from {
+                        for filename in ["config.json", "auth.json"] {
+                            let src = src_dir.join(filename);
+                            let dst = data_dir.join(filename);
+                            if src.exists() && !dst.exists() {
+                                let _ = std::fs::copy(&src, &dst);
+                            }
                         }
                     }
                 }
@@ -223,7 +236,11 @@ fn main() {
 
                 match win_scm::install_and_start_service(&installed_service) {
                     Ok(()) => {
-                        println!("CurbService installed and started.");
+                        if reset {
+                            println!("Curb configuration reset; CurbService installed and started.");
+                        } else {
+                            println!("CurbService installed and started.");
+                        }
                     }
                     Err(e) => {
                         eprintln!(
@@ -235,9 +252,18 @@ fn main() {
             }
             #[cfg(not(windows))]
             {
-                let _ = (service_bin, migrate_from);
+                let _ = (service_bin, migrate_from, reset);
                 eprintln!("Windows service installation is only supported on Windows.");
             }
+        }
+
+        Commands::Reset => {
+            #[cfg(windows)]
+            {
+                let _ = win_scm::stop_service_if_running();
+            }
+            reset_data_dir(&data_dir);
+            println!("Curb configuration, rules, password, and DNS backups have been reset.");
         }
 
         Commands::Uninstall => {
@@ -268,6 +294,47 @@ fn main() {
                 eprintln!("Windows service uninstallation is only supported on Windows.");
             }
         }
+    }
+}
+
+/// Purges Curb WFP filters, restores original adapter DNS settings, and removes
+/// persisted `config.json`, `auth.json`, and `dns_backup.json` from `data_dir`.
+fn reset_data_dir(data_dir: &std::path::Path) {
+    if let Err(e) = curb_core::cleanup::purge_all_curb_wfp_objects() {
+        eprintln!("Warning: WFP cleanup reported: {e}");
+    }
+    if let Err(e) = curb_core::cleanup::restore_adapter_dns_clean(data_dir) {
+        eprintln!("Warning: DNS restore reported: {e}");
+    }
+    for file in [
+        curb_core::store::config_path(data_dir),
+        curb_core::store::auth_path(data_dir),
+        curb_core::store::dns_backup_path(data_dir),
+    ] {
+        if file.exists() {
+            let _ = std::fs::remove_file(&file);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_data_dir_removes_config_auth_and_dns_backup() {
+        let dir = std::env::temp_dir().join(format!("curb_cli_reset_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(curb_core::store::config_path(&dir), b"{}").unwrap();
+        std::fs::write(curb_core::store::auth_path(&dir), b"{}").unwrap();
+        std::fs::write(curb_core::store::dns_backup_path(&dir), b"[]").unwrap();
+
+        reset_data_dir(&dir);
+
+        assert!(!curb_core::store::config_path(&dir).exists());
+        assert!(!curb_core::store::auth_path(&dir).exists());
+        assert!(!curb_core::store::dns_backup_path(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

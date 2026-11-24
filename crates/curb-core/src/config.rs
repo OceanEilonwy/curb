@@ -367,6 +367,41 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Migrates legacy rules created in v0.2.0–v0.2.2 that stored a UI display
+    /// name in `product_name` alongside `original_filename` (causing signed rules
+    /// to never match when PE `ProductName` differed or was absent).
+    /// Returns `true` if any rule was updated.
+    pub fn migrate_legacy_rules(&mut self) -> bool {
+        let mut changed = false;
+        for rule in &mut self.rules {
+            match &mut rule.matcher {
+                ExecutableMatcher::Signature {
+                    product_name,
+                    original_filename,
+                    ..
+                }
+                | ExecutableMatcher::SteamGame {
+                    verification:
+                        VerificationMethod::Signature {
+                            product_name,
+                            original_filename,
+                            ..
+                        },
+                    ..
+                } => {
+                    if original_filename.is_some() && product_name.is_some() {
+                        *product_name = None;
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +532,67 @@ mod tests {
         };
         assert!(!future.is_actively_enforcing(now));
         assert!(past.is_actively_enforcing(now));
+    }
+
+    #[test]
+    fn migrate_legacy_rules_clears_display_name_product_name_when_filename_present() {
+        let mut cfg = Config::default();
+        cfg.rules = vec![
+            Rule {
+                id: Uuid::new_v4(),
+                name: "Mozilla Firefox".into(),
+                enabled: true,
+                matcher: ExecutableMatcher::Signature {
+                    subject_cn: "Mozilla Corporation".into(),
+                    issuer_cn: None,
+                    product_name: Some("Mozilla Firefox".into()),
+                    original_filename: Some("firefox.exe".into()),
+                },
+                network: NetworkPolicy::default(),
+                subprocesses: SubprocessPolicy::SameSignerOrDir,
+                exe_hint: "firefox.exe".into(),
+                exe_path: None,
+                created_at: Utc::now(),
+            },
+            Rule {
+                id: Uuid::new_v4(),
+                name: "Minecraft".into(),
+                enabled: true,
+                matcher: ExecutableMatcher::Signature {
+                    subject_cn: "Microsoft Corporation".into(),
+                    issuer_cn: None,
+                    product_name: Some("Minecraft".into()),
+                    original_filename: None,
+                },
+                network: NetworkPolicy::default(),
+                subprocesses: SubprocessPolicy::SameSignerOrDir,
+                exe_hint: "Minecraft.exe".into(),
+                exe_path: None,
+                created_at: Utc::now(),
+            },
+        ];
+
+        // Before migration, a binary whose PE ProductName is "Firefox" failed to match "Mozilla Firefox".
+        let firefox = sample_signed(
+            "firefox.exe",
+            "Mozilla Corporation",
+            "Firefox",
+            r"C:\Program Files\Mozilla Firefox\firefox.exe",
+        );
+        assert!(!cfg.rules[0].matcher.matches(&firefox));
+
+        assert!(cfg.migrate_legacy_rules());
+        assert!(!cfg.migrate_legacy_rules());
+
+        // After migration, Firefox matches and product-only Minecraft rule is preserved.
+        assert!(cfg.rules[0].matcher.matches(&firefox));
+        assert!(matches!(
+            &cfg.rules[1].matcher,
+            ExecutableMatcher::Signature {
+                product_name: Some(p),
+                original_filename: None,
+                ..
+            } if p == "Minecraft"
+        ));
     }
 }

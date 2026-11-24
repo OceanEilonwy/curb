@@ -494,6 +494,17 @@ impl AppController {
 
         win.set_password_configured(snap.password_configured);
         win.set_is_full_service(snap.protection_tier == ProtectionTier::FullService);
+        let outdated = snap.protection_tier == ProtectionTier::FullService
+            && crate::elevate::is_service_outdated(&snap.service_version);
+        win.set_service_outdated(outdated);
+        let reported = if snap.service_version.is_empty() {
+            "legacy".to_string()
+        } else {
+            format!("v{}", snap.service_version)
+        };
+        win.set_service_version_label(
+            format!("{reported} → v{}", env!("CARGO_PKG_VERSION")).into(),
+        );
 
         if snap.protection_tier == ProtectionTier::Unconfigured {
             win.set_screen(1);
@@ -1430,6 +1441,10 @@ impl AppController {
         if win.get_upgrading() {
             return;
         }
+        let was_full = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.protection_tier == ProtectionTier::FullService);
         win.set_upgrading(true);
 
         let gen_id = self.gen_id;
@@ -1446,7 +1461,11 @@ impl AppController {
                             let needs_pw = !snap.password_configured;
                             c.snapshot = Some(snap);
                             c.sync_all();
-                            c.show_toast("Upgraded to Full Protection");
+                            c.show_toast(if was_full {
+                                "Background service updated"
+                            } else {
+                                "Upgraded to Full Protection"
+                            });
                             if needs_pw {
                                 c.open_unlock_modal();
                             }

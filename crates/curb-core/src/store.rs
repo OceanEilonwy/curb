@@ -46,7 +46,11 @@ pub fn load_config(data_dir: &Path) -> Result<Config> {
     if !path.exists() {
         return Ok(Config::default());
     }
-    read_json(&path)
+    let mut cfg: Config = read_json(&path)?;
+    if cfg.migrate_legacy_rules() {
+        let _ = save_config(data_dir, &cfg);
+    }
+    Ok(cfg)
 }
 
 pub fn save_config(data_dir: &Path, config: &Config) -> Result<()> {
