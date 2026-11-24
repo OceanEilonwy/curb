@@ -44,15 +44,15 @@ pub fn enable_local_dns_redirect(
 
     // Set IPv4 and IPv6 DNS in separate calls because MSFT_DNSClientServerAddress
     // has distinct per-family CIM instances and rejects mixed IPv4+IPv6 arrays.
-    // Only touch IPv6 DNS on adapters that actually have a routable (non-link-local)
-    // IPv6 address, and only flush the DNS cache if a Set-DnsClientServerAddress call
-    // actually succeeded—otherwise IPv4-only or virtual adapters trigger Clear-DnsClientCache
-    // on every refresh cycle and cause Windows NCSI to flap to "No Internet".
+    // Enumerate connected IP interfaces (which includes physical adapters as well as
+    // Wintun/WireGuard/OpenVPN/PPP interfaces that `Get-NetAdapter` can omit), only
+    // touch IPv6 DNS on interfaces with a routable IPv6 address, and only flush the
+    // DNS cache when a Set-DnsClientServerAddress call actually succeeded.
     let ps = if include_ipv6 {
         r#"
             $changed = $false
-            Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
-                $idx = $_.ifIndex
+            $ifaces = @(Get-NetIPInterface -ConnectionState Connected -ErrorAction SilentlyContinue | Select-Object -ExpandProperty InterfaceIndex -Unique)
+            foreach ($idx in $ifaces) {
                 $hasV4 = @(Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' }).Count -gt 0
                 if ($hasV4) {
                     $v4 = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses })
@@ -77,8 +77,8 @@ pub fn enable_local_dns_redirect(
     } else {
         r#"
             $changed = $false
-            Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
-                $idx = $_.ifIndex
+            $ifaces = @(Get-NetIPInterface -ConnectionState Connected -ErrorAction SilentlyContinue | Select-Object -ExpandProperty InterfaceIndex -Unique)
+            foreach ($idx in $ifaces) {
                 $hasV4 = @(Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' }).Count -gt 0
                 if ($hasV4) {
                     $v4 = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses })
@@ -96,7 +96,7 @@ pub fn enable_local_dns_redirect(
 
     run_powershell(ps)?;
     info!(
-        "Pointed active network adapters to Curb local DNS proxy (127.0.0.1{}; {} original upstreams captured)",
+        "Pointed active network interfaces to Curb local DNS proxy (127.0.0.1{}; {} original upstreams captured)",
         if include_ipv6 { " / ::1" } else { "" },
         upstreams.len()
     );

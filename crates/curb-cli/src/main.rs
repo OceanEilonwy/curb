@@ -346,8 +346,9 @@ mod win_scm {
     use std::time::{Duration, Instant};
 
     use windows_service::service::{
-        Service, ServiceAccess, ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceState,
-        ServiceType,
+        Service, ServiceAccess, ServiceAction, ServiceActionType, ServiceDependency,
+        ServiceErrorControl, ServiceFailureActions, ServiceFailureResetPeriod, ServiceInfo,
+        ServiceStartType, ServiceState, ServiceType,
     };
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
@@ -401,7 +402,8 @@ mod win_scm {
             error_control: ServiceErrorControl::Normal,
             executable_path: executable_path.to_path_buf(),
             launch_arguments: Vec::new(),
-            dependencies: Vec::new(),
+            // Ensure Windows Base Filtering Engine (WFP) is started before CurbService at boot.
+            dependencies: vec![ServiceDependency::Service(OsString::from("BFE"))],
             account_name: None, // LocalSystem
             account_password: None,
         };
@@ -425,6 +427,30 @@ mod win_scm {
         };
 
         let _ = service.set_description(SERVICE_DESCRIPTION);
+
+        // Configure SCM automatic restart on unexpected crash/exit so the machine is never
+        // left stranded with persistent WFP default-deny filters or 127.0.0.1 adapter DNS.
+        let recovery = ServiceFailureActions {
+            reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(86_400)),
+            reboot_msg: None,
+            command: None,
+            actions: Some(vec![
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: Duration::from_secs(2),
+                },
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: Duration::from_secs(5),
+                },
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: Duration::from_secs(10),
+                },
+            ]),
+        };
+        let _ = service.update_failure_actions(recovery);
+        let _ = service.set_failure_actions_on_non_crash_failures(true);
 
         start_and_wait(&service, Duration::from_secs(10))
     }

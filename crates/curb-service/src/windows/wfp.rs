@@ -245,13 +245,11 @@ impl WfpController {
         }
         self.persistent_filter_ids = new_persistent;
 
-        // 5. Permit `curb-service.exe` AND Windows DNS Client (`svchost.exe` / `Dnscache`)
-        // to send upstream DNS (UDP/TCP 53). On Windows, applications call `getaddrinfo()`,
-        // which executes inside `svchost.exe` (`Dnscache`). When adapter DNS is pointed to
-        // `127.0.0.1` / `::1`, `svchost.exe` queries `curb-service.exe` on loopback; if an
-        // adapter (e.g. IPv6 RDNSS or VPN) queries an upstream resolver directly, permitting
-        // `svchost.exe` on port 53 ensures OS DNS resolution for allowed apps never fails,
-        // while non-allowed apps remain blocked from connecting to any resolved IP.
+        // 5. Permit ONLY `curb-service.exe` to send upstream DNS (UDP/TCP 53).
+        // Windows DNS Client (`svchost.exe` / `Dnscache`) resolves through Curb's local
+        // DNS proxy on `127.0.0.1:53` / `[::1]:53` via the loopback baseline, ensuring
+        // all DNS traffic is inspected and populates `DnsCache` without allowing DNS
+        // bypasses or tunneling over non-redirected adapters.
         let old_svc_ids: Vec<u64> = self.service_dns_filter_ids.drain(..).collect();
         self.remove_dynamic_filters(&old_svc_ids);
 
@@ -265,14 +263,6 @@ impl WfpController {
             match self.replace_app_dynamic(&[], svc_path, &dns_policy, None, Some(53)) {
                 Ok(ids) => dns_filter_ids.extend(ids),
                 Err(e) => warn!("Failed to permit curb-service.exe upstream DNS in WFP: {e}"),
-            }
-        }
-        let svchost_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-        let svchost_path = Path::new(&svchost_root).join("System32").join("svchost.exe");
-        if svchost_path.exists() {
-            match self.replace_app_dynamic(&[], &svchost_path, &dns_policy, None, Some(53)) {
-                Ok(ids) => dns_filter_ids.extend(ids),
-                Err(e) => warn!("Failed to permit svchost.exe DNS in WFP: {e}"),
             }
         }
         self.service_dns_filter_ids = dns_filter_ids;
@@ -743,10 +733,18 @@ fn with_transaction<T, F>(engine: HANDLE, f: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String>,
 {
-    let begin_code = unsafe { FwpmTransactionBegin0(engine, 0) };
+    let mut begin_code = 0u32;
+    for attempt in 0..5 {
+        begin_code = unsafe { FwpmTransactionBegin0(engine, 0) };
+        if begin_code == 0 {
+            break;
+        }
+        if attempt < 4 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
     if begin_code != 0 {
-        // Fallback without transaction if another transaction is active.
-        return f();
+        return Err(format!("FwpmTransactionBegin0 failed: 0x{begin_code:08x}"));
     }
 
     match f() {

@@ -48,6 +48,8 @@ pub struct DnsCache {
     version: u64,
 }
 
+const MAX_AUX_CACHE_ENTRIES: usize = 8192;
+
 impl DnsCache {
     pub fn new() -> Self {
         Self::default()
@@ -68,6 +70,11 @@ impl DnsCache {
             return;
         }
         let root_origin = self.cname_to_origin.get(&o).cloned().unwrap_or(o);
+        if self.cname_to_origin.len() >= MAX_AUX_CACHE_ENTRIES
+            && !self.cname_to_origin.contains_key(&a)
+        {
+            self.cname_to_origin.clear();
+        }
         self.cname_to_origin.insert(a, root_origin);
     }
 
@@ -107,6 +114,11 @@ impl DnsCache {
         let mut changed = list.len() != before;
 
         for &ip in ips {
+            if self.ip_to_domain.len() >= MAX_AUX_CACHE_ENTRIES
+                && !self.ip_to_domain.contains_key(&ip)
+            {
+                self.ip_to_domain.clear();
+            }
             self.ip_to_domain.insert(ip, key.to_string());
             if let Some(existing) = list.iter_mut().find(|e| e.ip == ip) {
                 existing.expires_at = expires_at;

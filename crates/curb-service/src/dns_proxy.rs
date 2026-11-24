@@ -13,6 +13,8 @@ use uuid::Uuid;
 
 use crate::engine::ServiceEngine;
 
+const MAX_CONCURRENT_DNS_QUERIES: usize = 256;
+
 /// Async local DNS proxy listening on IPv4 (`127.0.0.1:53`) and IPv6 (`[::1]:53`)
 /// over both UDP and TCP.
 ///
@@ -51,11 +53,14 @@ pub async fn run_dns_proxy(
         None => None,
     };
 
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DNS_QUERIES));
+
     // Best-effort TCP DNS listeners (RFC 1035, required for large responses / DNSSEC).
     if let Ok(tcp_v4) = TcpListener::bind(bind_addr).await {
         let eng = engine.clone();
+        let sem = permits.clone();
         tokio::spawn(async move {
-            run_tcp_loop(tcp_v4, eng, upstream).await;
+            run_tcp_loop(tcp_v4, eng, upstream, sem).await;
         });
     } else {
         warn!("Could not bind IPv4 TCP DNS proxy on {bind_addr}");
@@ -64,8 +69,9 @@ pub async fn run_dns_proxy(
     if let Some(addr) = v6_addr {
         if let Ok(tcp_v6) = TcpListener::bind(addr).await {
             let eng = engine.clone();
+            let sem = permits.clone();
             tokio::spawn(async move {
-                run_tcp_loop(tcp_v6, eng, upstream).await;
+                run_tcp_loop(tcp_v6, eng, upstream, sem).await;
             });
         }
     }
@@ -78,14 +84,15 @@ pub async fn run_dns_proxy(
 
     if let Some(sock_v6) = udp_v6 {
         let eng = engine.clone();
+        let sem = permits.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_udp_loop(sock_v6, eng, upstream).await {
+            if let Err(e) = run_udp_loop(sock_v6, eng, upstream, sem).await {
                 warn!("IPv6 UDP DNS loop exited: {e}");
             }
         });
     }
 
-    let res = run_udp_loop(udp_v4, engine.clone(), upstream).await;
+    let res = run_udp_loop(udp_v4, engine.clone(), upstream, permits).await;
     engine.set_dns_ready(false, false);
     res
 }
@@ -94,6 +101,7 @@ async fn run_udp_loop(
     socket: Arc<UdpSocket>,
     engine: ServiceEngine,
     fallback_upstream: SocketAddr,
+    permits: Arc<tokio::sync::Semaphore>,
 ) -> std::io::Result<()> {
     let mut buf = [0u8; 4096];
     loop {
@@ -108,11 +116,16 @@ async fn run_udp_loop(
                 continue;
             }
         };
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+            debug!("DNS proxy at max concurrency ({MAX_CONCURRENT_DNS_QUERIES}); dropping burst packet from {peer}");
+            continue;
+        };
         let packet = buf[..len].to_vec();
         let sock = socket.clone();
         let eng = engine.clone();
 
         tokio::spawn(async move {
+            let _permit = permit;
             if let Some(resp_bytes) =
                 handle_dns_packet(&eng, &packet, fallback_upstream, false).await
             {
@@ -128,12 +141,18 @@ async fn run_tcp_loop(
     listener: TcpListener,
     engine: ServiceEngine,
     fallback_upstream: SocketAddr,
+    permits: Arc<tokio::sync::Semaphore>,
 ) {
     loop {
         match listener.accept().await {
             Ok((stream, _peer)) => {
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    debug!("DNS TCP proxy at max concurrency; dropping connection");
+                    continue;
+                };
                 let eng = engine.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let _ = handle_tcp_client(stream, eng, fallback_upstream).await;
                 });
             }

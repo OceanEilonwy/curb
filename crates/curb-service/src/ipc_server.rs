@@ -23,18 +23,56 @@ pub async fn run_ipc_server(
     }
 }
 
+const MAX_IPC_LINE_BYTES: usize = 256 * 1024;
+
 async fn handle_stream<S>(stream: S, engine: ServiceEngine)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let (reader, mut writer) = tokio::io::split(stream);
-    let mut lines = BufReader::new(reader).lines();
+    use tokio::io::AsyncReadExt;
 
-    while let Ok(Some(line)) = lines.next_line().await {
+    let (reader, mut writer) = tokio::io::split(stream);
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::with_capacity(1024);
+
+    loop {
+        buf.clear();
+        let n = match (&mut reader)
+            .take((MAX_IPC_LINE_BYTES + 1) as u64)
+            .read_until(b'\n', &mut buf)
+            .await
+        {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+
+        if n > MAX_IPC_LINE_BYTES && !buf.ends_with(b"\n") {
+            let err_resp = IpcResponse::Error {
+                message: "IPC request exceeds maximum allowed size.".into(),
+            };
+            if let Ok(mut serialized) = serde_json::to_string(&err_resp) {
+                serialized.push('\n');
+                let _ = writer.write_all(serialized.as_bytes()).await;
+            }
+            break;
+        }
+
+        let Ok(line) = std::str::from_utf8(&buf) else {
+            let err_resp = IpcResponse::Error {
+                message: "Malformed IPC request: invalid UTF-8".into(),
+            };
+            if let Ok(mut serialized) = serde_json::to_string(&err_resp) {
+                serialized.push('\n');
+                let _ = writer.write_all(serialized.as_bytes()).await;
+            }
+            break;
+        };
+
         if line.trim().is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<IpcRequest>(&line) {
+        let response = match serde_json::from_str::<IpcRequest>(line) {
             Ok(req) => {
                 let eng = engine.clone();
                 tokio::task::spawn_blocking(move || eng.handle_request(req))
@@ -194,5 +232,36 @@ async fn run_unix_socket_server(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn rejects_oversized_ipc_line_without_oom() {
+        let dir = std::env::temp_dir().join(format!("curb_ipc_limit_{}", uuid::Uuid::new_v4()));
+        let engine = ServiceEngine::new(dir.clone()).unwrap();
+
+        let (mut client, server) = tokio::io::duplex(512 * 1024);
+        let srv_task = tokio::spawn(async move {
+            handle_stream(server, engine).await;
+        });
+
+        let huge = vec![b'a'; MAX_IPC_LINE_BYTES + 1024];
+        let _ = client.write_all(&huge).await;
+        let _ = client.shutdown().await;
+
+        let mut resp = String::new();
+        let _ = client.read_to_string(&mut resp).await;
+        srv_task.await.unwrap();
+
+        assert!(
+            resp.contains("exceeds maximum allowed size"),
+            "expected size limit error, got: {resp}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

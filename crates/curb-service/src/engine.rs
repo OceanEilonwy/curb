@@ -340,6 +340,7 @@ fn path_is_within_normalized_dir(exe_path: &str, norm_dir_with_slash: &str) -> b
 pub struct ServiceEngine {
     pub state: Arc<Mutex<EngineState>>,
     pub reconcile_notify: Arc<Notify>,
+    pub dns_refresh_notify: Arc<Notify>,
     pub dns_v4_ready: Arc<AtomicBool>,
     pub dns_v6_ready: Arc<AtomicBool>,
     pub wfp_loop_active: Arc<AtomicBool>,
@@ -353,6 +354,7 @@ impl ServiceEngine {
         Ok(Self {
             state: Arc::new(Mutex::new(EngineState::load(data_dir)?)),
             reconcile_notify: Arc::new(Notify::new()),
+            dns_refresh_notify: Arc::new(Notify::new()),
             dns_v4_ready: Arc::new(AtomicBool::new(false)),
             dns_v6_ready: Arc::new(AtomicBool::new(false)),
             wfp_loop_active: Arc::new(AtomicBool::new(false)),
@@ -363,6 +365,11 @@ impl ServiceEngine {
 
     pub fn notify_reconcile(&self) {
         self.reconcile_notify.notify_one();
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn notify_dns_refresh(&self) {
+        self.dns_refresh_notify.notify_one();
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]

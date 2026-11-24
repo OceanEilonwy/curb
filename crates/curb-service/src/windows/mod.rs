@@ -23,7 +23,12 @@ mod runtime {
     use tracing::{info, warn};
     use uuid::Uuid;
     use windows::core::PWSTR;
-    use windows::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows::Win32::Foundation::{CloseHandle, BOOLEAN, FILETIME, HANDLE};
+    use windows::Win32::NetworkManagement::IpHelper::{
+        CancelMibChangeNotify2, NotifyIpInterfaceChange, MIB_IPINTERFACE_ROW,
+        MIB_NOTIFICATION_TYPE,
+    };
+    use windows::Win32::Networking::WinSock::AF_UNSPEC;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
@@ -39,14 +44,73 @@ mod runtime {
     use super::etw::ImageLockTable;
     use super::wfp::WfpController;
 
-    /// How often to re-apply adapter DNS redirection so newly connected / reconnected
-    /// adapters (e.g. Wi-Fi roaming) keep resolving through Curb instead of losing DNS.
+    /// How often to re-apply adapter DNS redirection as a periodic safety net.
     const DNS_REDIRECT_REFRESH: Duration = Duration::from_secs(300);
     /// Back-off before retrying a failed adapter DNS redirect.
     const DNS_REDIRECT_RETRY: Duration = Duration::from_secs(15);
+    /// Minimum interval between event-driven DNS redirect refreshes (e.g. bursts of
+    /// `NotifyIpInterfaceChange` events during Wi-Fi roaming or VPN connect).
+    const DNS_EVENT_DEBOUNCE: Duration = Duration::from_secs(2);
     /// How often to refresh Microsoft NCSI probe IPs (well under their 600s cache TTL floor)
     /// so Windows never loses NCSI connectivity checks during WFP filter updates.
     const NCSI_PREWARM_REFRESH: Duration = Duration::from_secs(240);
+
+    /// RAII guard for Windows `NotifyIpInterfaceChange` so network/VPN/Wi-Fi changes
+    /// immediately wake Curb to re-apply `127.0.0.1` adapter DNS redirection.
+    struct IpChangeSubscription {
+        handle: HANDLE,
+        notify_ptr: *const tokio::sync::Notify,
+    }
+
+    unsafe impl Send for IpChangeSubscription {}
+
+    impl IpChangeSubscription {
+        fn register(notify: std::sync::Arc<tokio::sync::Notify>) -> Option<Self> {
+            unsafe extern "system" fn callback(
+                caller_context: *const std::ffi::c_void,
+                _row: *const MIB_IPINTERFACE_ROW,
+                _notification_type: MIB_NOTIFICATION_TYPE,
+            ) {
+                if !caller_context.is_null() {
+                    let n = &*(caller_context as *const tokio::sync::Notify);
+                    n.notify_one();
+                }
+            }
+
+            let raw_ptr = std::sync::Arc::into_raw(notify);
+            let mut handle = HANDLE::default();
+            let status = unsafe {
+                NotifyIpInterfaceChange(
+                    AF_UNSPEC,
+                    Some(callback),
+                    Some(raw_ptr as *const std::ffi::c_void),
+                    BOOLEAN(0),
+                    &mut handle,
+                )
+            };
+            if status.0 == 0 {
+                Some(Self {
+                    handle,
+                    notify_ptr: raw_ptr,
+                })
+            } else {
+                unsafe {
+                    drop(std::sync::Arc::from_raw(raw_ptr));
+                }
+                warn!("NotifyIpInterfaceChange registration failed: {}", status.0);
+                None
+            }
+        }
+    }
+
+    impl Drop for IpChangeSubscription {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CancelMibChangeNotify2(self.handle);
+                drop(std::sync::Arc::from_raw(self.notify_ptr));
+            }
+        }
+    }
 
     /// Dynamic WFP permit filters shared by every running process of the same executable.
     /// `ALE_APP_ID` filters apply per executable path, so one filter set per exe avoids
@@ -101,13 +165,29 @@ mod runtime {
             .await;
         }
 
-        let mut wfp = match WfpController::open() {
-            Ok(ctrl) => ctrl,
-            Err(e) => {
-                warn!("Could not open WFP engine (run as SYSTEM/Administrator): {e}");
-                return;
+        // Retry opening WFP with backoff in case Windows Base Filtering Engine (BFE) is
+        // still starting at boot, honoring shutdown requests cleanly.
+        let mut wfp = loop {
+            match WfpController::open() {
+                Ok(ctrl) => break ctrl,
+                Err(e) => {
+                    warn!("Could not open WFP engine yet ({e}); retrying in 2s");
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                return;
+                            }
+                        }
+                    }
+                    if *shutdown_rx.borrow() {
+                        return;
+                    }
+                }
             }
         };
+
+        let _ip_change_sub = IpChangeSubscription::register(engine.dns_refresh_notify.clone());
 
         let service_exe = std::env::current_exe().ok();
         let mut st = LoopState {
@@ -129,15 +209,20 @@ mod runtime {
         let mut last_ncsi_prewarm: Option<Instant> = None;
 
         let notify = engine.reconcile_notify.clone();
+        let dns_refresh = engine.dns_refresh_notify.clone();
         let mut ticker = tokio::time::interval(Duration::from_millis(300));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             let mut woke_by_notify = false;
+            let mut woke_by_net_change = false;
             tokio::select! {
                 _ = ticker.tick() => {}
                 _ = notify.notified() => {
                     woke_by_notify = true;
+                }
+                _ = dns_refresh.notified() => {
+                    woke_by_net_change = true;
                 }
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
@@ -215,10 +300,12 @@ mod runtime {
                 continue;
             }
 
-            // Point adapters at Curb's DNS proxy only once it is actually listening, and
-            // periodically re-apply so reconnected Wi-Fi adapters keep working DNS.
+            // Point active interfaces at Curb's DNS proxy once it is listening, reacting
+            // immediately on network/VPN/sleep events (debounced) and periodically as a
+            // safety net.
             let due = match last_dns_attempt {
                 None => true,
+                Some(t) if woke_by_net_change => t.elapsed() >= DNS_EVENT_DEBOUNCE,
                 Some(t) if !dns_redirected => t.elapsed() >= DNS_REDIRECT_RETRY,
                 Some(t) => t.elapsed() >= DNS_REDIRECT_REFRESH,
             };
@@ -243,10 +330,11 @@ mod runtime {
             }
 
             // Keep Microsoft NCSI probe IPs warm before their 600s cache TTL floor expires
-            // so Windows never drops Wi-Fi / flags "No Internet" when WFP filters update.
+            // (and immediately after network/sleep events) so Windows never flags "No Internet".
             let ncsi_refresh_due = dns_redirected
                 && baseline.ncsi
-                && last_ncsi_prewarm.is_none_or(|t| t.elapsed() >= NCSI_PREWARM_REFRESH);
+                && (woke_by_net_change
+                    || last_ncsi_prewarm.is_none_or(|t| t.elapsed() >= NCSI_PREWARM_REFRESH));
             if ncsi_refresh_due {
                 last_ncsi_prewarm = Some(Instant::now());
                 let eng = engine.clone();
@@ -401,13 +489,23 @@ mod runtime {
         }
 
         // Evaluate untracked processes. Multiple passes let helper processes inherit
-        // from parents that are matched later in the same snapshot.
+        // from parents that are matched later in the same snapshot. Acquire the NTFS
+        // `FILE_SHARE_READ`-only lock BEFORE `inspect_binary` to eliminate the TOCTOU
+        // window between signature/hash inspection and image locking.
         let mut rules_updated = false;
         for _pass in 0..3 {
             let mut progressed = false;
             let mut remaining = Vec::new();
             for (pid, ppid, path) in pending {
+                let locked_now = if !st.locked_pids.contains(&pid) {
+                    st.locks.lock_for_pid(pid, Path::new(&path))
+                } else {
+                    false
+                };
                 let Ok(identity) = inspect_binary(Path::new(&path)) else {
+                    if locked_now {
+                        st.locks.release_pid(pid);
+                    }
                     continue;
                 };
                 let mut guard = engine.state.lock().unwrap();
@@ -435,7 +533,12 @@ mod runtime {
                                 identity.filename
                             );
                         }
-                        st.learned_paths.insert(identity.path.clone());
+                        if locked_now {
+                            st.locked_pids.insert(pid);
+                        }
+                        if is_admin_protected_path(&identity.path) {
+                            st.learned_paths.insert(identity.path.clone());
+                        }
                         guard.tracked_processes.insert(
                             pid,
                             TrackedProcess {
@@ -449,7 +552,12 @@ mod runtime {
                         );
                         progressed = true;
                     }
-                    None => remaining.push((pid, ppid, path)),
+                    None => {
+                        if locked_now {
+                            st.locks.release_pid(pid);
+                        }
+                        remaining.push((pid, ppid, path));
+                    }
                 }
             }
             pending = remaining;
@@ -463,14 +571,24 @@ mod runtime {
             let _ = save_config(&guard.data_dir, &guard.config);
         }
 
-        // Gather proactive candidate paths from enabled rules/presets plus any previously
-        // matched executable paths so allowed apps keep their WFP permit filters even
-        // while closed or restarting (eliminating the startup race on launch).
+        // Gather proactive candidate paths ONLY in admin-protected directories
+        // (`Program Files`, `Program Files (x86)`, `Windows`) so allowed system/installed
+        // apps keep 0ms WFP startup filters while user-writable directories (`%LOCALAPPDATA%`,
+        // Steam game libraries) cannot be exploited via closed-binary rename-and-swap.
         let candidate_paths = {
             let guard = engine.state.lock().unwrap();
-            let mut paths = guard.candidate_rule_paths();
+            let mut paths = Vec::new();
+            for p in guard.candidate_rule_paths() {
+                if is_admin_protected_path(&p)
+                    && !paths.iter().any(|x: &String| x.eq_ignore_ascii_case(&p))
+                {
+                    paths.push(p);
+                }
+            }
             for p in &st.learned_paths {
-                if !paths.iter().any(|x| x.eq_ignore_ascii_case(p)) {
+                if is_admin_protected_path(p)
+                    && !paths.iter().any(|x| x.eq_ignore_ascii_case(p))
+                {
                     paths.push(p.clone());
                 }
             }
@@ -526,7 +644,7 @@ mod runtime {
             )
         };
 
-        // Image locks: lock newly allowed processes, release ones no longer allowed.
+        // Ensure every tracked running PID holds an NTFS image lock, and release exited PIDs.
         for pid in &tracked_pids {
             if !st.locked_pids.contains(pid) {
                 let path = {
@@ -768,5 +886,26 @@ mod runtime {
         } else {
             None
         }
+    }
+
+    /// Returns true if `path` resides under a standard Windows admin-writable-only
+    /// directory (`Program Files`, `Program Files (x86)`, or `Windows`), where a
+    /// non-admin user cannot rename-and-swap a closed executable.
+    fn is_admin_protected_path(path: &str) -> bool {
+        let norm = path.replace('/', "\\").to_ascii_lowercase();
+        let roots = [
+            std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into()),
+            std::env::var("ProgramFiles(x86)")
+                .unwrap_or_else(|_| r"C:\Program Files (x86)".into()),
+            std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()),
+        ];
+        roots.iter().any(|root| {
+            let mut prefix = root
+                .replace('/', "\\")
+                .trim_end_matches('\\')
+                .to_ascii_lowercase();
+            prefix.push('\\');
+            norm.starts_with(&prefix)
+        })
     }
 }
