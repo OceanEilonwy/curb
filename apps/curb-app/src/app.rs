@@ -369,6 +369,108 @@ fn wire_callbacks(win: &MainWindow, gen_id: u64) {
         with_controller(gen_id, |c| c.handle_remove_domain(&id, idx))
     });
     win.on_delete_rule(move |id| with_controller(gen_id, |c| c.handle_delete_rule(&id)));
+    win.on_toggle_global_playtime_limits(move || {
+        with_controller(gen_id, |c| c.handle_toggle_global_playtime_limits())
+    });
+    win.on_reset_all_playtime_limits(move || {
+        with_controller(gen_id, |c| c.handle_reset_all_playtime_limits())
+    });
+    win.on_toggle_rule_playtime(move |id| {
+        with_controller(gen_id, |c| {
+            c.mutate_rule(&id, |r| {
+                if let Some(lim) = &mut r.playtime_limit {
+                    lim.enabled = !lim.enabled;
+                } else {
+                    let mut lim = curb_core::playtime::PlaytimeLimitConfig::default();
+                    lim.enabled = true;
+                    r.playtime_limit = Some(lim);
+                }
+            })
+        })
+    });
+    win.on_set_rule_playtime_mode(move |id, mode| {
+        with_controller(gen_id, |c| {
+            c.mutate_rule(&id, |r| {
+                let lim = r
+                    .playtime_limit
+                    .get_or_insert_with(curb_core::playtime::PlaytimeLimitConfig::default);
+                lim.enabled = true;
+                lim.budget = match mode {
+                    1 => curb_core::playtime::PlaytimeBudget::Weekly { hours: 10.0 },
+                    2 => {
+                        let expr = "5h per day, 10h per week, except sunday".to_string();
+                        let parsed =
+                            curb_core::playtime::parse_custom_budget(&expr).unwrap_or_default();
+                        curb_core::playtime::PlaytimeBudget::Custom {
+                            expression: expr,
+                            parsed,
+                        }
+                    }
+                    _ => curb_core::playtime::PlaytimeBudget::Daily { hours: 2.0 },
+                };
+            })
+        })
+    });
+    win.on_set_rule_playtime_daily(move |id, text| {
+        if let Ok(hours) = text.trim().parse::<f32>() {
+            if hours > 0.0 && hours <= 24.0 {
+                with_controller(gen_id, |c| {
+                    c.mutate_rule(&id, |r| {
+                        let lim = r
+                            .playtime_limit
+                            .get_or_insert_with(curb_core::playtime::PlaytimeLimitConfig::default);
+                        lim.enabled = true;
+                        lim.budget = curb_core::playtime::PlaytimeBudget::Daily { hours };
+                    })
+                });
+            }
+        }
+    });
+    win.on_set_rule_playtime_weekly(move |id, text| {
+        if let Ok(hours) = text.trim().parse::<f32>() {
+            if hours > 0.0 && hours <= 168.0 {
+                with_controller(gen_id, |c| {
+                    c.mutate_rule(&id, |r| {
+                        let lim = r
+                            .playtime_limit
+                            .get_or_insert_with(curb_core::playtime::PlaytimeLimitConfig::default);
+                        lim.enabled = true;
+                        lim.budget = curb_core::playtime::PlaytimeBudget::Weekly { hours };
+                    })
+                });
+            }
+        }
+    });
+    win.on_set_rule_playtime_custom(move |id, expr| {
+        let trimmed = expr.trim().to_string();
+        if let Ok(parsed) = curb_core::playtime::parse_custom_budget(&trimmed) {
+            with_controller(gen_id, |c| {
+                c.mutate_rule(&id, |r| {
+                    let lim = r
+                        .playtime_limit
+                        .get_or_insert_with(curb_core::playtime::PlaytimeLimitConfig::default);
+                    lim.enabled = true;
+                    lim.budget = curb_core::playtime::PlaytimeBudget::Custom {
+                        expression: trimmed.clone(),
+                        parsed: parsed.clone(),
+                    };
+                })
+            });
+        }
+    });
+    win.on_toggle_rule_playtime_wait_match(move |id| {
+        with_controller(gen_id, |c| {
+            c.mutate_rule(&id, |r| {
+                let lim = r
+                    .playtime_limit
+                    .get_or_insert_with(curb_core::playtime::PlaytimeLimitConfig::default);
+                lim.wait_for_match_end = !lim.wait_for_match_end;
+            })
+        })
+    });
+    win.on_reset_rule_playtime(move |id| {
+        with_controller(gen_id, |c| c.handle_reset_rule_playtime(&id))
+    });
 
     // Blocked
     win.on_allow_blocked_event(move |id| {
@@ -567,6 +669,20 @@ impl AppController {
         win.set_baseline_ntp(snap.config.baseline.ntp);
         win.set_baseline_ncsi(snap.config.baseline.ncsi);
 
+        let status_by_id: HashMap<Uuid, &curb_core::playtime::PlaytimeRuleStatus> = snap
+            .playtime_statuses
+            .iter()
+            .map(|s| (s.rule_id, s))
+            .collect();
+        let registry = curb_games::DetectorRegistry::default();
+        let has_any_limits = snap
+            .config
+            .rules
+            .iter()
+            .any(|r| r.playtime_limit.as_ref().is_some_and(|l| l.enabled));
+        win.set_playtime_limits_enabled(snap.config.playtime_limits_enabled);
+        win.set_has_any_playtime_limits(has_any_limits);
+
         // Rules model
         let rule_items: Vec<RuleItem> = snap
             .config
@@ -585,6 +701,128 @@ impl AppController {
                     .collect();
                 let deleting = self.deleting_rule == Some(r.id);
                 let busy = self.busy_rules.contains(&r.id) || deleting;
+
+                let app_id = match &r.matcher {
+                    ExecutableMatcher::SteamGame { app_id, .. } => Some(*app_id),
+                    _ => None,
+                };
+                let status = status_by_id.get(&r.id).copied();
+                let fc_info = app_id.and_then(|id| registry.info(id));
+                let first_class = status.map(|s| s.first_class).unwrap_or(fc_info.is_some());
+                let detector_name = status
+                    .and_then(|s| s.detector_name.clone())
+                    .or_else(|| fc_info.map(|i| i.plugin_name.to_string()))
+                    .unwrap_or_default();
+
+                let limit = r.playtime_limit.as_ref();
+                let playtime_enabled = limit.is_some_and(|l| l.enabled);
+                let playtime_active = status.map(|s| s.limits_active).unwrap_or(
+                    r.enabled && snap.config.playtime_limits_enabled && playtime_enabled,
+                );
+                let chip_state = status
+                    .map(|s| match s.chip_state {
+                        curb_core::playtime::PlaytimeChipState::Playing => 0,
+                        curb_core::playtime::PlaytimeChipState::FinishingMatch => 1,
+                        curb_core::playtime::PlaytimeChipState::Overtime => 2,
+                    })
+                    .unwrap_or(0);
+
+                let (remaining_pct, sub_meta, used_label) = if let Some(st) = status {
+                    let pct = if st.daily_budget_secs > 0 {
+                        (st.remaining_today_secs as f32 / st.daily_budget_secs as f32).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    let meta = if !st.limits_active {
+                        "Limit off".to_string()
+                    } else if st.is_exempt_today {
+                        "Exempt today".to_string()
+                    } else {
+                        match st.chip_state {
+                            curb_core::playtime::PlaytimeChipState::Playing => {
+                                format!("{} left today", format_playtime_secs(st.remaining_today_secs))
+                            }
+                            curb_core::playtime::PlaytimeChipState::FinishingMatch => {
+                                format!(
+                                    "0m left · +{} carried",
+                                    format_playtime_secs(st.overtime_debt_secs)
+                                )
+                            }
+                            curb_core::playtime::PlaytimeChipState::Overtime => {
+                                if st.overtime_debt_secs > 0 {
+                                    format!(
+                                        "Internet cut · −{} next day",
+                                        format_playtime_secs(st.overtime_debt_secs)
+                                    )
+                                } else {
+                                    "Internet cut".to_string()
+                                }
+                            }
+                        }
+                    };
+                    let used = if st.overtime_debt_secs > 0 {
+                        format!(
+                            "Used today: {} (+{} debt)",
+                            format_playtime_secs(st.used_today_secs),
+                            format_playtime_secs(st.overtime_debt_secs)
+                        )
+                    } else {
+                        format!("Used today: {}", format_playtime_secs(st.used_today_secs))
+                    };
+                    (pct, meta, used)
+                } else {
+                    (1.0, "Limit off".to_string(), "Used today: 0m".to_string())
+                };
+
+                let (budget_mode, daily_h, weekly_h, custom_expr, custom_summary, custom_error) =
+                    match limit.map(|l| &l.budget) {
+                        Some(curb_core::playtime::PlaytimeBudget::Daily { hours }) => (
+                            0,
+                            format_hours_compact(*hours),
+                            "10".to_string(),
+                            "5h per day, 10h per week, except sunday".to_string(),
+                            String::new(),
+                            false,
+                        ),
+                        Some(curb_core::playtime::PlaytimeBudget::Weekly { hours }) => (
+                            1,
+                            "2".to_string(),
+                            format_hours_compact(*hours),
+                            "5h per day, 10h per week, except sunday".to_string(),
+                            String::new(),
+                            false,
+                        ),
+                        Some(curb_core::playtime::PlaytimeBudget::Custom { expression, .. }) => {
+                            match curb_core::playtime::parse_custom_budget(expression) {
+                                Ok(parsed) => {
+                                    let summary = format_custom_policy_summary(&parsed);
+                                    (2, "2".to_string(), "10".to_string(), expression.clone(), summary, false)
+                                }
+                                Err(err) => (
+                                    2,
+                                    "2".to_string(),
+                                    "10".to_string(),
+                                    expression.clone(),
+                                    format!("⚠ {err}"),
+                                    true,
+                                ),
+                            }
+                        }
+                        None => (
+                            0,
+                            "2".to_string(),
+                            "10".to_string(),
+                            "5h per day, 10h per week, except sunday".to_string(),
+                            String::new(),
+                            false,
+                        ),
+                    };
+
+                let wait_match = limit.map(|l| l.wait_for_match_end).unwrap_or(true);
+                let live_telemetry = status
+                    .and_then(|s| s.live_telemetry.clone())
+                    .unwrap_or_default();
+
                 RuleItem {
                     id: id_str.clone().into(),
                     name: r.name.clone().into(),
@@ -602,6 +840,22 @@ impl AppController {
                     adv_open: self.adv_open.contains(&id_str),
                     busy,
                     deleting,
+                    first_class,
+                    detector_name: detector_name.into(),
+                    playtime_enabled,
+                    playtime_active,
+                    playtime_chip_state: chip_state,
+                    playtime_sub_meta: sub_meta.into(),
+                    playtime_remaining_pct: remaining_pct,
+                    playtime_budget_mode: budget_mode,
+                    playtime_daily_hours: daily_h.into(),
+                    playtime_weekly_hours: weekly_h.into(),
+                    playtime_custom_expr: custom_expr.into(),
+                    playtime_custom_summary: custom_summary.into(),
+                    playtime_custom_error: custom_error,
+                    playtime_wait_match: wait_match,
+                    playtime_used_label: used_label.into(),
+                    playtime_live_telemetry: live_telemetry.into(),
                 }
             })
             .collect();
@@ -1910,11 +2164,137 @@ impl AppController {
             subprocesses: sub_policy,
             exe_hint: sel.exe,
             exe_path: Some(sel.path),
+            playtime_limit: None,
             created_at: Utc::now(),
         };
 
         self.upsert_rule(tok, rule, true);
     }
+
+    fn handle_toggle_global_playtime_limits(&mut self) {
+        let Some(tok) = self.require_token() else {
+            return;
+        };
+        let next_enabled = self
+            .snapshot
+            .as_ref()
+            .map(|s| !s.config.playtime_limits_enabled)
+            .unwrap_or(true);
+        let backend = self.backend.clone();
+        let gen_id = self.gen_id;
+        self.backend.spawn(async move {
+            let res = backend
+                .set_playtime_limits_enabled(tok, next_enabled)
+                .await;
+            let _ = slint::invoke_from_event_loop(move || {
+                with_controller(gen_id, |c| match res {
+                    Ok(snap) => {
+                        c.snapshot = Some(snap);
+                        c.sync_all();
+                    }
+                    Err(e) => c.show_toast(&e),
+                });
+            });
+        });
+    }
+
+    fn handle_reset_all_playtime_limits(&mut self) {
+        let Some(tok) = self.require_token() else {
+            return;
+        };
+        let backend = self.backend.clone();
+        let gen_id = self.gen_id;
+        self.backend.spawn(async move {
+            let res = backend.reset_all_playtime_limits(tok).await;
+            let _ = slint::invoke_from_event_loop(move || {
+                with_controller(gen_id, |c| match res {
+                    Ok(snap) => {
+                        c.snapshot = Some(snap);
+                        c.sync_all();
+                    }
+                    Err(e) => c.show_toast(&e),
+                });
+            });
+        });
+    }
+
+    fn handle_reset_rule_playtime(&mut self, id_str: &str) {
+        let Some(tok) = self.require_token() else {
+            return;
+        };
+        let Ok(rule_id) = Uuid::parse_str(id_str) else {
+            return;
+        };
+        let backend = self.backend.clone();
+        let gen_id = self.gen_id;
+        self.backend.spawn(async move {
+            let res = backend.reset_playtime_limit(tok, rule_id).await;
+            let _ = slint::invoke_from_event_loop(move || {
+                with_controller(gen_id, |c| match res {
+                    Ok(snap) => {
+                        c.snapshot = Some(snap);
+                        c.sync_all();
+                    }
+                    Err(e) => c.show_toast(&e),
+                });
+            });
+        });
+    }
+}
+
+fn format_playtime_secs(secs: u64) -> String {
+    let mins = (secs + 59) / 60;
+    if mins == 0 {
+        return "0m".into();
+    }
+    let h = mins / 60;
+    let m = mins % 60;
+    if h > 0 && m > 0 {
+        format!("{h}h {m}m")
+    } else if h > 0 {
+        format!("{h}h")
+    } else {
+        format!("{m}m")
+    }
+}
+
+fn format_hours_compact(hours: f32) -> String {
+    if (hours.fract()).abs() < 0.01 {
+        format!("{}", hours.round() as u32)
+    } else {
+        format!("{hours:.1}")
+    }
+}
+
+fn format_custom_policy_summary(policy: &curb_core::playtime::CustomBudgetPolicy) -> String {
+    let mut parts = Vec::new();
+    for cap in &policy.caps {
+        let dur = format_playtime_secs((cap.minutes as u64) * 60);
+        let win = match cap.window {
+            curb_core::playtime::CapWindow::Daily => "day".to_string(),
+            curb_core::playtime::CapWindow::Weekly => "week".to_string(),
+            curb_core::playtime::CapWindow::RollingHours { hours } => format!("{hours}h"),
+        };
+        parts.push(format!("≤ {dur} / {win}"));
+    }
+    if !policy.exempt_weekdays.is_empty() {
+        let names: Vec<&str> = policy
+            .exempt_weekdays
+            .iter()
+            .filter_map(|&d| match d {
+                0 => Some("Sun"),
+                1 => Some("Mon"),
+                2 => Some("Tue"),
+                3 => Some("Wed"),
+                4 => Some("Thu"),
+                5 => Some("Fri"),
+                6 => Some("Sat"),
+                _ => None,
+            })
+            .collect();
+        parts.push(format!("Exempt: {}", names.join(", ")));
+    }
+    parts.join(" AND ")
 }
 
 fn identity_to_running_app(id: BinaryIdentity) -> RunningAppInfo {

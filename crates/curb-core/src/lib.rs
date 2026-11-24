@@ -4,6 +4,7 @@ pub mod cleanup;
 pub mod config;
 pub mod dns;
 pub mod ipc;
+pub mod playtime;
 pub mod presets;
 pub mod steam;
 pub mod store;

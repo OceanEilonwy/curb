@@ -182,6 +182,50 @@ impl LocalStandardRuntime {
 
     pub fn snapshot(&self, configured: bool) -> ServiceSnapshot {
         let guard = self.state.lock().unwrap();
+        let registry = curb_games::DetectorRegistry::default();
+        let playtime_statuses = guard
+            .config
+            .rules
+            .iter()
+            .filter_map(|r| {
+                let app_id = match &r.matcher {
+                    curb_core::config::ExecutableMatcher::SteamGame { app_id, .. } => Some(*app_id),
+                    _ => None,
+                };
+                let fc = app_id.and_then(|id| registry.info(id));
+                if r.playtime_limit.is_none() && fc.is_none() {
+                    return None;
+                }
+                let limit_enabled = r.playtime_limit.as_ref().is_some_and(|l| l.enabled);
+                let daily_secs = r
+                    .playtime_limit
+                    .as_ref()
+                    .map(|l| {
+                        l.budget
+                            .effective_policy()
+                            .caps
+                            .first()
+                            .map(|c| (c.minutes as u64) * 60)
+                            .unwrap_or(7200)
+                    })
+                    .unwrap_or(0);
+                Some(curb_core::playtime::PlaytimeRuleStatus {
+                    rule_id: r.id,
+                    chip_state: curb_core::playtime::PlaytimeChipState::Playing,
+                    limits_active: r.enabled
+                        && guard.config.playtime_limits_enabled
+                        && limit_enabled,
+                    is_exempt_today: false,
+                    daily_budget_secs: daily_secs,
+                    remaining_today_secs: daily_secs,
+                    used_today_secs: 0,
+                    overtime_debt_secs: 0,
+                    first_class: fc.is_some(),
+                    detector_name: fc.map(|i| i.plugin_name.to_string()),
+                    live_telemetry: None,
+                })
+            })
+            .collect();
         ServiceSnapshot {
             config: guard.config.clone(),
             password_configured: guard.auth.is_some(),
@@ -193,6 +237,7 @@ impl LocalStandardRuntime {
                 ProtectionTier::Unconfigured
             },
             service_version: env!("CARGO_PKG_VERSION").to_string(),
+            playtime_statuses,
         }
     }
 
@@ -311,6 +356,11 @@ impl LocalStandardRuntime {
             IpcRequest::DeleteRule { token, id } => {
                 self.mutate(&token, |cfg| cfg.rules.retain(|r| r.id != id))
             }
+            IpcRequest::SetPlaytimeLimitsEnabled { token, enabled } => {
+                self.mutate(&token, |cfg| cfg.playtime_limits_enabled = enabled)
+            }
+            IpcRequest::ResetPlaytimeLimit { token, .. }
+            | IpcRequest::ResetAllPlaytimeLimits { token } => self.mutate(&token, |_| {}),
             IpcRequest::ChangePassword {
                 token,
                 current_password,

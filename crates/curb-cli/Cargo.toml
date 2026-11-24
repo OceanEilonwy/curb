@@ -5,8 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono.workspace = true
 clap.workspace = true
 curb-core = { path = "../curb-core" }
+curb-games = { path = "../curb-games" }
+curb-preset-steam = { path = "../presets/steam" }
+serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 curb-windows = { path = "../adaptors/windows" }

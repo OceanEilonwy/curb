@@ -95,6 +95,8 @@ export component MainWindow inherits Window {
     in property <bool> steam-adv-open: false;
     in property <bool> busy-steam: false;
     in property <[RuleItem]> rules: [];
+    in property <bool> playtime-limits-enabled: true;
+    in property <bool> has-any-playtime-limits: false;
 
     // Blocked tab properties
     in property <[BlockedEventItem]> blocked-events: [];
@@ -202,6 +204,15 @@ export component MainWindow inherits Window {
     callback open-add-domain(string);
     callback remove-rule-domain(string, int);
     callback delete-rule(string);
+    callback toggle-global-playtime-limits();
+    callback reset-all-playtime-limits();
+    callback toggle-rule-playtime(string);
+    callback set-rule-playtime-mode(string, int);
+    callback set-rule-playtime-daily(string, string);
+    callback set-rule-playtime-weekly(string, string);
+    callback set-rule-playtime-custom(string, string);
+    callback toggle-rule-playtime-wait-match(string);
+    callback reset-rule-playtime(string);
 
     // Blocked callbacks
     callback allow-blocked-event(string);
@@ -847,6 +858,8 @@ export component MainWindow inherits Window {
                     steam-adv-open: root.steam-adv-open;
                     busy-steam: root.busy-steam;
                     rules: root.rules;
+                    playtime-limits-enabled: root.playtime-limits-enabled;
+                    has-any-playtime-limits: root.has-any-playtime-limits;
 
                     require-unlock => { root.open-unlock(); }
                     toggle-steam-expand => { root.toggle-steam-expand(); }
@@ -855,6 +868,8 @@ export component MainWindow inherits Window {
                     toggle-steam-store => { root.toggle-steam-store(); }
                     toggle-steam-community => { root.toggle-steam-community(); }
                     toggle-steam-friends => { root.toggle-steam-friends(); }
+                    toggle-global-playtime-limits => { root.toggle-global-playtime-limits(); }
+                    reset-all-playtime-limits => { root.reset-all-playtime-limits(); }
                     toggle-rule-expand(id) => { root.toggle-rule-expand(id); }
                     toggle-rule-adv(id) => { root.toggle-rule-adv(id); }
                     toggle-rule-enabled(id) => { root.toggle-rule-enabled(id); }
@@ -865,6 +880,13 @@ export component MainWindow inherits Window {
                     open-add-domain(id) => { root.open-add-domain(id); }
                     remove-rule-domain(id, idx) => { root.remove-rule-domain(id, idx); }
                     delete-rule(id) => { root.delete-rule(id); }
+                    toggle-rule-playtime(id) => { root.toggle-rule-playtime(id); }
+                    set-rule-playtime-mode(id, m) => { root.set-rule-playtime-mode(id, m); }
+                    set-rule-playtime-daily(id, h) => { root.set-rule-playtime-daily(id, h); }
+                    set-rule-playtime-weekly(id, h) => { root.set-rule-playtime-weekly(id, h); }
+                    set-rule-playtime-custom(id, expr) => { root.set-rule-playtime-custom(id, expr); }
+                    toggle-rule-playtime-wait-match(id) => { root.toggle-rule-playtime-wait-match(id); }
+                    reset-rule-playtime(id) => { root.reset-rule-playtime(id); }
                 }
 
                 if root.active-tab == 1: BlockedView {

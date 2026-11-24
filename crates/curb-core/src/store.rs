@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::auth::AuthRecord;
 use crate::config::Config;
+use crate::playtime::UsageLedger;
 use crate::Result;
 
 /// Default system data directory on Linux (`curb-service` / `sudo curb-cli`).
@@ -26,6 +27,10 @@ pub fn dns_backup_path(data_dir: &Path) -> PathBuf {
     data_dir.join("dns_backup.json")
 }
 
+pub fn usage_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("usage.json")
+}
+
 pub fn load_config(data_dir: &Path) -> Result<Config> {
     let path = config_path(data_dir);
     if !path.exists() {
@@ -40,6 +45,25 @@ pub fn load_config(data_dir: &Path) -> Result<Config> {
 
 pub fn save_config(data_dir: &Path, config: &Config) -> Result<()> {
     write_json_atomic(&config_path(data_dir), config)
+}
+
+pub fn load_usage(data_dir: &Path) -> Result<UsageLedger> {
+    let path = usage_path(data_dir);
+    if !path.exists() {
+        return Ok(UsageLedger::default());
+    }
+    Ok(read_json(&path)?)
+}
+
+pub fn save_usage(data_dir: &Path, ledger: &UsageLedger) -> Result<()> {
+    let path = usage_path(data_dir);
+    write_json_atomic(&path, ledger)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 pub fn load_auth(data_dir: &Path) -> Result<Option<AuthRecord>> {

@@ -19,6 +19,8 @@ export component AllowedView inherits CurbScrollView {
 
     // User rules
     in property <[RuleItem]> rules: [];
+    in property <bool> playtime-limits-enabled: true;
+    in property <bool> has-any-playtime-limits: false;
 
     callback require-unlock();
     callback toggle-steam-expand();
@@ -27,6 +29,8 @@ export component AllowedView inherits CurbScrollView {
     callback toggle-steam-store();
     callback toggle-steam-community();
     callback toggle-steam-friends();
+    callback toggle-global-playtime-limits();
+    callback reset-all-playtime-limits();
 
     callback toggle-rule-expand(string);
     callback toggle-rule-adv(string);
@@ -38,6 +42,13 @@ export component AllowedView inherits CurbScrollView {
     callback open-add-domain(string);
     callback remove-rule-domain(string, int);
     callback delete-rule(string);
+    callback toggle-rule-playtime(string);
+    callback set-rule-playtime-mode(string, int);
+    callback set-rule-playtime-daily(string, string);
+    callback set-rule-playtime-weekly(string, string);
+    callback set-rule-playtime-custom(string, string);
+    callback toggle-rule-playtime-wait-match(string);
+    callback reset-rule-playtime(string);
 
     content-padding: 16px;
     content-spacing: 12px;
@@ -47,6 +58,100 @@ export component AllowedView inherits CurbScrollView {
         color: Theme.text-sec;
         font-size: 12px;
         wrap: word-wrap;
+    }
+
+    // Global Playtime Limits Admin Bar (shown when any game has a playtime limit)
+    if root.has-any-playtime-limits: Rectangle {
+        border-radius: 12px;
+        background: Theme.bg;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 12px;
+            padding-top: 9px;
+            padding-bottom: 9px;
+            spacing: 10px;
+            cross-axis-alignment: center;
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 2px;
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    cross-axis-alignment: center;
+
+                    Text {
+                        text: "Playtime limits";
+                        color: Theme.text;
+                        font-size: 12px;
+                        font-weight: 600;
+                    }
+
+                    if !root.playtime-limits-enabled: Rectangle {
+                        height: 17px;
+                        border-radius: 8.5px;
+                        background: Theme.amber-soft;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            cross-axis-alignment: center;
+                            Text {
+                                text: "Disabled";
+                                color: Theme.amber-text;
+                                font-size: 10px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.playtime-limits-enabled
+                        ? "Enforcing daily & match-aware limits"
+                        : "All game playtime limits are temporarily off";
+                    color: Theme.text-muted;
+                    font-size: 11px;
+                    overflow: elide;
+                }
+            }
+
+            if root.unlocked: Rectangle {
+                background: transparent;
+                height: 22px;
+                HorizontalLayout {
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    cross-axis-alignment: center;
+                    Text {
+                        text: "Reset all";
+                        color: Theme.accent-text;
+                        font-size: 11px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.reset-all-playtime-limits(); }
+                }
+            }
+
+            if root.unlocked: CurbSwitch {
+                checked: root.playtime-limits-enabled;
+                toggled => { root.toggle-global-playtime-limits(); }
+            }
+            if !root.unlocked: ReadOnlyStatusPill {
+                active: root.playtime-limits-enabled;
+                active-label: "Active";
+                inactive-label: "Off";
+                clicked => { root.require-unlock(); }
+            }
+        }
     }
 
     // Built-in Steam Preset Card
@@ -369,17 +474,88 @@ export component AllowedView inherits CurbScrollView {
                         background: transparent;
 
                         VerticalLayout {
-                            spacing: 3px;
-
-                            Text {
-                                text: rule.name;
-                                color: Theme.text;
-                                font-size: 13px;
-                                font-weight: 600;
-                                overflow: elide;
-                            }
+                            spacing: 4px;
 
                             HorizontalLayout {
+                                spacing: 6px;
+                                alignment: start;
+                                cross-axis-alignment: center;
+
+                                Text {
+                                    text: rule.name;
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                }
+
+                                if rule.first-class: Rectangle {
+                                    height: 17px;
+                                    border-radius: 8.5px;
+                                    background: Theme.accent-soft;
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        cross-axis-alignment: center;
+                                        Text {
+                                            text: "✦ Match-aware";
+                                            color: Theme.accent-text;
+                                            font-size: 10px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if rule.playtime-enabled: HorizontalLayout {
+                                spacing: 6px;
+                                alignment: start;
+                                cross-axis-alignment: center;
+
+                                Rectangle {
+                                    height: 18px;
+                                    border-radius: 9px;
+                                    background: !rule.playtime-active || rule.playtime-chip-state == 0
+                                        ? Theme.green-soft
+                                        : rule.playtime-chip-state == 1
+                                            ? Theme.amber-soft
+                                            : Theme.red-soft;
+                                    HorizontalLayout {
+                                        padding-left: 7px;
+                                        padding-right: 7px;
+                                        cross-axis-alignment: center;
+                                        Text {
+                                            text: !rule.playtime-active || rule.playtime-chip-state == 0
+                                                ? "Playing"
+                                                : rule.playtime-chip-state == 1
+                                                    ? "Finishing Match"
+                                                    : "Overtime";
+                                            color: !rule.playtime-active || rule.playtime-chip-state == 0
+                                                ? Theme.green-text
+                                                : rule.playtime-chip-state == 1
+                                                    ? Theme.amber-text
+                                                    : Theme.red-text;
+                                            font-size: 11px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    text: rule.playtime-sub-meta;
+                                    color: rule.playtime-active && rule.playtime-chip-state == 2
+                                        ? Theme.red-text
+                                        : rule.playtime-active && rule.playtime-chip-state == 1
+                                            ? Theme.amber-text
+                                            : Theme.text-sec;
+                                    font-size: 11px;
+                                    overflow: elide;
+                                }
+                            }
+
+                            if !rule.playtime-enabled: HorizontalLayout {
                                 spacing: 5px;
                                 alignment: start;
                                 cross-axis-alignment: center;
@@ -439,6 +615,27 @@ export component AllowedView inherits CurbScrollView {
                     }
                 }
 
+                // Full-width edge-to-edge daily remaining progress bar
+                if rule.playtime-active: Rectangle {
+                    width: 100%;
+                    height: 5px;
+                    background: Theme.sub;
+
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        height: 100%;
+                        width: rule.playtime-chip-state == 1
+                            ? parent.width
+                            : parent.width * Math.clamp(rule.playtime-remaining-pct, 0.0, 1.0);
+                        background: rule.playtime-chip-state == 0
+                            ? Theme.green-switch
+                            : rule.playtime-chip-state == 1
+                                ? Theme.amber-solid
+                                : Theme.red-solid;
+                    }
+                }
+
                 // Expanded Rule Body
                 if rule.expanded: Rectangle {
                     background: Theme.surface;
@@ -456,6 +653,305 @@ export component AllowedView inherits CurbScrollView {
                         padding-top: 12px;
                         padding-bottom: 12px;
                         spacing: 10px;
+
+                        // Steam Playtime Limit Section
+                        if rule.is-steam-game: VerticalLayout {
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                spacing: 12px;
+                                cross-axis-alignment: center;
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text {
+                                        text: "Playtime limit";
+                                        color: Theme.text;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                    }
+                                    Text {
+                                        text: "Cuts internet access when budget runs out · debt carries over";
+                                        color: Theme.text-muted;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                }
+
+                                if root.unlocked: CurbSwitch {
+                                    checked: rule.playtime-enabled;
+                                    enabled: !rule.busy;
+                                    toggled => { root.toggle-rule-playtime(rule.id); }
+                                }
+                                if !root.unlocked: ReadOnlyStatusPill {
+                                    active: rule.playtime-enabled;
+                                    clicked => { root.require-unlock(); }
+                                }
+                            }
+
+                            if rule.playtime-enabled: Rectangle {
+                                border-radius: 8px;
+                                background: Theme.card;
+                                border-width: 1px;
+                                border-color: Theme.border;
+
+                                VerticalLayout {
+                                    padding: 10px;
+                                    spacing: 8px;
+
+                                    // Budget Mode Selector: Daily / Weekly / Custom
+                                    HorizontalLayout {
+                                        cross-axis-alignment: center;
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: "Budget";
+                                            color: Theme.text-sec;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 4px;
+
+                                            for mode-item in [
+                                                { idx: 0, label: "Daily" },
+                                                { idx: 1, label: "Weekly" },
+                                                { idx: 2, label: "Custom" },
+                                            ]: Rectangle {
+                                                height: 22px;
+                                                border-radius: 5px;
+                                                background: rule.playtime-budget-mode == mode-item.idx ? Theme.accent : Theme.pill;
+                                                opacity: root.unlocked && !rule.busy ? 1.0 : 0.65;
+
+                                                HorizontalLayout {
+                                                    padding-left: 8px;
+                                                    padding-right: 8px;
+                                                    cross-axis-alignment: center;
+                                                    Text {
+                                                        text: mode-item.label;
+                                                        color: rule.playtime-budget-mode == mode-item.idx ? #ffffff : Theme.text;
+                                                        font-size: 11px;
+                                                        font-weight: 600;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+
+                                                TouchArea {
+                                                    enabled: root.unlocked && !rule.busy;
+                                                    mouse-cursor: root.unlocked && !rule.busy ? pointer : default;
+                                                    clicked => { root.set-rule-playtime-mode(rule.id, mode-item.idx); }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Daily Hours Input (compact width)
+                                    if rule.playtime-budget-mode == 0: HorizontalLayout {
+                                        cross-axis-alignment: center;
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: "Daily";
+                                            color: Theme.text-muted;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            cross-axis-alignment: center;
+                                            Rectangle {
+                                                width: 54px;
+                                                height: 26px;
+                                                border-radius: 5px;
+                                                background: Theme.bg;
+                                                border-width: 1px;
+                                                border-color: Theme.border-strong;
+
+                                                daily-in := TextInput {
+                                                    text: rule.playtime-daily-hours;
+                                                    enabled: root.unlocked && !rule.busy;
+                                                    color: Theme.text;
+                                                    font-size: 12px;
+                                                    font-family: "JetBrains Mono";
+                                                    horizontal-alignment: right;
+                                                    vertical-alignment: center;
+                                                    x: 6px;
+                                                    width: parent.width - 12px;
+                                                    height: parent.height;
+                                                    accepted => { root.set-rule-playtime-daily(rule.id, self.text); }
+                                                    edited => { root.set-rule-playtime-daily(rule.id, self.text); }
+                                                }
+                                            }
+                                            Text {
+                                                text: "hrs / day";
+                                                color: Theme.text-muted;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    // Weekly Hours Input (compact width)
+                                    if rule.playtime-budget-mode == 1: HorizontalLayout {
+                                        cross-axis-alignment: center;
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: "Weekly";
+                                            color: Theme.text-muted;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            cross-axis-alignment: center;
+                                            Rectangle {
+                                                width: 54px;
+                                                height: 26px;
+                                                border-radius: 5px;
+                                                background: Theme.bg;
+                                                border-width: 1px;
+                                                border-color: Theme.border-strong;
+
+                                                weekly-in := TextInput {
+                                                    text: rule.playtime-weekly-hours;
+                                                    enabled: root.unlocked && !rule.busy;
+                                                    color: Theme.text;
+                                                    font-size: 12px;
+                                                    font-family: "JetBrains Mono";
+                                                    horizontal-alignment: right;
+                                                    vertical-alignment: center;
+                                                    x: 6px;
+                                                    width: parent.width - 12px;
+                                                    height: parent.height;
+                                                    accepted => { root.set-rule-playtime-weekly(rule.id, self.text); }
+                                                    edited => { root.set-rule-playtime-weekly(rule.id, self.text); }
+                                                }
+                                            }
+                                            Text {
+                                                text: "hrs / week";
+                                                color: Theme.text-muted;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    // Custom AND-rule Expression Input
+                                    if rule.playtime-budget-mode == 2: VerticalLayout {
+                                        spacing: 5px;
+                                        Rectangle {
+                                            height: 28px;
+                                            border-radius: 5px;
+                                            background: Theme.bg;
+                                            border-width: 1px;
+                                            border-color: rule.playtime-custom-error ? Theme.red-solid : Theme.border-strong;
+
+                                            custom-in := TextInput {
+                                                text: rule.playtime-custom-expr;
+                                                enabled: root.unlocked && !rule.busy;
+                                                color: Theme.text;
+                                                font-size: 11px;
+                                                font-family: "JetBrains Mono";
+                                                vertical-alignment: center;
+                                                x: 8px;
+                                                width: parent.width - 16px;
+                                                height: parent.height;
+                                                accepted => { root.set-rule-playtime-custom(rule.id, self.text); }
+                                            }
+                                        }
+                                        if rule.playtime-custom-summary != "": Text {
+                                            text: rule.playtime-custom-summary;
+                                            color: rule.playtime-custom-error ? Theme.red-text : Theme.accent-text;
+                                            font-size: 11px;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+
+                                    // Wait for Match End
+                                    Rectangle {
+                                        height: 1px;
+                                        background: Theme.border;
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        cross-axis-alignment: center;
+
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 2px;
+                                            Text {
+                                                text: rule.first-class ? "Wait for match to end" : "Match-aware cutoff unavailable";
+                                                color: rule.first-class ? Theme.text : Theme.text-muted;
+                                                font-size: 12px;
+                                                font-weight: 600;
+                                            }
+                                            Text {
+                                                text: rule.first-class
+                                                    ? "✦ " + rule.detector-name + " · delays cutoff until lobby"
+                                                    : "No first-class plugin for this title — cuts immediately at 0m";
+                                                color: Theme.text-muted;
+                                                font-size: 11px;
+                                                wrap: word-wrap;
+                                            }
+                                        }
+
+                                        if rule.first-class && root.unlocked: CurbSwitch {
+                                            checked: rule.playtime-wait-match;
+                                            enabled: !rule.busy;
+                                            toggled => { root.toggle-rule-playtime-wait-match(rule.id); }
+                                        }
+                                        if rule.first-class && !root.unlocked: ReadOnlyStatusPill {
+                                            active: rule.playtime-wait-match;
+                                            clicked => { root.require-unlock(); }
+                                        }
+                                    }
+
+                                    // Per-game Admin Reset
+                                    if root.unlocked: Rectangle {
+                                        height: 1px;
+                                        background: Theme.border;
+                                    }
+                                    if root.unlocked: HorizontalLayout {
+                                        cross-axis-alignment: center;
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: rule.playtime-used-label;
+                                            color: Theme.text-muted;
+                                            font-size: 11px;
+                                            overflow: elide;
+                                        }
+                                        Rectangle {
+                                            height: 22px;
+                                            border-radius: 5px;
+                                            background: Theme.accent-soft;
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                cross-axis-alignment: center;
+                                                Text {
+                                                    text: "Reset today’s limit";
+                                                    color: Theme.accent-text;
+                                                    font-size: 11px;
+                                                    font-weight: 600;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                            TouchArea {
+                                                enabled: !rule.busy;
+                                                mouse-cursor: !rule.busy ? pointer : default;
+                                                clicked => { root.reset-rule-playtime(rule.id); }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 1px;
+                                background: Theme.border;
+                            }
+                        }
 
                         HorizontalLayout {
                             spacing: 12px;

@@ -121,6 +121,8 @@ pub struct ServiceSnapshot {
     pub protection_tier: ProtectionTier,
     #[serde(default)]
     pub service_version: String,
+    #[serde(default)]
+    pub playtime_statuses: Vec<crate::playtime::PlaytimeRuleStatus>,
 }
 
 /// Requests sent from `curb-app` (or `curb-cli`) to `curb-service`.
@@ -178,6 +180,20 @@ pub enum IpcRequest {
         token: String,
         preset_id: String,
         state: crate::presets::PresetState,
+    },
+    /// Enable or disable all playtime limits globally across all games.
+    SetPlaytimeLimitsEnabled {
+        token: String,
+        enabled: bool,
+    },
+    /// Reset today's playtime usage and carried overtime debt for a single game rule.
+    ResetPlaytimeLimit {
+        token: String,
+        rule_id: Uuid,
+    },
+    /// Reset playtime usage and carried overtime debt across all game rules.
+    ResetAllPlaytimeLimits {
+        token: String,
     },
     ChangePassword {
         token: String,

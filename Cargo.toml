@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/curb-core",
     "crates/presets/steam",
+    "crates/curb-games",
     "crates/adaptors/windows",
     "crates/adaptors/linux",
     "crates/adaptors/nftables",

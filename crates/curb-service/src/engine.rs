@@ -4,19 +4,21 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use chrono::Utc;
+use chrono::{Local, Utc};
 use curb_core::auth::{hash_password, verify_password, AuthRecord, SessionManager};
-use curb_core::config::{Config, NetworkPolicy};
+use curb_core::config::{Config, ExecutableMatcher, NetworkPolicy};
 use curb_core::dns::{domain_matches_any, DnsCache};
 use curb_core::ipc::{
     record_grouped_blocked_event, BlockedEvent, IpcRequest, IpcResponse, ServiceSnapshot,
     MAX_BLOCKED_HISTORY,
 };
+use curb_core::playtime::{PlaytimeChipState, PlaytimeRuleStatus, UsageLedger};
 use curb_core::presets::{DefaultPresetHost, EffectiveRule, PresetHost, PresetRegistry};
-use curb_core::store::{load_auth, load_config, save_auth, save_config};
+use curb_core::store::{load_auth, load_config, load_usage, save_auth, save_config, save_usage};
 use curb_core::verify::BinaryIdentity;
 use curb_preset_steam::SteamPresetPlugin;
 use tokio::sync::Notify;
+use uuid::Uuid;
 
 /// Builds the default built-in preset plugin registry (register new presets here).
 pub fn default_preset_registry() -> Arc<PresetRegistry> {
@@ -61,6 +63,8 @@ pub struct EngineState {
     pub active_wfp_filters: usize,
     pub presets: Arc<PresetRegistry>,
     pub preset_host: Arc<dyn PresetHost>,
+    pub usage_ledger: UsageLedger,
+    pub playtime_statuses: HashMap<Uuid, PlaytimeRuleStatus>,
 }
 
 impl EngineState {
@@ -80,7 +84,8 @@ impl EngineState {
     ) -> curb_core::Result<Self> {
         let config = load_config(&data_dir)?;
         let auth = load_auth(&data_dir)?;
-        Ok(Self {
+        let usage_ledger = load_usage(&data_dir).unwrap_or_default();
+        let mut st = Self {
             data_dir,
             config,
             config_version: 0,
@@ -93,16 +98,119 @@ impl EngineState {
             active_wfp_filters: 0,
             presets,
             preset_host,
-        })
+            usage_ledger,
+            playtime_statuses: HashMap::new(),
+        };
+        st.refresh_playtime_statuses();
+        Ok(st)
     }
 
-    /// Compiles all enabled presets and user rules into flat `EffectiveRule`s.
+    /// Returns `true` if `rule_id` currently has its internet access cut due to an
+    /// exhausted playtime limit (`Overtime` state while global limits are enabled).
+    pub fn is_rule_playtime_expired(&self, rule_id: Uuid) -> bool {
+        if !self.config.playtime_limits_enabled {
+            return false;
+        }
+        self.playtime_statuses
+            .get(&rule_id)
+            .is_some_and(|s| s.limits_active && s.chip_state == PlaytimeChipState::Overtime)
+    }
+
+    /// Recomputes `playtime_statuses` from `config` + `usage_ledger` (called on load,
+    /// config mutations, and admin resets).
+    pub fn refresh_playtime_statuses(&mut self) {
+        let now_local = Local::now();
+        let registry = curb_games::DetectorRegistry::default();
+        let mut next = HashMap::new();
+
+        for rule in &self.config.rules {
+            let app_id = match &rule.matcher {
+                ExecutableMatcher::SteamGame { app_id, .. } => Some(*app_id),
+                _ => None,
+            };
+            let fc_info = app_id.and_then(|id| registry.info(id));
+            let first_class = fc_info.is_some();
+            let detector_name = fc_info.map(|i| i.plugin_name.to_string());
+            let prev_telemetry = self
+                .playtime_statuses
+                .get(&rule.id)
+                .and_then(|s| s.live_telemetry.clone());
+
+            if let Some(limit) = &rule.playtime_limit {
+                let limits_active =
+                    rule.enabled && self.config.playtime_limits_enabled && limit.enabled;
+                let (remaining_today_secs, daily_budget_secs, is_exempt_today) = self
+                    .usage_ledger
+                    .remaining_today(rule.id, limit, now_local);
+                let rec = self.usage_ledger.rules.get(&rule.id);
+                let (used_today_secs, overtime_debt_secs, draining, expired) = rec
+                    .map(|r| {
+                        (
+                            r.used_today_secs,
+                            r.overtime_debt_secs.saturating_add(r.active_overtime_secs),
+                            r.draining_match,
+                            r.expired_today,
+                        )
+                    })
+                    .unwrap_or((0, 0, false, false));
+
+                let chip_state = if !limits_active || is_exempt_today {
+                    PlaytimeChipState::Playing
+                } else if draining {
+                    PlaytimeChipState::FinishingMatch
+                } else if expired || remaining_today_secs == 0 {
+                    PlaytimeChipState::Overtime
+                } else {
+                    PlaytimeChipState::Playing
+                };
+
+                next.insert(
+                    rule.id,
+                    PlaytimeRuleStatus {
+                        rule_id: rule.id,
+                        chip_state,
+                        limits_active,
+                        is_exempt_today,
+                        daily_budget_secs,
+                        remaining_today_secs,
+                        used_today_secs,
+                        overtime_debt_secs,
+                        first_class,
+                        detector_name,
+                        live_telemetry: prev_telemetry,
+                    },
+                );
+            } else if first_class {
+                next.insert(
+                    rule.id,
+                    PlaytimeRuleStatus {
+                        rule_id: rule.id,
+                        chip_state: PlaytimeChipState::Playing,
+                        limits_active: false,
+                        is_exempt_today: false,
+                        daily_budget_secs: 0,
+                        remaining_today_secs: 0,
+                        used_today_secs: 0,
+                        overtime_debt_secs: 0,
+                        first_class,
+                        detector_name,
+                        live_telemetry: prev_telemetry,
+                    },
+                );
+            }
+        }
+
+        self.playtime_statuses = next;
+    }
+
+    /// Compiles all enabled presets and user rules into flat `EffectiveRule`s,
+    /// excluding any game whose playtime limit is currently in `Overtime` (internet cut).
     pub fn effective_rules(&self) -> Vec<EffectiveRule> {
         let mut out = self
             .presets
             .expand_all_rules(&self.config.presets, self.preset_host.target_os());
         for rule in &self.config.rules {
-            if rule.enabled {
+            if rule.enabled && !self.is_rule_playtime_expired(rule.id) {
                 out.push(EffectiveRule {
                     label: rule.name.clone(),
                     matcher: rule.matcher.clone(),
@@ -156,6 +264,7 @@ impl EngineState {
         if !curb_core::config::is_restricted_subprocess(&identity.filename) {
             for rule in &self.config.rules {
                 if !rule.enabled
+                    || self.is_rule_playtime_expired(rule.id)
                     || rule.subprocesses == curb_core::config::SubprocessPolicy::Disabled
                 {
                     continue;
@@ -195,7 +304,7 @@ impl EngineState {
     pub fn candidate_rule_paths(&self) -> Vec<String> {
         let mut paths = Vec::new();
         for rule in &self.config.rules {
-            if !rule.enabled {
+            if !rule.enabled || self.is_rule_playtime_expired(rule.id) {
                 continue;
             }
             if let Some(p) = &rule.exe_path {
@@ -300,6 +409,12 @@ impl EngineState {
     }
 
     pub fn snapshot(&self) -> ServiceSnapshot {
+        let mut playtime_statuses = Vec::new();
+        for rule in &self.config.rules {
+            if let Some(st) = self.playtime_statuses.get(&rule.id) {
+                playtime_statuses.push(st.clone());
+            }
+        }
         ServiceSnapshot {
             config: self.config.clone(),
             password_configured: self.auth.is_some(),
@@ -307,6 +422,7 @@ impl EngineState {
             active_wfp_filters: self.active_wfp_filters,
             protection_tier: curb_core::ipc::ProtectionTier::FullService,
             service_version: env!("CARGO_PKG_VERSION").to_string(),
+            playtime_statuses,
         }
     }
 }
@@ -616,6 +732,54 @@ impl ServiceEngine {
                 })
             }
 
+            IpcRequest::SetPlaytimeLimitsEnabled { token, enabled } => {
+                self.mutate_config(&token, |cfg| {
+                    cfg.playtime_limits_enabled = enabled;
+                })
+            }
+
+            IpcRequest::ResetPlaytimeLimit { token, rule_id } => {
+                let mut guard = self.state.lock().unwrap();
+                if !guard.sessions.validate_and_refresh(&token) {
+                    return IpcResponse::Error {
+                        message: "Admin session locked or expired. Please unlock again.".into(),
+                    };
+                }
+                guard.usage_ledger.reset_rule(rule_id, Local::now());
+                guard.refresh_playtime_statuses();
+                guard.config_version = guard.config_version.wrapping_add(1);
+                if let Err(e) = save_usage(&guard.data_dir, &guard.usage_ledger) {
+                    return IpcResponse::Error {
+                        message: format!("Failed to persist usage: {e}"),
+                    };
+                }
+                let snapshot = guard.snapshot();
+                drop(guard);
+                self.notify_reconcile();
+                IpcResponse::Snapshot { data: snapshot }
+            }
+
+            IpcRequest::ResetAllPlaytimeLimits { token } => {
+                let mut guard = self.state.lock().unwrap();
+                if !guard.sessions.validate_and_refresh(&token) {
+                    return IpcResponse::Error {
+                        message: "Admin session locked or expired. Please unlock again.".into(),
+                    };
+                }
+                guard.usage_ledger.reset_all(Local::now());
+                guard.refresh_playtime_statuses();
+                guard.config_version = guard.config_version.wrapping_add(1);
+                if let Err(e) = save_usage(&guard.data_dir, &guard.usage_ledger) {
+                    return IpcResponse::Error {
+                        message: format!("Failed to persist usage: {e}"),
+                    };
+                }
+                let snapshot = guard.snapshot();
+                drop(guard);
+                self.notify_reconcile();
+                IpcResponse::Snapshot { data: snapshot }
+            }
+
             IpcRequest::ChangePassword {
                 token,
                 current_password,
@@ -665,6 +829,7 @@ impl ServiceEngine {
         }
         update(&mut guard.config);
         guard.config_version = guard.config_version.wrapping_add(1);
+        guard.refresh_playtime_statuses();
         if let Err(e) = save_config(&guard.data_dir, &guard.config) {
             return IpcResponse::Error {
                 message: format!("Failed to persist config: {e}"),
@@ -829,6 +994,7 @@ mod tests {
                 subprocesses: SubprocessPolicy::SameSignerOrDir,
                 exe_hint: "Signal.exe".into(),
                 exe_path: Some(signal_path.clone()),
+                playtime_limit: None,
                 created_at: Utc::now(),
             },
             Rule {
@@ -845,6 +1011,7 @@ mod tests {
                 subprocesses: SubprocessPolicy::SameSignerOrDir,
                 exe_hint: "firefox.exe".into(),
                 exe_path: Some(firefox_path.clone()),
+                playtime_limit: None,
                 created_at: Utc::now(),
             },
             Rule {
@@ -861,6 +1028,7 @@ mod tests {
                 subprocesses: SubprocessPolicy::SameSignerOrDir,
                 exe_hint: "msedge.exe".into(),
                 exe_path: Some(edge_path.clone()),
+                playtime_limit: None,
                 created_at: Utc::now(),
             },
         ];
@@ -1008,6 +1176,137 @@ mod tests {
             .await;
         assert!(start.elapsed() < std::time::Duration::from_millis(500));
         handle.await.unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn playtime_overtime_cuts_game_and_admin_reset_or_global_disable_restores_access() {
+        use curb_core::config::{Rule, SubprocessPolicy, VerificationMethod};
+        use curb_core::playtime::{PlaytimeBudget, PlaytimeLimitConfig};
+        use curb_core::verify::SignatureInfo;
+
+        let dir = std::env::temp_dir().join(format!("curb_playtime_{}", Uuid::new_v4()));
+        let engine = ServiceEngine::new(dir.clone()).unwrap();
+        let token = match engine.handle_request(IpcRequest::Unlock {
+            password: "admin-secret".into(),
+        }) {
+            IpcResponse::Unlocked { token } => token,
+            other => panic!("expected Unlocked, got {other:?}"),
+        };
+
+        let rule_id = Uuid::new_v4();
+        let halo_rule = Rule {
+            id: rule_id,
+            name: "Halo: The Master Chief Collection".into(),
+            enabled: true,
+            matcher: ExecutableMatcher::SteamGame {
+                app_id: 976730,
+                install_dir: r"D:\SteamLibrary\steamapps\common\Halo The Master Chief Collection"
+                    .into(),
+                verification: VerificationMethod::Hash {
+                    sha256: "halo-sha".into(),
+                    filename_hint: "MCC-Win64-Shipping.exe".into(),
+                },
+            },
+            network: NetworkPolicy::default(),
+            subprocesses: SubprocessPolicy::SameSignerOrDir,
+            exe_hint: "MCC-Win64-Shipping.exe".into(),
+            exe_path: Some(
+                r"D:\SteamLibrary\steamapps\common\Halo The Master Chief Collection\MCC\Binaries\Win64\MCC-Win64-Shipping.exe"
+                    .into(),
+            ),
+            playtime_limit: Some(PlaytimeLimitConfig {
+                enabled: true,
+                budget: PlaytimeBudget::Daily { hours: 1.0 },
+                wait_for_match_end: true,
+                max_overtime_minutes: 30,
+                carry_over_debt: true,
+            }),
+            created_at: Utc::now(),
+        };
+
+        let _ = engine.handle_request(IpcRequest::UpsertRule {
+            token: token.clone(),
+            rule: halo_rule,
+        });
+
+        let halo_bin = BinaryIdentity {
+            path: r"D:\SteamLibrary\steamapps\common\Halo The Master Chief Collection\MCC\Binaries\Win64\MCC-Win64-Shipping.exe"
+                .into(),
+            filename: "MCC-Win64-Shipping.exe".into(),
+            sha256: "halo-sha".into(),
+            signature: None,
+            product_name: None,
+            original_filename: None,
+            file_description: None,
+        };
+        let steam_bin = BinaryIdentity {
+            path: r"C:\Program Files (x86)\Steam\steam.exe".into(),
+            filename: "steam.exe".into(),
+            sha256: "steam-sha".into(),
+            signature: Some(SignatureInfo {
+                trusted: true,
+                subject_cn: "Valve Corp.".into(),
+                issuer_cn: "DigiCert".into(),
+            }),
+            product_name: Some("Steam".into()),
+            original_filename: Some("steam.exe".into()),
+            file_description: None,
+        };
+
+        // Initially allowed (full 1h budget remaining) and recognized as first-class.
+        {
+            let guard = engine.state.lock().unwrap();
+            assert!(guard.evaluate_process(None, &halo_bin).is_some());
+            assert!(guard.playtime_statuses[&rule_id].first_class);
+        }
+
+        // Exhaust budget -> Overtime cuts Halo internet access while Steam stays online.
+        {
+            let mut guard = engine.state.lock().unwrap();
+            let limit = guard.config.rules[0].playtime_limit.clone().unwrap();
+            let chip = guard
+                .usage_ledger
+                .record_tick(rule_id, &limit, 3600, false, true, Local::now());
+            assert_eq!(chip, PlaytimeChipState::Overtime);
+            guard.refresh_playtime_statuses();
+            assert!(guard.evaluate_process(None, &halo_bin).is_none());
+            assert!(guard.evaluate_process(None, &steam_bin).is_some());
+        }
+
+        // Global disable restores Halo immediately without wiping usage.
+        let _ = engine.handle_request(IpcRequest::SetPlaytimeLimitsEnabled {
+            token: token.clone(),
+            enabled: false,
+        });
+        assert!(engine
+            .state
+            .lock()
+            .unwrap()
+            .evaluate_process(None, &halo_bin)
+            .is_some());
+
+        // Re-enabling global limits cuts Halo again.
+        let _ = engine.handle_request(IpcRequest::SetPlaytimeLimitsEnabled {
+            token: token.clone(),
+            enabled: true,
+        });
+        assert!(engine
+            .state
+            .lock()
+            .unwrap()
+            .evaluate_process(None, &halo_bin)
+            .is_none());
+
+        // Admin reset restores Halo immediately.
+        let _ = engine.handle_request(IpcRequest::ResetPlaytimeLimit { token, rule_id });
+        assert!(engine
+            .state
+            .lock()
+            .unwrap()
+            .evaluate_process(None, &halo_bin)
+            .is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

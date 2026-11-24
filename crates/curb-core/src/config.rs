@@ -390,7 +390,11 @@ fn parent_directory(path: &str) -> Option<String> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Rule {
     pub id: Uuid,
     pub name: String,
@@ -403,6 +407,9 @@ pub struct Rule {
     /// 0ms WFP filter installation even before the application launches.
     #[serde(default)]
     pub exe_path: Option<String>,
+    /// Optional interval-based playtime limit (primarily for Steam games).
+    #[serde(default)]
+    pub playtime_limit: Option<crate::playtime::PlaytimeLimitConfig>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -443,12 +450,15 @@ impl PresetsConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub schema_version: u32,
     pub mode: EnforcementMode,
     pub baseline: BaselinePolicy,
     pub presets: PresetsConfig,
+    /// Global master toggle allowing an admin to disable all playtime limits across all games.
+    #[serde(default = "default_true")]
+    pub playtime_limits_enabled: bool,
     pub rules: Vec<Rule>,
 }
 
@@ -459,6 +469,7 @@ impl Default for Config {
             mode: EnforcementMode::Enforcing,
             baseline: BaselinePolicy::default(),
             presets: PresetsConfig::default(),
+            playtime_limits_enabled: true,
             rules: Vec::new(),
         }
     }
@@ -649,6 +660,7 @@ mod tests {
                 subprocesses: SubprocessPolicy::SameSignerOrDir,
                 exe_hint: "firefox.exe".into(),
                 exe_path: None,
+                playtime_limit: None,
                 created_at: Utc::now(),
             },
             Rule {
@@ -665,6 +677,7 @@ mod tests {
                 subprocesses: SubprocessPolicy::SameSignerOrDir,
                 exe_hint: "Minecraft.exe".into(),
                 exe_path: None,
+                playtime_limit: None,
                 created_at: Utc::now(),
             },
         ];

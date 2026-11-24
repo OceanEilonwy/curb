@@ -16,6 +16,25 @@ export struct RuleItem {
     adv-open: bool,
     busy: bool,
     deleting: bool,
+    // Playtime & first-class match-aware fields
+    first-class: bool,
+    detector-name: string,
+    playtime-enabled: bool,
+    playtime-active: bool,
+    // 0 = Playing, 1 = Finishing Match, 2 = Overtime
+    playtime-chip-state: int,
+    playtime-sub-meta: string,
+    playtime-remaining-pct: float,
+    // 0 = Daily, 1 = Weekly, 2 = Custom
+    playtime-budget-mode: int,
+    playtime-daily-hours: string,
+    playtime-weekly-hours: string,
+    playtime-custom-expr: string,
+    playtime-custom-summary: string,
+    playtime-custom-error: bool,
+    playtime-wait-match: bool,
+    playtime-used-label: string,
+    playtime-live-telemetry: string,
 }
 
 export struct BlockedEventItem {

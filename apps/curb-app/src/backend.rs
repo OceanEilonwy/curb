@@ -39,6 +39,7 @@ impl DemoState {
                 active_wfp_filters: 14,
                 protection_tier: ProtectionTier::FullService,
                 service_version: env!("CARGO_PKG_VERSION").to_string(),
+                playtime_statuses: Vec::new(),
                 config: Config {
                     schema_version: CURRENT_SCHEMA_VERSION,
                     mode: EnforcementMode::Enforcing,
@@ -52,6 +53,7 @@ impl DemoState {
                         },
                         ..Default::default()
                     },
+                    playtime_limits_enabled: true,
                     rules: vec![
                         Rule {
                             id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
@@ -62,6 +64,7 @@ impl DemoState {
                                 r"D:\SteamLibrary\steamapps\common\Deep Rock Galactic\FSD-Win64-Shipping.exe"
                                     .into(),
                             ),
+                            playtime_limit: None,
                             created_at: now,
                             matcher: ExecutableMatcher::SteamGame {
                                 app_id: 548430,
@@ -89,6 +92,7 @@ impl DemoState {
                                 r"C:\Program Files (x86)\Steam\steamapps\common\Balatro\Balatro.exe"
                                     .into(),
                             ),
+                            playtime_limit: None,
                             created_at: now,
                             matcher: ExecutableMatcher::SteamGame {
                                 app_id: 2379780,
@@ -622,6 +626,61 @@ impl CurbBackend {
         }
         match self
             .dispatch_request(IpcRequest::DeleteRule { token, id })
+            .await?
+        {
+            IpcResponse::Snapshot { data } => Ok(data),
+            IpcResponse::Error { message } => Err(message),
+            _ => Err("Unexpected response from Curb".into()),
+        }
+    }
+
+    pub async fn set_playtime_limits_enabled(
+        &self,
+        token: String,
+        enabled: bool,
+    ) -> Result<ServiceSnapshot, String> {
+        if let Some(demo) = &self.demo {
+            let mut g = demo.lock().unwrap();
+            g.snapshot.config.playtime_limits_enabled = enabled;
+            return Ok(g.snapshot.clone());
+        }
+        match self
+            .dispatch_request(IpcRequest::SetPlaytimeLimitsEnabled { token, enabled })
+            .await?
+        {
+            IpcResponse::Snapshot { data } => Ok(data),
+            IpcResponse::Error { message } => Err(message),
+            _ => Err("Unexpected response from Curb".into()),
+        }
+    }
+
+    pub async fn reset_playtime_limit(
+        &self,
+        token: String,
+        rule_id: Uuid,
+    ) -> Result<ServiceSnapshot, String> {
+        if let Some(demo) = &self.demo {
+            return Ok(demo.lock().unwrap().snapshot.clone());
+        }
+        match self
+            .dispatch_request(IpcRequest::ResetPlaytimeLimit { token, rule_id })
+            .await?
+        {
+            IpcResponse::Snapshot { data } => Ok(data),
+            IpcResponse::Error { message } => Err(message),
+            _ => Err("Unexpected response from Curb".into()),
+        }
+    }
+
+    pub async fn reset_all_playtime_limits(
+        &self,
+        token: String,
+    ) -> Result<ServiceSnapshot, String> {
+        if let Some(demo) = &self.demo {
+            return Ok(demo.lock().unwrap().snapshot.clone());
+        }
+        match self
+            .dispatch_request(IpcRequest::ResetAllPlaytimeLimits { token })
             .await?
         {
             IpcResponse::Snapshot { data } => Ok(data),

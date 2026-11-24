@@ -2,6 +2,7 @@ mod dns_proxy;
 mod engine;
 mod ipc_server;
 mod linux;
+mod playtime_loop;
 mod windows;
 
 use std::net::SocketAddr;
@@ -291,9 +292,19 @@ async fn run_service_runtime(
         });
     }
 
+    let playtime_task = {
+        let pt_engine = engine.clone();
+        let pt_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            playtime_loop::run_playtime_loop(pt_engine, pt_shutdown).await;
+        })
+    };
+
     if let Err(e) = ipc_server::run_ipc_server(engine, shutdown_rx).await {
         error!("IPC server failed: {e}");
     }
+
+    let _ = playtime_task.await;
 
     #[cfg(windows)]
     {
