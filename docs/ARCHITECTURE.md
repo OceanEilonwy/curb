@@ -20,7 +20,7 @@ curb/
 │   ├── curb-service/    # LocalSystem Windows Service (WFP, ETW, Adapter DNS manager, local DNS proxy, Named Pipe IPC server)
 │   └── curb-cli/        # Elevated admin CLI (install, uninstall, reset-password, emergency-disable, status)
 └── apps/
-    └── curb-app/        # Unprivileged Tauri v2 + SolidJS 2 + TypeScript system tray app
+    └── curb-app/        # Unprivileged pure-Rust Slint system tray app (software renderer)
 ```
 
 ---
@@ -56,4 +56,4 @@ curb/
 ### 5. Security & Auth Flow
 - **IPC Channel:** Named Pipe `\\.\pipe\curb-ipc` (unprivileged tray UI connects as standard user).
 - **Read-only by default:** Status, rules, blocked events, running apps, and Steam library scan are readable without unlocking.
-- **Admin Unlock:** Password verified against Argon2id hash in `C:\ProgramData\Curb\auth.json` with exponential backoff on failed attempts. Returns an in-memory 256-bit session token with 10-minute idle timeout; closing the tray window immediately revokes the token and destroys the WebView2 instance to keep idle RAM minimal.
+- **Admin Unlock:** Password verified against Argon2id hash in `C:\ProgramData\Curb\auth.json` with exponential backoff on failed attempts. Returns an in-memory 256-bit session token with 10-minute idle timeout; closing the tray window immediately revokes the token and drops the Slint window while keeping only the native `SystemTrayIcon` alive so idle RAM stays minimal.

@@ -1,15 +1,17 @@
+#[cfg(windows)]
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
 
+#[cfg(windows)]
 use crate::local_mode::user_data_dir;
 
-/// Locates bundled `curb-cli.exe` and `curb-service.exe` inside the Tauri resource
-/// directory (or sibling executable directory) and triggers a single Windows UAC
-/// elevation prompt (`runas`) to install & start `CurbService` in `C:\ProgramData\Curb`.
-pub fn launch_elevated_service_install(app: &AppHandle) -> Result<(), String> {
+/// Locates bundled `curb-cli.exe` and `curb-service.exe` inside the application's
+/// `resources/` directory (NSIS install) or sibling executable directory (portable zip),
+/// and triggers a single Windows UAC elevation prompt (`runas`) to install & start
+/// `CurbService` in `C:\ProgramData\Curb`.
+pub fn launch_elevated_service_install() -> Result<(), String> {
     #[cfg(windows)]
     {
-        let (cli_path, svc_path) = locate_bundled_binaries(app)?;
+        let (cli_path, svc_path) = locate_bundled_binaries()?;
         let migrate_dir = user_data_dir();
         let params = format!(
             "install --service-bin \"{}\" --migrate-from \"{}\"",
@@ -22,7 +24,6 @@ pub fn launch_elevated_service_install(app: &AppHandle) -> Result<(), String> {
 
     #[cfg(not(windows))]
     {
-        let _ = app;
         Err("Full Protection (Windows Service + WFP) is only available on Windows.".into())
     }
 }
@@ -35,14 +36,11 @@ pub fn is_service_outdated(reported_version: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn locate_bundled_binaries(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
+fn locate_bundled_binaries() -> Result<(PathBuf, PathBuf), String> {
     let mut search_dirs = Vec::new();
-    if let Ok(res_dir) = app.path().resource_dir() {
-        search_dirs.push(res_dir.join("resources"));
-        search_dirs.push(res_dir);
-    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            search_dirs.push(dir.join("resources"));
             search_dirs.push(dir.to_path_buf());
         }
     }
@@ -62,16 +60,15 @@ fn locate_bundled_binaries(app: &AppHandle) -> Result<(PathBuf, PathBuf), String
 }
 
 /// Triggers a single Windows UAC prompt (`runas`) to stop and unregister `CurbService`.
-pub fn launch_elevated_service_uninstall(app: &AppHandle) -> Result<(), String> {
+pub fn launch_elevated_service_uninstall() -> Result<(), String> {
     #[cfg(windows)]
     {
-        let (cli_path, _) = locate_bundled_binaries(app)?;
+        let (cli_path, _) = locate_bundled_binaries()?;
         run_elevated_windows(&cli_path, "uninstall")
     }
 
     #[cfg(not(windows))]
     {
-        let _ = app;
         Err("Only available on Windows.".into())
     }
 }

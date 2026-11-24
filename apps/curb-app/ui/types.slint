@@ -1,0 +1,57 @@
+export struct RuleItem {
+    id: string,
+    name: string,
+    enabled: bool,
+    signed: bool,
+    is-steam-game: bool,
+    allow-helpers: bool,
+    allow-tcp: bool,
+    allow-udp: bool,
+    // 0 = disabled, 1 = same_signer_or_dir, 2 = any_except_restricted
+    subprocess-policy: int,
+    dns-whitelist: [string],
+    exe-hint: string,
+    matcher-detail: string,
+    expanded: bool,
+    adv-open: bool,
+    busy: bool,
+    deleting: bool,
+}
+
+export struct BlockedEventItem {
+    id: string,
+    app-name: string,
+    relative-time: string,
+    destination: string,
+    is-steam-community: bool,
+    allowing: bool,
+}
+
+export struct RunningAppItem {
+    key: string,
+    name: string,
+    initials: string,
+    avatar-color: color,
+    exe: string,
+    path: string,
+    process-count: int,
+    background: bool,
+    tried-connect: bool,
+    tried-host: string,
+    signed: bool,
+    already-allowed: bool,
+    selected: bool,
+}
+
+export struct SteamGameItem {
+    key: string,
+    app-id: int,
+    name: string,
+    initials: string,
+    avatar-color: color,
+    exe-name: string,
+    exe-path: string,
+    signed: bool,
+    already-allowed: bool,
+    selected: bool,
+}

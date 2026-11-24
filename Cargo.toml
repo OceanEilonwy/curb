@@ -4,15 +4,13 @@ members = [
     "crates/curb-core",
     "crates/curb-service",
     "crates/curb-cli",
-]
-exclude = [
-    "apps/curb-app/src-tauri",
+    "apps/curb-app",
 ]
 
 [workspace.package]
-version = "0.2.4"
+version = "0.3.0"
 edition = "2021"
-license = "GPL-3.0-or-later"
+license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
 argon2 = "0.5"
@@ -50,3 +48,6 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[profile.release]
+strip = true

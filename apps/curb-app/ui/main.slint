@@ -1,0 +1,805 @@
+import "../fonts/Inter-Regular.ttf";
+import "../fonts/Inter-Medium.ttf";
+import "../fonts/Inter-SemiBold.ttf";
+import "../fonts/Inter-Bold.ttf";
+import "../fonts/JetBrainsMono-Regular.ttf";
+
+import { Theme } from "theme.slint";
+import { BlockedEventItem, RuleItem, RunningAppItem, SteamGameItem } from "types.slint";
+import {
+    CloseIcon,
+    LoadingDots,
+    LockIcon,
+    PlusIcon,
+    ShieldIcon,
+    UnlockIcon,
+} from "icons.slint";
+import { SetupView } from "setup_view.slint";
+import { AllowedView } from "allowed_view.slint";
+import { BlockedView } from "blocked_view.slint";
+import { SettingsView } from "settings_view.slint";
+import { AllowAppSheet } from "allow_app_sheet.slint";
+import { PromptModal, ToastBanner, UnlockModal } from "modals.slint";
+
+export { Theme, RuleItem, BlockedEventItem, RunningAppItem, SteamGameItem }
+
+export component CurbTray inherits SystemTrayIcon {
+    icon: @image-url("../icons/32x32.png");
+    tooltip: "Curb — Internet Limiter";
+    title: "Curb";
+
+    callback open-requested();
+    callback quit-requested();
+
+    clicked => { root.open-requested(); }
+
+    Menu {
+        MenuItem {
+            title: "Open Curb";
+            activated => { root.open-requested(); }
+        }
+        MenuItem {
+            title: "Exit Tray Icon";
+            activated => { root.quit-requested(); }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Curb";
+    icon: @image-url("../icons/128x128.png");
+    default-font-family: "Inter";
+    width: 480px;
+    height: 600px;
+    no-frame: true;
+    background: Theme.surface;
+
+    // Top-level screen state:
+    // 0 = connecting, 1 = setup, 2 = main, 3 = allow-app sheet
+    in-out property <int> screen: 0;
+    // Main tab: 0 = allowed, 1 = blocked, 2 = settings
+    in-out property <int> active-tab: 0;
+
+    // Header / auth / mode state
+    in property <bool> unlocked: false;
+    in property <bool> password-configured: true;
+    in property <bool> is-full-service: true;
+    // 0 = enforcing, 1 = paused_until, 2 = disabled
+    in property <int> mode-kind: 0;
+    in property <string> mode-label: "Internet limited";
+    in property <bool> locking: false;
+    in property <bool> hiding-to-tray: false;
+    in property <int> active-allowed-count: 0;
+
+    // Setup screen properties
+    in-out property <bool> setup-choice-full: true;
+    in-out property <string> setup-password: "";
+    in-out property <string> setup-confirm: "";
+    in property <bool> setup-busy: false;
+    in property <string> setup-error: "";
+
+    // Allowed tab properties
+    in property <bool> steam-enabled: true;
+    in property <bool> steam-store: true;
+    in property <bool> steam-community: false;
+    in property <bool> steam-friends: false;
+    in property <string> steam-summary: "Downloads · Store";
+    in property <[string]> steam-domains: [];
+    in property <bool> steam-expanded: true;
+    in property <bool> steam-adv-open: false;
+    in property <bool> busy-steam: false;
+    in property <[RuleItem]> rules: [];
+
+    // Blocked tab properties
+    in property <[BlockedEventItem]> blocked-events: [];
+    in property <bool> any-allowing-blocked: false;
+
+    // Settings tab properties
+    in property <int> pending-mode: -1;
+    in property <bool> baseline-dhcp: true;
+    in property <bool> baseline-loopback: true;
+    in property <bool> baseline-ntp: true;
+    in property <bool> baseline-ncsi: true;
+    in property <bool> busy-baseline: false;
+    in property <bool> upgrading: false;
+    in property <bool> uninstalling: false;
+    in-out property <bool> pw-open: false;
+    in-out property <string> pw-current: "";
+    in-out property <string> pw-new: "";
+    in-out property <string> pw-confirm: "";
+    in-out property <bool> pw-show: false;
+    in property <bool> pw-busy: false;
+    in property <string> pw-error: "";
+
+    // AllowAppSheet properties
+    in-out property <int> picker-tab: 0;
+    in-out property <string> picker-search: "";
+    in property <bool> picker-show-bg: false;
+    in property <int> picker-bg-count: 0;
+    in property <bool> picker-loading-running: false;
+    in property <bool> picker-loading-steam: false;
+    in property <int> picker-total-running: 0;
+    in property <int> picker-total-steam: 0;
+    in property <bool> picker-has-browsed: false;
+    in property <RunningAppItem> picker-browsed-app;
+    in property <[RunningAppItem]> picker-tried-apps: [];
+    in property <[RunningAppItem]> picker-other-apps: [];
+    in property <[SteamGameItem]> picker-steam-games: [];
+    in property <bool> picker-browsing: false;
+    in property <bool> picker-saving: false;
+    in property <bool> picker-has-selection: false;
+    in property <string> picker-selected-name: "";
+    in property <string> picker-selected-path: "";
+    in property <bool> picker-selected-signed: false;
+    in property <string> picker-selected-signer: "";
+    in property <bool> picker-selected-verified: false;
+    in property <bool> picker-inspecting: false;
+    in property <string> picker-inspect-error: "";
+    in-out property <bool> picker-adv-open: false;
+    in-out property <bool> picker-allow-tcp: true;
+    in-out property <bool> picker-allow-udp: true;
+    in-out property <int> picker-sub-policy: 1;
+    in-out property <bool> picker-force-hash: false;
+    in-out property <string> picker-dns-text: "";
+
+    // Unlock modal properties
+    in property <bool> unlock-open: false;
+    in-out property <string> unlock-password: "";
+    in-out property <string> unlock-confirm: "";
+    in property <string> unlock-error: "";
+    in property <bool> unlock-busy: false;
+
+    // Prompt modal properties
+    in property <bool> prompt-open: false;
+    in property <string> prompt-title: "";
+    in property <string> prompt-description: "";
+    in property <string> prompt-placeholder: "";
+    in property <string> prompt-submit-label: "OK";
+    in property <string> prompt-busy-label: "Saving…";
+    in property <bool> prompt-mono: true;
+    in-out property <string> prompt-value: "";
+    in property <string> prompt-error: "";
+    in property <bool> prompt-busy: false;
+
+    // Toast
+    in property <string> toast-message: "";
+
+    // Callbacks
+    callback close-to-tray();
+    callback toggle-lock-btn();
+    callback open-unlock();
+    callback close-unlock();
+    callback submit-unlock(string, string);
+    callback close-prompt();
+    callback submit-prompt(string);
+    callback tab-selected(int);
+    callback open-allow-sheet();
+
+    // Setup callbacks
+    callback setup-full();
+    callback setup-standard(string, string);
+
+    // Allowed callbacks
+    callback toggle-steam-expand();
+    callback toggle-steam-adv();
+    callback toggle-steam-enabled();
+    callback toggle-steam-store();
+    callback toggle-steam-community();
+    callback toggle-steam-friends();
+    callback toggle-rule-expand(string);
+    callback toggle-rule-adv(string);
+    callback toggle-rule-enabled(string);
+    callback toggle-rule-helpers(string);
+    callback toggle-rule-tcp(string);
+    callback toggle-rule-udp(string);
+    callback set-rule-subprocesses(string, int);
+    callback open-add-domain(string);
+    callback remove-rule-domain(string, int);
+    callback delete-rule(string);
+
+    // Blocked callbacks
+    callback allow-blocked-event(string);
+
+    // Settings callbacks
+    callback upgrade-to-full();
+    callback uninstall-service();
+    callback toggle-theme();
+    callback set-mode(int);
+    callback toggle-baseline-dhcp();
+    callback toggle-baseline-loopback();
+    callback toggle-baseline-ntp();
+    callback toggle-baseline-ncsi();
+    callback toggle-pw-form();
+    callback submit-password-change(string, string, string);
+
+    // Picker callbacks
+    callback picker-cancel();
+    callback picker-refresh();
+    callback picker-search-changed(string);
+    callback picker-toggle-bg();
+    callback picker-select(string);
+    callback picker-retry-inspect();
+    callback picker-open-browse();
+    callback picker-confirm();
+
+    public function focus-unlock() {
+        unlock-modal.focus-field();
+    }
+
+    public function focus-prompt() {
+        prompt-modal.focus-field();
+    }
+
+    property <color> mode-bg: mode-kind == 0
+        ? Theme.green-soft
+        : mode-kind == 1
+        ? Theme.amber-soft
+        : Theme.red-soft;
+
+    property <color> mode-fg: mode-kind == 0
+        ? Theme.green-text
+        : mode-kind == 1
+        ? Theme.amber-text
+        : Theme.red-text;
+
+    // Global Escape key handler
+    FocusScope {
+        width: 100%;
+        height: 100%;
+
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                if root.prompt-open {
+                    if !root.prompt-busy {
+                        root.close-prompt();
+                    }
+                    return accept;
+                }
+                if root.unlock-open {
+                    if !root.unlock-busy {
+                        root.close-unlock();
+                    }
+                    return accept;
+                }
+                if root.screen == 3 {
+                    if !root.picker-saving {
+                        root.picker-cancel();
+                    }
+                    return accept;
+                }
+            }
+            return reject;
+        }
+
+        // Root surface container (no harsh 1px outer outline)
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: Theme.surface;
+
+            // Screen 0: Connecting
+            if root.screen == 0: Rectangle {
+                width: 100%;
+                height: 100%;
+                background: Theme.surface;
+
+                WindowMoveArea {
+                    width: 100%;
+                    height: 44px;
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 8px;
+                    cross-axis-alignment: center;
+
+                    LoadingDots { color: Theme.text-sec; }
+                    Text {
+                        text: "Connecting to Curb…";
+                        color: Theme.text-sec;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Screen 1: First-run Setup
+            if root.screen == 1: SetupView {
+                width: 100%;
+                height: 100%;
+                choice-is-full <=> root.setup-choice-full;
+                password <=> root.setup-password;
+                confirm-password <=> root.setup-confirm;
+                busy: root.setup-busy;
+                error-text: root.setup-error;
+                submit-full => { root.setup-full(); }
+                submit-standard(p, c) => { root.setup-standard(p, c); }
+                close-requested => { root.close-to-tray(); }
+            }
+
+            // Screen 2: Main App
+            if root.screen == 2: VerticalLayout {
+                width: 100%;
+                height: 100%;
+
+                // Main Header
+                Rectangle {
+                    background: Theme.bg;
+
+                    WindowMoveArea {
+                        width: 100%;
+                        height: 46px;
+                    }
+
+                    VerticalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 12px;
+                        padding-bottom: 12px;
+                        spacing: 10px;
+
+                        // Brand + Mode Pill + Lock/Close buttons
+                        HorizontalLayout {
+                            spacing: 8px;
+                            cross-axis-alignment: center;
+
+                            HorizontalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 8px;
+                                alignment: start;
+                                cross-axis-alignment: center;
+
+                                Rectangle {
+                                    width: 28px;
+                                    height: 28px;
+                                    border-radius: 8px;
+                                    background: root.mode-bg;
+
+                                    ShieldIcon {
+                                        mode: root.mode-kind;
+                                        color: root.mode-fg;
+                                        size: 15px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                }
+
+                                Text {
+                                    text: "Curb";
+                                    color: Theme.text;
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 0;
+                                    height: 22px;
+                                    border-radius: 11px;
+                                    background: root.mode-bg;
+
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        cross-axis-alignment: center;
+
+                                        Text {
+                                            text: root.mode-label;
+                                            color: root.mode-fg;
+                                            font-size: 11.5px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Lock / Unlock button
+                            Rectangle {
+                                horizontal-stretch: 0;
+                                height: 30px;
+                                border-radius: 8px;
+                                background: root.unlocked
+                                    ? Theme.amber-soft
+                                    : (lock-ta.has-hover && !root.locking && !root.hiding-to-tray ? Theme.card-hover : Theme.pill);
+                                opacity: (root.locking || root.hiding-to-tray) ? 0.60 : 1.0;
+
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 6px;
+                                    cross-axis-alignment: center;
+
+                                    if root.locking: LoadingDots {
+                                        color: root.unlocked ? Theme.amber-text : Theme.text;
+                                        dot-size: 3px;
+                                    }
+                                    if !root.locking && root.unlocked: UnlockIcon {
+                                        color: Theme.amber-text;
+                                        size: 12px;
+                                    }
+                                    if !root.locking && !root.unlocked: LockIcon {
+                                        color: Theme.text;
+                                        size: 12px;
+                                    }
+
+                                    Text {
+                                        text: root.locking
+                                            ? "Locking…"
+                                            : root.unlocked ? "Lock" : "Unlock";
+                                        color: root.unlocked ? Theme.amber-text : Theme.text;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                lock-ta := TouchArea {
+                                    enabled: !root.locking && !root.hiding-to-tray;
+                                    mouse-cursor: (!root.locking && !root.hiding-to-tray) ? pointer : default;
+                                    clicked => { root.toggle-lock-btn(); }
+                                }
+                            }
+
+                            // Hide to tray button
+                            Rectangle {
+                                width: 32px;
+                                height: 32px;
+                                border-radius: 8px;
+                                background: hide-ta.has-hover && !root.hiding-to-tray ? Theme.card : transparent;
+                                opacity: root.hiding-to-tray ? 0.60 : 1.0;
+
+                                if root.hiding-to-tray: LoadingDots {
+                                    color: Theme.text-sec;
+                                    dot-size: 3px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                                if !root.hiding-to-tray: CloseIcon {
+                                    color: Theme.text-sec;
+                                    size: 13px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
+
+                                hide-ta := TouchArea {
+                                    enabled: !root.hiding-to-tray;
+                                    mouse-cursor: !root.hiding-to-tray ? pointer : default;
+                                    clicked => { root.close-to-tray(); }
+                                }
+                            }
+                        }
+
+                        // Segmented Tab Bar (Allowed | Blocked | Settings)
+                        Rectangle {
+                            height: 34px;
+                            border-radius: 8px;
+                            background: Theme.sub;
+
+                            HorizontalLayout {
+                                padding: 4px;
+                                spacing: 4px;
+
+                                // Allowed Tab
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    border-radius: 6px;
+                                    background: root.active-tab == 0 ? Theme.surface : transparent;
+
+                                    Text {
+                                        text: "Allowed";
+                                        color: root.active-tab == 0 ? Theme.text : Theme.text-muted;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+
+                                    TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.tab-selected(0); }
+                                    }
+                                }
+
+                                // Blocked Tab
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    border-radius: 6px;
+                                    background: root.active-tab == 1 ? Theme.surface : transparent;
+
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        spacing: 6px;
+                                        cross-axis-alignment: center;
+
+                                        Text {
+                                            text: "Blocked";
+                                            color: root.active-tab == 1 ? Theme.text : Theme.text-muted;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+
+                                        if root.blocked-events.length > 0: Rectangle {
+                                            height: 17px;
+                                            min-width: 18px;
+                                            border-radius: 8.5px;
+                                            background: Theme.red-soft;
+
+                                            HorizontalLayout {
+                                                padding-left: 5px;
+                                                padding-right: 5px;
+                                                cross-axis-alignment: center;
+                                                Text {
+                                                    text: root.blocked-events.length;
+                                                    color: Theme.red-text;
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.tab-selected(1); }
+                                    }
+                                }
+
+                                // Settings Tab
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    border-radius: 6px;
+                                    background: root.active-tab == 2 ? Theme.surface : transparent;
+
+                                    Text {
+                                        text: "Settings";
+                                        color: root.active-tab == 2 ? Theme.text : Theme.text-muted;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+
+                                    TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.tab-selected(2); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        y: parent.height - 1px;
+                        width: 100%;
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                }
+
+                // Tab Body
+                if root.active-tab == 0: AllowedView {
+                    vertical-stretch: 1;
+                    unlocked: root.unlocked;
+                    steam-enabled: root.steam-enabled;
+                    steam-store: root.steam-store;
+                    steam-community: root.steam-community;
+                    steam-friends: root.steam-friends;
+                    steam-summary: root.steam-summary;
+                    steam-domains: root.steam-domains;
+                    steam-expanded: root.steam-expanded;
+                    steam-adv-open: root.steam-adv-open;
+                    busy-steam: root.busy-steam;
+                    rules: root.rules;
+
+                    require-unlock => { root.open-unlock(); }
+                    toggle-steam-expand => { root.toggle-steam-expand(); }
+                    toggle-steam-adv => { root.toggle-steam-adv(); }
+                    toggle-steam-enabled => { root.toggle-steam-enabled(); }
+                    toggle-steam-store => { root.toggle-steam-store(); }
+                    toggle-steam-community => { root.toggle-steam-community(); }
+                    toggle-steam-friends => { root.toggle-steam-friends(); }
+                    toggle-rule-expand(id) => { root.toggle-rule-expand(id); }
+                    toggle-rule-adv(id) => { root.toggle-rule-adv(id); }
+                    toggle-rule-enabled(id) => { root.toggle-rule-enabled(id); }
+                    toggle-rule-helpers(id) => { root.toggle-rule-helpers(id); }
+                    toggle-rule-tcp(id) => { root.toggle-rule-tcp(id); }
+                    toggle-rule-udp(id) => { root.toggle-rule-udp(id); }
+                    set-rule-subprocesses(id, v) => { root.set-rule-subprocesses(id, v); }
+                    open-add-domain(id) => { root.open-add-domain(id); }
+                    remove-rule-domain(id, idx) => { root.remove-rule-domain(id, idx); }
+                    delete-rule(id) => { root.delete-rule(id); }
+                }
+
+                if root.active-tab == 1: BlockedView {
+                    vertical-stretch: 1;
+                    events: root.blocked-events;
+                    any-allowing: root.any-allowing-blocked;
+                    allow-event(id) => { root.allow-blocked-event(id); }
+                }
+
+                if root.active-tab == 2: SettingsView {
+                    vertical-stretch: 1;
+                    unlocked: root.unlocked;
+                    password-configured: root.password-configured;
+                    is-full-service: root.is-full-service;
+                    mode-kind: root.mode-kind;
+                    pending-mode: root.pending-mode;
+                    baseline-dhcp: root.baseline-dhcp;
+                    baseline-loopback: root.baseline-loopback;
+                    baseline-ntp: root.baseline-ntp;
+                    baseline-ncsi: root.baseline-ncsi;
+                    busy-baseline: root.busy-baseline;
+                    upgrading: root.upgrading;
+                    uninstalling: root.uninstalling;
+                    pw-open <=> root.pw-open;
+                    current-pw <=> root.pw-current;
+                    new-pw <=> root.pw-new;
+                    confirm-pw <=> root.pw-confirm;
+                    show-pw <=> root.pw-show;
+                    pw-busy: root.pw-busy;
+                    pw-error: root.pw-error;
+
+                    require-unlock => { root.open-unlock(); }
+                    upgrade-to-full => { root.upgrade-to-full(); }
+                    uninstall-service => { root.uninstall-service(); }
+                    toggle-theme => { root.toggle-theme(); }
+                    set-mode(m) => { root.set-mode(m); }
+                    toggle-baseline-dhcp => { root.toggle-baseline-dhcp(); }
+                    toggle-baseline-loopback => { root.toggle-baseline-loopback(); }
+                    toggle-baseline-ntp => { root.toggle-baseline-ntp(); }
+                    toggle-baseline-ncsi => { root.toggle-baseline-ncsi(); }
+                    toggle-pw-form => { root.toggle-pw-form(); }
+                    submit-password-change(c, n, cf) => { root.submit-password-change(c, n, cf); }
+                }
+
+                // Sticky Footer on Allowed Tab
+                if root.active-tab == 0: Rectangle {
+                    background: Theme.bg;
+
+                    Rectangle {
+                        y: 0;
+                        width: 100%;
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 12px;
+                        padding-bottom: 12px;
+                        cross-axis-alignment: center;
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.active-allowed-count + " allowed";
+                            color: Theme.text-sec;
+                            font-size: 12px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 0;
+                            height: 34px;
+                            border-radius: 8px;
+                            background: add-ta.has-hover && !root.locking && !root.hiding-to-tray ? Theme.accent-hover : Theme.accent;
+                            opacity: (root.locking || root.hiding-to-tray) ? 0.60 : 1.0;
+
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                spacing: 6px;
+                                cross-axis-alignment: center;
+
+                                PlusIcon {
+                                    color: #ffffff;
+                                    size: 13px;
+                                }
+                                Text {
+                                    text: "Allow App or Game";
+                                    color: #ffffff;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            add-ta := TouchArea {
+                                enabled: !root.locking && !root.hiding-to-tray;
+                                mouse-cursor: (!root.locking && !root.hiding-to-tray) ? pointer : default;
+                                clicked => { root.open-allow-sheet(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Screen 3: Allow an App or Game Sheet
+            if root.screen == 3: AllowAppSheet {
+                width: 100%;
+                height: 100%;
+                source-tab <=> root.picker-tab;
+                search-text <=> root.picker-search;
+                show-background: root.picker-show-bg;
+                background-count: root.picker-bg-count;
+                loading-running: root.picker-loading-running;
+                loading-steam: root.picker-loading-steam;
+                total-running-count: root.picker-total-running;
+                total-steam-count: root.picker-total-steam;
+                has-browsed: root.picker-has-browsed;
+                browsed-app: root.picker-browsed-app;
+                tried-apps: root.picker-tried-apps;
+                other-apps: root.picker-other-apps;
+                steam-games: root.picker-steam-games;
+                browsing: root.picker-browsing;
+                saving: root.picker-saving;
+                has-selection: root.picker-has-selection;
+                selected-name: root.picker-selected-name;
+                selected-path: root.picker-selected-path;
+                selected-signed: root.picker-selected-signed;
+                selected-signer: root.picker-selected-signer;
+                selected-verified: root.picker-selected-verified;
+                inspecting-selected: root.picker-inspecting;
+                inspect-error: root.picker-inspect-error;
+                adv-open <=> root.picker-adv-open;
+                allow-tcp <=> root.picker-allow-tcp;
+                allow-udp <=> root.picker-allow-udp;
+                subprocess-policy <=> root.picker-sub-policy;
+                force-hash <=> root.picker-force-hash;
+                dns-text <=> root.picker-dns-text;
+
+                cancel => { root.picker-cancel(); }
+                refresh => { root.picker-refresh(); }
+                search-changed(q) => { root.picker-search-changed(q); }
+                toggle-show-background => { root.picker-toggle-bg(); }
+                select-entry(k) => { root.picker-select(k); }
+                retry-inspect => { root.picker-retry-inspect(); }
+                open-browse => { root.picker-open-browse(); }
+                confirm => { root.picker-confirm(); }
+            }
+
+            // Live Toast Banner
+            if root.toast-message != "": ToastBanner {
+                message: root.toast-message;
+                x: (parent.width - self.width) / 2;
+                y: parent.height - self.height - 64px;
+            }
+
+            // Admin Unlock Modal
+            unlock-modal := UnlockModal {
+                visible: root.unlock-open;
+                width: 100%;
+                height: 100%;
+                password-configured: root.password-configured;
+                password <=> root.unlock-password;
+                confirm-password <=> root.unlock-confirm;
+                error-text: root.unlock-error;
+                busy: root.unlock-busy;
+                close => { root.close-unlock(); }
+                submit(p, c) => { root.submit-unlock(p, c); }
+            }
+
+            // Generic Prompt Modal (Add Website / Browse .exe)
+            prompt-modal := PromptModal {
+                visible: root.prompt-open;
+                width: 100%;
+                height: 100%;
+                title: root.prompt-title;
+                description: root.prompt-description;
+                placeholder: root.prompt-placeholder;
+                submit-label: root.prompt-submit-label;
+                busy-label: root.prompt-busy-label;
+                mono: root.prompt-mono;
+                value <=> root.prompt-value;
+                error-text: root.prompt-error;
+                busy: root.prompt-busy;
+                close => { root.close-prompt(); }
+                submit(v) => { root.submit-prompt(v); }
+            }
+        }
+    }
+}

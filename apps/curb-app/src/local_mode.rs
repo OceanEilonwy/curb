@@ -14,6 +14,7 @@ use curb_core::store::{load_auth, load_config, save_auth, save_config};
 use curb_core::verify::inspect_binary;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::runtime::Handle;
 use uuid::Uuid;
 
 pub const LOCAL_PROXY_PORT: u16 = 48921;
@@ -53,10 +54,11 @@ pub struct LocalEngineState {
 #[derive(Clone)]
 pub struct LocalStandardRuntime {
     pub state: Arc<Mutex<LocalEngineState>>,
+    rt_handle: Handle,
 }
 
 impl LocalStandardRuntime {
-    pub fn load() -> Self {
+    pub fn load(rt_handle: Handle) -> Self {
         let data_dir = user_data_dir();
         let config = load_config(&data_dir).unwrap_or_default();
         let auth = load_auth(&data_dir).ok().flatten();
@@ -69,6 +71,7 @@ impl LocalStandardRuntime {
                 blocked_events: VecDeque::with_capacity(MAX_BLOCKED),
                 proxy_started: false,
             })),
+            rt_handle,
         }
     }
 
@@ -126,7 +129,7 @@ impl LocalStandardRuntime {
 
     fn spawn_proxy(&self) {
         let runtime = self.clone();
-        tauri::async_runtime::spawn(async move {
+        self.rt_handle.spawn(async move {
             let addr = format!("127.0.0.1:{LOCAL_PROXY_PORT}");
             let Ok(listener) = TcpListener::bind(&addr).await else {
                 return;

@@ -1,0 +1,409 @@
+import { Theme } from "theme.slint";
+import { CheckIcon, CloseIcon, LoadingDots, ShieldIcon, WarnIcon } from "icons.slint";
+import { CurbInput, CurbScrollView, RadioCircle } from "components.slint";
+
+export component SetupView inherits Rectangle {
+    in-out property <bool> choice-is-full: true;
+    in-out property <string> password: "";
+    in-out property <string> confirm-password: "";
+    in property <bool> busy: false;
+    in property <string> error-text: "";
+
+    callback submit-full();
+    callback submit-standard(string, string);
+    callback close-requested();
+
+    background: Theme.surface;
+
+    VerticalLayout {
+        // Header (draggable frameless titlebar)
+        Rectangle {
+            background: Theme.bg;
+
+            WindowMoveArea {
+                width: 100%;
+                height: 100%;
+            }
+
+            VerticalLayout {
+                padding-left: 20px;
+                padding-right: 16px;
+                padding-top: 18px;
+                padding-bottom: 15px;
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    cross-axis-alignment: center;
+
+                    Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        border-radius: 8px;
+                        background: Theme.green-soft;
+                        ShieldIcon {
+                            mode: 0;
+                            color: Theme.green-text;
+                            size: 16px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+                    }
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 2px;
+
+                        Text {
+                            text: "Welcome to Curb";
+                            color: Theme.text;
+                            font-size: 14px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "Choose how you want to set up protection on this PC.";
+                            color: Theme.text-sec;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: 8px;
+                        background: close-ta.has-hover ? Theme.card : transparent;
+
+                        CloseIcon {
+                            color: Theme.text-sec;
+                            size: 13px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+
+                        close-ta := TouchArea {
+                            enabled: !root.busy;
+                            mouse-cursor: root.busy ? default : pointer;
+                            clicked => { root.close-requested(); }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                y: parent.height - 1px;
+                width: 100%;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        // Scrollable Option Cards
+        CurbScrollView {
+            vertical-stretch: 1;
+            content-padding: 16px;
+            content-spacing: 12px;
+
+            // Option 1: Full Protection
+            Rectangle {
+                border-radius: 12px;
+                background: root.choice-is-full ? Theme.accent-soft : Theme.card;
+                border-width: 1.5px;
+                border-color: root.choice-is-full ? Theme.focus : Theme.border;
+                opacity: root.busy ? 0.65 : 1.0;
+
+                full-ta := TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    enabled: !root.busy;
+                    mouse-cursor: root.busy ? default : pointer;
+                    clicked => {
+                        root.choice-is-full = true;
+                    }
+                }
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+
+                        HorizontalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 8px;
+                            alignment: start;
+                            cross-axis-alignment: center;
+
+                            Text {
+                                text: "Full Protection";
+                                color: Theme.text;
+                                font-size: 13px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                height: 19px;
+                                border-radius: 9.5px;
+                                background: Theme.green-soft;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: "Recommended";
+                                        color: Theme.green-text;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        RadioCircle {
+                            selected: root.choice-is-full;
+                        }
+                    }
+
+                    Text {
+                        text: "Blocks every app and game across all network adapters using the Windows Firewall. Standard users cannot turn it off or bypass it.";
+                        color: Theme.text-sec;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        cross-axis-alignment: center;
+
+                        CheckIcon {
+                            color: Theme.green-text;
+                            size: 13px;
+                        }
+                        Text {
+                            text: "One-time Windows Administrator prompt during setup";
+                            color: Theme.green-text;
+                            font-size: 12px;
+                            font-weight: 500;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            // Option 2: Standard Mode (No Admin)
+            Rectangle {
+                border-radius: 12px;
+                background: !root.choice-is-full ? Theme.accent-soft : Theme.card;
+                border-width: 1.5px;
+                border-color: !root.choice-is-full ? Theme.focus : Theme.border;
+                opacity: root.busy ? 0.65 : 1.0;
+
+                std-ta := TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    enabled: !root.busy;
+                    mouse-cursor: root.busy ? default : pointer;
+                    clicked => {
+                        root.choice-is-full = false;
+                    }
+                }
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+
+                        HorizontalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 8px;
+                            alignment: start;
+                            cross-axis-alignment: center;
+
+                            Text {
+                                text: "Standard Mode";
+                                color: Theme.text;
+                                font-size: 13px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                height: 19px;
+                                border-radius: 9.5px;
+                                background: Theme.pill;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: "No Admin";
+                                        color: Theme.text;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        RadioCircle {
+                            selected: !root.choice-is-full;
+                        }
+                    }
+
+                    Text {
+                        text: "Starts immediately without a Windows Administrator account. Limits websites and browsers via a per-user proxy. You can upgrade to Full Protection later in Settings.";
+                        color: Theme.text-sec;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        cross-axis-alignment: center;
+
+                        WarnIcon {
+                            color: Theme.amber-text;
+                            size: 13px;
+                        }
+                        Text {
+                            text: "Voluntary — can’t block raw game sockets or Task Manager";
+                            color: Theme.amber-text;
+                            font-size: 12px;
+                            font-weight: 500;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            // Inline password fields for Standard Mode
+            if !root.choice-is-full: Rectangle {
+                border-radius: 12px;
+                background: Theme.card;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 10px;
+
+                    Text {
+                        text: "Create a Curb Password";
+                        color: Theme.text;
+                        font-size: 12px;
+                        font-weight: 600;
+                    }
+
+                    CurbInput {
+                        text <=> root.password;
+                        placeholder: "New password (min 4 characters)";
+                        is-password: true;
+                        enabled: !root.busy;
+                        accepted => {
+                            confirm-in.focus-input();
+                        }
+                    }
+
+                    confirm-in := CurbInput {
+                        text <=> root.confirm-password;
+                        placeholder: "Confirm password";
+                        is-password: true;
+                        enabled: !root.busy;
+                        accepted => {
+                            if !root.busy {
+                                root.submit-standard(root.password, root.confirm-password);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.error-text != "": Text {
+                text: root.error-text;
+                color: Theme.red-text;
+                font-size: 12px;
+                font-weight: 500;
+                wrap: word-wrap;
+            }
+        }
+
+        // Footer CTA
+        Rectangle {
+            background: Theme.bg;
+
+            Rectangle {
+                y: 0;
+                width: 100%;
+                height: 1px;
+                background: Theme.border;
+            }
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 13px;
+                padding-bottom: 13px;
+                spacing: 8px;
+                cross-axis-alignment: center;
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.choice-is-full ? "Will prompt for Windows Admin" : "Runs in your user account";
+                    color: Theme.text-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 0;
+                    height: 34px;
+                    border-radius: 8px;
+                    background: cta-ta.has-hover && !root.busy ? Theme.accent-hover : Theme.accent;
+                    opacity: root.busy ? 0.60 : 1.0;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 6px;
+                        cross-axis-alignment: center;
+
+                        if root.busy: LoadingDots {
+                            color: #ffffff;
+                        }
+
+                        Text {
+                            text: root.busy
+                                ? (root.choice-is-full ? "Installing Service…" : "Starting…")
+                                : (root.choice-is-full ? "Set Up Full Protection" : "Start Standard Mode");
+                            color: #ffffff;
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    cta-ta := TouchArea {
+                        enabled: !root.busy;
+                        mouse-cursor: root.busy ? default : pointer;
+                        clicked => {
+                            if root.choice-is-full {
+                                root.submit-full();
+                            } else {
+                                root.submit-standard(root.password, root.confirm-password);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

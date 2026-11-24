@@ -1,0 +1,311 @@
+import { Theme } from "theme.slint";
+import { CheckIcon, CloseIcon } from "icons.slint";
+
+export component CurbSwitch inherits Rectangle {
+    in property <bool> checked: false;
+    in property <bool> enabled: true;
+    callback toggled();
+
+    width: 38px;
+    height: 22px;
+    border-radius: 11px;
+    background: checked ? Theme.green-switch : Theme.toggle-off;
+    border-width: checked ? 0px : 1px;
+    border-color: Theme.border-strong;
+    opacity: enabled ? 1.0 : 0.55;
+
+    animate background { duration: 140ms; easing: ease-out; }
+
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: #ffffff;
+        y: (parent.height - self.height) / 2;
+        x: root.checked ? (parent.width - self.width - 3px) : 3px;
+        drop-shadow-blur: 3px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: rgba(0, 0, 0, 0.30);
+
+        animate x { duration: 140ms; easing: ease-out; }
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
+export component CurbCheckbox inherits Rectangle {
+    in property <bool> checked: false;
+    in property <bool> enabled: true;
+    in property <string> label: "";
+    in property <color> label-color: Theme.text-sec;
+    callback toggled();
+
+    horizontal-stretch: 0;
+    background: transparent;
+    opacity: enabled ? 1.0 : 0.55;
+
+    HorizontalLayout {
+        spacing: 6px;
+        cross-axis-alignment: center;
+
+        Rectangle {
+            width: 15px;
+            height: 15px;
+            border-radius: 4px;
+            background: root.checked ? Theme.accent : Theme.surface;
+            border-width: 1.5px;
+            border-color: root.checked ? Theme.accent : Theme.border-strong;
+
+            if root.checked: CheckIcon {
+                size: 10px;
+                color: #ffffff;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+
+        if root.label != "": Text {
+            text: root.label;
+            color: root.label-color;
+            font-size: 12px;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
+    }
+
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
+export component RadioCircle inherits Rectangle {
+    in property <bool> selected: false;
+    width: 20px;
+    height: 20px;
+    border-radius: 10px;
+    border-width: 2px;
+    border-color: selected ? Theme.accent : Theme.border-strong;
+    background: selected ? Theme.accent : transparent;
+
+    if selected: CheckIcon {
+        size: 11px;
+        color: #ffffff;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+}
+
+export component CurbInput inherits Rectangle {
+    in-out property <string> text: "";
+    in property <string> placeholder: "";
+    in property <bool> is-password: false;
+    in property <bool> mono: false;
+    in property <bool> enabled: true;
+    in property <color> fill-color: Theme.surface;
+    in property <length> leading-padding: 10px;
+    callback accepted();
+    callback edited(string);
+
+    public function focus-input() {
+        ti.focus();
+    }
+
+    height: 34px;
+    border-radius: 8px;
+    background: fill-color;
+    border-width: ti.has-focus ? 1.5px : 1px;
+    border-color: ti.has-focus ? Theme.focus : Theme.border-strong;
+    opacity: enabled ? 1.0 : 0.60;
+    clip: true;
+
+    if root.text == "" && root.placeholder != "": Text {
+        x: root.leading-padding;
+        width: parent.width - root.leading-padding - 10px;
+        height: parent.height;
+        text: root.placeholder;
+        color: Theme.text-muted;
+        font-size: 12px;
+        font-family: root.mono ? "JetBrains Mono" : "";
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    ti := TextInput {
+        x: root.leading-padding;
+        width: parent.width - root.leading-padding - 10px;
+        height: parent.height;
+        text <=> root.text;
+        color: Theme.text;
+        font-size: 12px;
+        font-family: root.mono ? "JetBrains Mono" : "";
+        vertical-alignment: center;
+        single-line: true;
+        enabled: root.enabled;
+        input-type: root.is-password ? InputType.password : InputType.text;
+        selection-background-color: Theme.accent;
+        selection-foreground-color: #ffffff;
+        accepted => {
+            root.accepted();
+        }
+        edited => {
+            root.edited(self.text);
+        }
+    }
+}
+
+export component DomainChip inherits Rectangle {
+    in property <string> domain;
+    in property <bool> removable: false;
+    in property <bool> enabled: true;
+    callback removed();
+
+    horizontal-stretch: 0;
+    height: 22px;
+    border-radius: 5px;
+    background: Theme.pill;
+
+    HorizontalLayout {
+        padding-left: 7px;
+        padding-right: root.removable ? 5px : 7px;
+        spacing: 5px;
+        cross-axis-alignment: center;
+
+        Text {
+            text: root.domain;
+            color: Theme.text;
+            font-size: 11px;
+            font-family: "JetBrains Mono";
+            vertical-alignment: center;
+        }
+
+        if root.removable: Rectangle {
+            width: 14px;
+            height: 14px;
+            border-radius: 3px;
+            background: rm-ta.has-hover ? Theme.border : transparent;
+            opacity: root.enabled ? 1.0 : 0.55;
+
+            CloseIcon {
+                size: 9px;
+                color: Theme.text;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+
+            rm-ta := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: root.enabled ? pointer : default;
+                clicked => {
+                    root.removed();
+                }
+            }
+        }
+    }
+}
+
+export component SubprocessSelector inherits HorizontalLayout {
+    // 0 = Disabled, 1 = Same signer or folder, 2 = Any (except browsers/shells)
+    in property <int> current: 1;
+    in property <bool> enabled: true;
+    callback selected(int);
+
+    horizontal-stretch: 0;
+    spacing: 4px;
+    opacity: enabled ? 1.0 : 0.55;
+
+    for opt[idx] in [
+        { label: "Off", val: 0 },
+        { label: "Same signer", val: 1 },
+        { label: "Any safe", val: 2 },
+    ]: Rectangle {
+        horizontal-stretch: 0;
+        height: 24px;
+        border-radius: 5px;
+        background: root.current == opt.val
+            ? Theme.accent
+            : (opt-ta.has-hover && root.enabled ? Theme.card-hover : Theme.pill);
+
+        HorizontalLayout {
+            padding-left: 7px;
+            padding-right: 7px;
+            cross-axis-alignment: center;
+            Text {
+                text: opt.label;
+                color: root.current == opt.val ? #ffffff : Theme.text;
+                font-size: 11px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+        }
+
+        opt-ta := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: root.enabled ? pointer : default;
+            clicked => {
+                if root.current != opt.val {
+                    root.selected(opt.val);
+                }
+            }
+        }
+    }
+}
+
+export component CurbScrollView inherits Rectangle {
+    in property <length> content-padding: 16px;
+    in property <length> content-spacing: 12px;
+
+    clip: true;
+    background: transparent;
+
+    flick := Flickable {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        content-width: self.width;
+        content-height: inner.preferred-height;
+        interactive: false;
+
+        inner := VerticalLayout {
+            width: flick.width;
+            padding: root.content-padding;
+            spacing: root.content-spacing;
+            alignment: start;
+            @children
+        }
+    }
+
+    // Slim custom scrollbar matching .curb-scroll
+    if flick.content-height > flick.height: Rectangle {
+        x: parent.width - 7px;
+        y: 3px;
+        width: 5px;
+        height: parent.height - 6px;
+        background: transparent;
+
+        property <length> track-h: self.height;
+        property <length> thumb-h: max(24px, self.track-h * (flick.height / flick.content-height));
+        property <length> max-scroll: max(1px, flick.content-height - flick.height);
+        property <float> scroll-ratio: clamp((-flick.content-y) / self.max-scroll, 0.0, 1.0);
+
+        Rectangle {
+            width: parent.width;
+            height: parent.thumb-h;
+            y: (parent.track-h - parent.thumb-h) * parent.scroll-ratio;
+            border-radius: 2.5px;
+            background: Theme.border-strong;
+        }
+    }
+}

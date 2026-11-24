@@ -1,0 +1,752 @@
+import { Theme } from "theme.slint";
+import { RuleItem } from "types.slint";
+import { CheckIcon, ChevronIcon, LoadingDots, WarnIcon } from "icons.slint";
+import { CurbScrollView, CurbSwitch, DomainChip, SubprocessSelector } from "components.slint";
+
+export component AllowedView inherits CurbScrollView {
+    in property <bool> unlocked: false;
+
+    // Built-in Steam preset
+    in property <bool> steam-enabled: true;
+    in property <bool> steam-store: true;
+    in property <bool> steam-community: false;
+    in property <bool> steam-friends: false;
+    in property <string> steam-summary: "Downloads · Store";
+    in property <[string]> steam-domains: [];
+    in property <bool> steam-expanded: true;
+    in property <bool> steam-adv-open: false;
+    in property <bool> busy-steam: false;
+
+    // User rules
+    in property <[RuleItem]> rules: [];
+
+    callback require-unlock();
+    callback toggle-steam-expand();
+    callback toggle-steam-adv();
+    callback toggle-steam-enabled();
+    callback toggle-steam-store();
+    callback toggle-steam-community();
+    callback toggle-steam-friends();
+
+    callback toggle-rule-expand(string);
+    callback toggle-rule-adv(string);
+    callback toggle-rule-enabled(string);
+    callback toggle-rule-helpers(string);
+    callback toggle-rule-tcp(string);
+    callback toggle-rule-udp(string);
+    callback set-rule-subprocesses(string, int);
+    callback open-add-domain(string);
+    callback remove-rule-domain(string, int);
+    callback delete-rule(string);
+
+    content-padding: 16px;
+    content-spacing: 12px;
+
+    Text {
+        text: "Everything on this computer is offline unless it’s turned on below.";
+        color: Theme.text-sec;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+
+    // Built-in Steam Preset Card
+    Rectangle {
+        border-radius: 12px;
+        background: Theme.card;
+        border-width: 1px;
+        border-color: Theme.border;
+        clip: true;
+
+        VerticalLayout {
+            // Card Header
+            Rectangle {
+                background: transparent;
+
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 12px;
+                    padding-top: 10px;
+                    padding-bottom: 10px;
+                    spacing: 8px;
+                    cross-axis-alignment: center;
+
+                    // Clickable left title region
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: transparent;
+
+                        VerticalLayout {
+                            spacing: 4px;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                cross-axis-alignment: center;
+
+                                Text {
+                                    text: "Steam";
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    height: 19px;
+                                    border-radius: 9.5px;
+                                    background: Theme.accent-soft;
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        cross-axis-alignment: center;
+                                        Text {
+                                            text: "Built-in";
+                                            color: Theme.accent-text;
+                                            font-size: 11px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: root.steam-summary;
+                                color: Theme.text-muted;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                        }
+
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle-steam-expand(); }
+                        }
+                    }
+
+                    CurbSwitch {
+                        checked: root.steam-enabled;
+                        enabled: root.unlocked && !root.busy-steam;
+                        toggled => { root.toggle-steam-enabled(); }
+                    }
+
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 6px;
+                        background: steam-chev-ta.has-hover ? Theme.card-hover : transparent;
+
+                        ChevronIcon {
+                            rotated: root.steam-expanded;
+                            color: Theme.text-sec;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+
+                        steam-chev-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle-steam-expand(); }
+                        }
+                    }
+                }
+            }
+
+            // Expanded Steam options
+            if root.steam-expanded: Rectangle {
+                background: Theme.surface;
+
+                Rectangle {
+                    y: 0;
+                    width: 100%;
+                    height: 1px;
+                    background: Theme.border;
+                }
+
+                VerticalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    padding-top: 12px;
+                    padding-bottom: 12px;
+                    spacing: 12px;
+
+                    // Store & Library
+                    HorizontalLayout {
+                        spacing: 12px;
+                        cross-axis-alignment: center;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Text {
+                                text: "Store & Library";
+                                color: Theme.text;
+                                font-size: 12px;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: "Browse store & download games (blocks external links)";
+                                color: Theme.text-muted;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                        CurbSwitch {
+                            checked: root.steam-store;
+                            enabled: root.unlocked && !root.busy-steam;
+                            toggled => { root.toggle-steam-store(); }
+                        }
+                    }
+
+                    // Community & Workshop
+                    HorizontalLayout {
+                        spacing: 12px;
+                        cross-axis-alignment: center;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Text {
+                                text: "Community & Workshop";
+                                color: Theme.text;
+                                font-size: 12px;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: "Mods, guides, and forums";
+                                color: Theme.text-muted;
+                                font-size: 12px;
+                            }
+                        }
+                        CurbSwitch {
+                            checked: root.steam-community;
+                            enabled: root.unlocked && !root.busy-steam;
+                            toggled => { root.toggle-steam-community(); }
+                        }
+                    }
+
+                    // Friends & Voice
+                    HorizontalLayout {
+                        spacing: 12px;
+                        cross-axis-alignment: center;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Text {
+                                text: "Friends & Voice";
+                                color: Theme.text;
+                                font-size: 12px;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: "Chat and voice with Steam friends";
+                                color: Theme.text-muted;
+                                font-size: 12px;
+                            }
+                        }
+                        CurbSwitch {
+                            checked: root.steam-friends;
+                            enabled: root.unlocked && !root.busy-steam;
+                            toggled => { root.toggle-steam-friends(); }
+                        }
+                    }
+
+                    // Divider + Advanced toggle
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    Rectangle {
+                        background: transparent;
+                        height: 22px;
+
+                        HorizontalLayout {
+                            cross-axis-alignment: center;
+                            Text {
+                                horizontal-stretch: 1;
+                                text: "Advanced";
+                                color: Theme.text-sec;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.steam-adv-open ? "Hide" : "Show";
+                                color: Theme.text-sec;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle-steam-adv(); }
+                        }
+                    }
+
+                    if root.steam-adv-open: Rectangle {
+                        border-radius: 8px;
+                        background: Theme.bg;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 8px;
+
+                            Text {
+                                text: "steam.exe, steamservice.exe (Valve Corp. · TCP/UDP)";
+                                color: Theme.text-sec;
+                                font-size: 11px;
+                                font-family: "JetBrains Mono";
+                                wrap: word-wrap;
+                            }
+
+                            Text {
+                                text: "steamwebhelper.exe DNS whitelist:";
+                                color: Theme.text-muted;
+                                font-size: 11px;
+                                font-family: "JetBrains Mono";
+                            }
+
+                            FlexboxLayout {
+                                flex-wrap: wrap;
+                                spacing: 6px;
+
+                                for dom in root.steam-domains: DomainChip {
+                                    domain: dom;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // User Allowed Rules
+    VerticalLayout {
+        spacing: 8px;
+
+        for rule in root.rules: Rectangle {
+            border-radius: 12px;
+            background: Theme.card;
+            border-width: 1px;
+            border-color: Theme.border;
+            clip: true;
+
+            VerticalLayout {
+                // Rule Header
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 12px;
+                    padding-top: 10px;
+                    padding-bottom: 10px;
+                    spacing: 8px;
+                    cross-axis-alignment: center;
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: transparent;
+
+                        VerticalLayout {
+                            spacing: 3px;
+
+                            Text {
+                                text: rule.name;
+                                color: Theme.text;
+                                font-size: 13px;
+                                font-weight: 600;
+                                overflow: elide;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 5px;
+                                alignment: start;
+                                cross-axis-alignment: center;
+
+                                if rule.signed: CheckIcon {
+                                    color: Theme.green-text;
+                                    size: 12px;
+                                }
+                                if !rule.signed: WarnIcon {
+                                    color: Theme.amber-text;
+                                    size: 12px;
+                                }
+                                Text {
+                                    text: rule.signed ? "Updates automatically" : "Needs re-approval after updates";
+                                    color: rule.signed ? Theme.green-text : Theme.amber-text;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle-rule-expand(rule.id); }
+                        }
+                    }
+
+                    CurbSwitch {
+                        checked: rule.enabled;
+                        enabled: root.unlocked && !rule.busy;
+                        toggled => { root.toggle-rule-enabled(rule.id); }
+                    }
+
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 6px;
+                        background: rule-chev-ta.has-hover ? Theme.card-hover : transparent;
+
+                        ChevronIcon {
+                            rotated: rule.expanded;
+                            color: Theme.text-sec;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+
+                        rule-chev-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle-rule-expand(rule.id); }
+                        }
+                    }
+                }
+
+                // Expanded Rule Body
+                if rule.expanded: Rectangle {
+                    background: Theme.surface;
+
+                    Rectangle {
+                        y: 0;
+                        width: 100%;
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    VerticalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        padding-top: 12px;
+                        padding-bottom: 12px;
+                        spacing: 10px;
+
+                        HorizontalLayout {
+                            spacing: 12px;
+                            cross-axis-alignment: center;
+
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                Text {
+                                    text: "Allow helper apps";
+                                    color: Theme.text;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: "Lets launchers & anti-cheat connect (blocks browsers)";
+                                    color: Theme.text-muted;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            CurbSwitch {
+                                checked: rule.allow-helpers;
+                                enabled: root.unlocked && !rule.busy;
+                                toggled => { root.toggle-rule-helpers(rule.id); }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.border;
+                        }
+
+                        Rectangle {
+                            background: transparent;
+                            height: 22px;
+
+                            HorizontalLayout {
+                                cross-axis-alignment: center;
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: "Advanced";
+                                    color: Theme.text-sec;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: rule.adv-open ? "Hide" : "Show";
+                                    color: Theme.text-sec;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle-rule-adv(rule.id); }
+                            }
+                        }
+
+                        if rule.adv-open: Rectangle {
+                            border-radius: 8px;
+                            background: Theme.bg;
+                            border-width: 1px;
+                            border-color: Theme.border-strong;
+
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 10px;
+
+                                // Protocols
+                                HorizontalLayout {
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: "Protocols";
+                                        color: Theme.text-sec;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+
+                                        Rectangle {
+                                            height: 24px;
+                                            border-radius: 5px;
+                                            background: rule.allow-tcp ? Theme.accent : Theme.pill;
+                                            opacity: (root.unlocked && !rule.busy) ? 1.0 : 0.55;
+
+                                            HorizontalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 10px;
+                                                cross-axis-alignment: center;
+                                                Text {
+                                                    text: "TCP";
+                                                    color: rule.allow-tcp ? #ffffff : Theme.text;
+                                                    font-size: 11px;
+                                                    font-weight: 600;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                            TouchArea {
+                                                enabled: root.unlocked && !rule.busy;
+                                                mouse-cursor: (root.unlocked && !rule.busy) ? pointer : default;
+                                                clicked => { root.toggle-rule-tcp(rule.id); }
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            height: 24px;
+                                            border-radius: 5px;
+                                            background: rule.allow-udp ? Theme.accent : Theme.pill;
+                                            opacity: (root.unlocked && !rule.busy) ? 1.0 : 0.55;
+
+                                            HorizontalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 10px;
+                                                cross-axis-alignment: center;
+                                                Text {
+                                                    text: "UDP";
+                                                    color: rule.allow-udp ? #ffffff : Theme.text;
+                                                    font-size: 11px;
+                                                    font-weight: 600;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                            TouchArea {
+                                                enabled: root.unlocked && !rule.busy;
+                                                mouse-cursor: (root.unlocked && !rule.busy) ? pointer : default;
+                                                clicked => { root.toggle-rule-udp(rule.id); }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Sub-process scope
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: "Sub-process scope";
+                                        color: Theme.text-sec;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
+                                    SubprocessSelector {
+                                        current: rule.subprocess-policy;
+                                        enabled: root.unlocked && !rule.busy;
+                                        selected(val) => { root.set-rule-subprocesses(rule.id, val); }
+                                    }
+                                }
+
+                                // DNS whitelist
+                                VerticalLayout {
+                                    spacing: 6px;
+
+                                    HorizontalLayout {
+                                        cross-axis-alignment: center;
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: "DNS whitelist";
+                                            color: Theme.text-sec;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                        }
+
+                                        if root.unlocked: Rectangle {
+                                            background: transparent;
+                                            height: 20px;
+                                            opacity: !rule.busy ? 1.0 : 0.55;
+
+                                            HorizontalLayout {
+                                                padding-left: 4px;
+                                                padding-right: 4px;
+                                                cross-axis-alignment: center;
+                                                Text {
+                                                    text: "+ Add";
+                                                    color: Theme.accent-text;
+                                                    font-size: 12px;
+                                                    font-weight: 600;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+
+                                            TouchArea {
+                                                enabled: !rule.busy;
+                                                mouse-cursor: !rule.busy ? pointer : default;
+                                                clicked => { root.open-add-domain(rule.id); }
+                                            }
+                                        }
+                                    }
+
+                                    if rule.dns-whitelist.length == 0: Text {
+                                        text: "Any destination IP allowed";
+                                        color: Theme.text-muted;
+                                        font-size: 12px;
+                                        font-italic: true;
+                                    }
+
+                                    if rule.dns-whitelist.length > 0: FlexboxLayout {
+                                        flex-wrap: wrap;
+                                        spacing: 6px;
+
+                                        for dom[didx] in rule.dns-whitelist: DomainChip {
+                                            domain: dom;
+                                            removable: root.unlocked;
+                                            enabled: !rule.busy;
+                                            removed => { root.remove-rule-domain(rule.id, didx); }
+                                        }
+                                    }
+                                }
+
+                                // Technical metadata
+                                Rectangle {
+                                    height: 1px;
+                                    background: Theme.border;
+                                }
+
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    Text {
+                                        text: "File: " + rule.exe-hint;
+                                        color: Theme.text-muted;
+                                        font-size: 11px;
+                                        font-family: "JetBrains Mono";
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: rule.matcher-detail;
+                                        color: Theme.text-muted;
+                                        font-size: 11px;
+                                        font-family: "JetBrains Mono";
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Card Footer
+                        HorizontalLayout {
+                            padding-top: 2px;
+                            cross-axis-alignment: center;
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: rule.is-steam-game ? "Steam Game" : "App";
+                                color: Theme.text-muted;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+
+                            if !root.unlocked: Rectangle {
+                                horizontal-stretch: 0;
+                                background: transparent;
+                                height: 22px;
+                                HorizontalLayout {
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: "Unlock to edit";
+                                        color: Theme.accent-text;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.require-unlock(); }
+                                }
+                            }
+
+                            if root.unlocked: Rectangle {
+                                horizontal-stretch: 0;
+                                background: transparent;
+                                height: 22px;
+                                opacity: !rule.busy ? 1.0 : 0.55;
+
+                                HorizontalLayout {
+                                    spacing: 5px;
+                                    cross-axis-alignment: center;
+
+                                    if rule.deleting: LoadingDots {
+                                        color: Theme.red-text;
+                                        dot-size: 3.5px;
+                                    }
+                                    Text {
+                                        text: rule.deleting ? "Removing…" : "Remove";
+                                        color: Theme.red-text;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                TouchArea {
+                                    enabled: !rule.busy;
+                                    mouse-cursor: !rule.busy ? pointer : default;
+                                    clicked => { root.delete-rule(rule.id); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

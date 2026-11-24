@@ -9,7 +9,7 @@ on:
 
 jobs:
   linux-tests:
-    name: Core & Frontend Tests (Linux)
+    name: Workspace & Slint UI Tests (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,30 +23,11 @@ jobs:
           shared-key: curb-linux
           cache-on-failure: true
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 12
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/curb-app/pnpm-lock.yaml
-
-      - name: Run Rust workspace tests
+      - name: Run Rust workspace tests (core, service, cli, Slint UI)
         run: cargo test --workspace
 
-      - name: Type-check & build SolidJS 2 frontend
-        working-directory: apps/curb-app
-        run: |
-          pnpm install --frozen-lockfile || pnpm install
-          pnpm typecheck
-          pnpm build
-
   windows-e2e:
-    name: Windows Service & Installer E2E
+    name: Windows Service, Slint UI & Installer E2E
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,52 +35,38 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Rust dependencies (workspace + Tauri)
+      - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: curb-windows
-          workspaces: |
-            . -> target
-            apps/curb-app/src-tauri -> target
           cache-on-failure: true
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 12
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/curb-app/pnpm-lock.yaml
 
       - name: Run Rust workspace tests (Windows)
         run: cargo test --workspace
 
-      - name: Build curb-service & curb-cli (release)
+      - name: Build curb-service, curb-cli & Slint curb-app (release)
         run: cargo build --release --workspace
 
-      - name: Stage service & CLI binaries into Tauri bundle resources
+      - name: Build Curb Per-User NSIS Installer
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path apps/curb-app/src-tauri/resources | Out-Null
-          Copy-Item target/release/curb-service.exe apps/curb-app/src-tauri/resources/
-          Copy-Item target/release/curb-cli.exe apps/curb-app/src-tauri/resources/
-
-      - name: Build Curb Tauri v2 Per-User NSIS Installer
-        working-directory: apps/curb-app
-        run: |
-          pnpm install --frozen-lockfile || pnpm install
-          pnpm tauri build --bundles nsis
+          $makensis = Get-Command makensis -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          if (-not $makensis -and (Test-Path "C:\Program Files (x86)\NSIS\makensis.exe")) {
+            $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          }
+          if (-not $makensis) {
+            choco install -y nsis
+            $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          }
+          & $makensis apps/curb-app/windows/installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
 
       - name: Run Windows E2E test suite (SCM service, non-admin IPC, ACLs, NSIS installer)
         shell: pwsh
         run: |
-          $setup = Get-ChildItem apps/curb-app/src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
-          if (-not $setup) { throw "NSIS setup executable not found" }
+          $setup = "target\release\curb-windows-x64-setup.exe"
+          if (-not (Test-Path $setup)) { throw "NSIS setup executable not found at $setup" }
           pwsh -NoProfile -File scripts/e2e-windows.ps1 `
             -CliPath target\release\curb-cli.exe `
             -ServicePath target\release\curb-service.exe `
-            -SetupExePath $setup.FullName
+            -SetupExePath $setup
