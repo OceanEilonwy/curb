@@ -180,10 +180,8 @@ impl EngineState {
             if let curb_core::config::ExecutableMatcher::SteamGame { install_dir, .. } =
                 &rule.matcher
             {
-                if let Some(primary) =
-                    curb_core::steam::pick_primary_executable(std::path::Path::new(install_dir))
-                {
-                    let s = primary.to_string_lossy().to_string();
+                for exe in curb_core::steam::collect_game_executables(std::path::Path::new(install_dir)) {
+                    let s = exe.to_string_lossy().to_string();
                     if !paths.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
                         paths.push(s);
                     }
@@ -219,10 +217,14 @@ impl EngineState {
             return true;
         }
 
+        let origin = self.dns_cache.origin_for_domain(domain);
+
         // Allow Windows NCSI probe domains when baseline NCSI is enabled.
         if self.config.baseline.ncsi {
             let ncsi: Vec<String> = NCSI_DOMAINS.iter().map(|s| (*s).to_string()).collect();
-            if domain_matches_any(domain, &ncsi) {
+            if domain_matches_any(domain, &ncsi)
+                || origin.as_deref().is_some_and(|o| domain_matches_any(o, &ncsi))
+            {
                 return true;
             }
         }
@@ -230,16 +232,22 @@ impl EngineState {
         // Allow NTP pools if baseline NTP is enabled.
         if self.config.baseline.ntp {
             let ntp = ["time.windows.com".to_string(), "*.pool.ntp.org".to_string()];
-            if domain_matches_any(domain, &ntp) {
+            if domain_matches_any(domain, &ntp)
+                || origin.as_deref().is_some_and(|o| domain_matches_any(o, &ntp))
+            {
                 return true;
             }
         }
 
         let rules = self.effective_rules();
-        // If any active rule has a DNS whitelist matching this domain, allow resolution.
+        // If any active rule has a DNS whitelist matching this domain (or its CNAME origin), allow resolution.
         for rule in &rules {
             if let Some(patterns) = &rule.network.dns_whitelist {
-                if domain_matches_any(domain, patterns) {
+                if domain_matches_any(domain, patterns)
+                    || origin
+                        .as_deref()
+                        .is_some_and(|o| domain_matches_any(o, patterns))
+                {
                     return true;
                 }
             }
@@ -268,6 +276,15 @@ impl EngineState {
     }
 
     pub fn record_blocked_event(&mut self, event: BlockedEvent) {
+        // Deduplicate burst events for the same executable and destination within 15 seconds.
+        let recent_dup = self.blocked_events.iter().take(16).any(|existing| {
+            existing.exe.eq_ignore_ascii_case(&event.exe)
+                && existing.destination.eq_ignore_ascii_case(&event.destination)
+                && (event.timestamp - existing.timestamp).num_seconds().abs() <= 15
+        });
+        if recent_dup {
+            return;
+        }
         if self.blocked_events.len() >= MAX_BLOCKED_HISTORY {
             self.blocked_events.pop_back();
         }
@@ -288,9 +305,21 @@ impl EngineState {
 
 fn parent_dir_normalized(path: &str) -> Option<String> {
     let norm = path.replace('\\', "/").to_ascii_lowercase();
-    let (dir, _) = norm.rsplit_once('/')?;
+    let (mut dir, _) = norm.rsplit_once('/')?;
     if dir.is_empty() {
         return None;
+    }
+    // If the executable resides inside a Squirrel/Electron/Edge versioned subfolder
+    // (e.g. `.../discord/app-1.0.9175/discord.exe` or `.../Application/131.0.2903.70/msedge.exe`),
+    // normalize to the parent application directory so `Update.exe` and newly updated
+    // `app-*` subfolders are matched as helpers when `subprocesses != Disabled`.
+    if let Some((parent_dir, leaf)) = dir.rsplit_once('/') {
+        let is_version_dir = leaf.starts_with("app-")
+            || (leaf.chars().next().is_some_and(|c| c.is_ascii_digit()) && leaf.contains('.'));
+        let parent_depth = parent_dir.split('/').filter(|s| !s.is_empty()).count();
+        if is_version_dir && parent_depth >= 3 {
+            dir = parent_dir;
+        }
     }
     // Avoid matching broad root or system directories if a binary sits directly in them.
     let depth = dir.split('/').filter(|s| !s.is_empty()).count();

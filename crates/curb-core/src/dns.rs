@@ -38,10 +38,13 @@ struct CachedIp {
 }
 
 /// In-memory TTL cache mapping resolved domains to their A / AAAA records.
-/// Used by Curb's local DNS proxy to feed dynamic per-app IP rules into WFP.
+/// Used by Curb's local DNS proxy to feed dynamic per-app IP rules into WFP
+/// and annotate blocked connection events with their queried domain name.
 #[derive(Debug, Default)]
 pub struct DnsCache {
     entries: HashMap<String, Vec<CachedIp>>,
+    ip_to_domain: HashMap<IpAddr, String>,
+    cname_to_origin: HashMap<String, String>,
     version: u64,
 }
 
@@ -55,21 +58,56 @@ impl DnsCache {
         self.version
     }
 
+    /// Associates a CNAME target (`alias`) with the originally queried domain (`origin`)
+    /// so follow-up A/AAAA queries directly for the CNAME target inherit the origin domain's
+    /// whitelist status and populate its WFP IP set.
+    pub fn record_cname(&mut self, alias: &str, origin: &str) {
+        let a = normalize_domain(alias);
+        let o = normalize_domain(origin);
+        if a.is_empty() || o.is_empty() || a == o {
+            return;
+        }
+        let root_origin = self.cname_to_origin.get(&o).cloned().unwrap_or(o);
+        self.cname_to_origin.insert(a, root_origin);
+    }
+
+    /// If `domain` was previously observed as a CNAME target of another queried domain,
+    /// returns that original domain name.
+    pub fn origin_for_domain(&self, domain: &str) -> Option<String> {
+        let key = normalize_domain(domain);
+        self.cname_to_origin.get(&key).cloned()
+    }
+
     /// Records resolved IPs for `domain` with a minimum TTL floor so short CDN
     /// TTLs don't cause mid-connection drops. Returns `true` if any new IP was added
     /// or an expired entry was removed (indicating WFP IP filters may need updating).
     pub fn record(&mut self, domain: &str, ips: &[IpAddr], ttl_secs: u32) -> bool {
         let key = normalize_domain(domain);
+        if key.is_empty() {
+            return false;
+        }
+        let origin = self.cname_to_origin.get(&key).cloned();
+        let mut changed = self.record_single_key(&key, ips, ttl_secs);
+        if let Some(orig) = origin {
+            if orig != key {
+                changed |= self.record_single_key(&orig, ips, ttl_secs);
+            }
+        }
+        changed
+    }
+
+    fn record_single_key(&mut self, key: &str, ips: &[IpAddr], ttl_secs: u32) -> bool {
         let ttl = Duration::from_secs(ttl_secs.max(30) as u64);
         let now = Instant::now();
         let expires_at = now + ttl;
 
-        let list = self.entries.entry(key).or_default();
+        let list = self.entries.entry(key.to_string()).or_default();
         let before = list.len();
         list.retain(|e| e.expires_at > now);
         let mut changed = list.len() != before;
 
         for &ip in ips {
+            self.ip_to_domain.insert(ip, key.to_string());
             if let Some(existing) = list.iter_mut().find(|e| e.ip == ip) {
                 existing.expires_at = expires_at;
             } else {
@@ -82,6 +120,11 @@ impl DnsCache {
             self.version = self.version.wrapping_add(1);
         }
         changed
+    }
+
+    /// Looks up the most recently resolved domain name associated with `ip`.
+    pub fn domain_for_ip(&self, ip: IpAddr) -> Option<String> {
+        self.ip_to_domain.get(&ip).cloned()
     }
 
     /// Purges expired entries across the cache. Returns `true` if any entries expired.

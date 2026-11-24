@@ -13,14 +13,17 @@ mod runtime {
     use std::collections::{HashMap, HashSet};
     use std::net::{IpAddr, SocketAddr};
     use std::path::{Path, PathBuf};
-    use std::time::{Duration, Instant, SystemTime};
+    use std::time::{Duration, Instant};
 
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use curb_core::config::NetworkPolicy;
-    use curb_core::verify::{inspect_binary, BinaryIdentity};
+    use curb_core::ipc::BlockedEvent;
+    use curb_core::store::save_config;
+    use curb_core::verify::{inspect_binary, peek_binary, BinaryIdentity};
     use tracing::{info, warn};
+    use uuid::Uuid;
     use windows::core::PWSTR;
-    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Foundation::{CloseHandle, FILETIME};
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
@@ -65,7 +68,7 @@ mod runtime {
         ncsi_ips: Option<Vec<IpAddr>>,
         locks: ImageLockTable,
         locked_pids: HashSet<u32>,
-        verify_cache: HashMap<(String, u64, SystemTime), BinaryIdentity>,
+        last_event_poll: DateTime<Utc>,
     }
 
     /// Coordinates persistent WFP default-deny filters, adapter DNS redirection,
@@ -75,6 +78,7 @@ mod runtime {
         engine: ServiceEngine,
         data_dir: PathBuf,
         fallback_upstream: SocketAddr,
+        mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) {
         // If Curb starts while not enforcing (e.g. after a crash while enforcing and a
         // later emergency-disable), make sure no stale default-deny filters or loopback
@@ -110,7 +114,7 @@ mod runtime {
             ncsi_ips: None,
             locks: ImageLockTable::default(),
             locked_pids: HashSet::new(),
-            verify_cache: HashMap::new(),
+            last_event_poll: Utc::now(),
         };
 
         let mut was_enforcing = false;
@@ -127,6 +131,14 @@ mod runtime {
             tokio::select! {
                 _ = ticker.tick() => {}
                 _ = notify.notified() => {}
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+            }
+            if *shutdown_rx.borrow() {
+                break;
             }
 
             let (enforcing, baseline, config_version) = {
@@ -150,6 +162,7 @@ mod runtime {
                 }
                 if !was_enforcing {
                     last_config_version = None;
+                    st.last_event_poll = Utc::now();
                 }
                 st.ncsi_ips = None; // force NCSI permit refresh
                 was_enforcing = true;
@@ -212,6 +225,20 @@ mod runtime {
                 reconcile(&engine, &wfp, &mut st, config_changed);
             });
         }
+
+        // Clean teardown when CurbService stops or shuts down so the machine is never left
+        // stranded with 127.0.0.1 adapter DNS or persistent default-deny filters while the
+        // service is stopped.
+        if was_enforcing {
+            info!("CurbService stopping — restoring adapter DNS and clearing WFP filters");
+            tokio::task::block_in_place(|| {
+                release_everything(&engine, &mut wfp, &mut st);
+                wfp.clear_persistent_filters();
+                if let Err(e) = restore_original_adapter_dns(&data_dir) {
+                    warn!("Failed to restore adapter DNS on service stop: {e}");
+                }
+            });
+        }
     }
 
     /// Desired-state reconciliation: evaluates live processes, computes one WFP filter
@@ -249,19 +276,29 @@ mod runtime {
 
         // Evaluate untracked processes. Multiple passes let helper processes inherit
         // from parents that are matched later in the same snapshot.
+        let mut rules_updated = false;
         for _pass in 0..3 {
             let mut progressed = false;
             let mut remaining = Vec::new();
             for (pid, ppid, path) in pending {
-                let Some(identity) = inspect_cached(&path, &mut st.verify_cache) else {
+                let Ok(identity) = inspect_binary(Path::new(&path)) else {
                     continue;
                 };
                 let mut guard = engine.state.lock().unwrap();
-                // Backfill exe_path on legacy rules when a direct match is observed so
-                // install-directory helper matching and proactive WFP filters work automatically.
+                // Backfill or refresh exe_path on user rules when a direct match is observed
+                // (e.g. when a self-updating app moves to a new versioned subfolder like
+                // `app-1.0.9175\Discord.exe`) so install-directory helper matching and
+                // proactive 0ms WFP filters automatically follow updates.
                 for rule in &mut guard.config.rules {
-                    if rule.enabled && rule.exe_path.is_none() && rule.matcher.matches(&identity) {
+                    if rule.enabled
+                        && rule.matcher.matches(&identity)
+                        && rule
+                            .exe_path
+                            .as_deref()
+                            .is_none_or(|p| !p.eq_ignore_ascii_case(&identity.path))
+                    {
                         rule.exe_path = Some(identity.path.clone());
+                        rules_updated = true;
                     }
                 }
                 match guard.evaluate_process(Some(ppid), &identity) {
@@ -295,6 +332,11 @@ mod runtime {
             }
         }
 
+        if rules_updated {
+            let guard = engine.state.lock().unwrap();
+            let _ = save_config(&guard.data_dir, &guard.config);
+        }
+
         // Gather proactive candidate paths from enabled rules/presets plus any previously
         // matched executable paths so allowed apps keep their WFP permit filters even
         // while closed or restarting (eliminating the startup race on launch).
@@ -312,7 +354,7 @@ mod runtime {
         let mut verified_proactive: Vec<(BinaryIdentity, NetworkPolicy)> = Vec::new();
         let mut active_learned = HashSet::new();
         for path in candidate_paths {
-            let Some(identity) = inspect_cached(&path, &mut st.verify_cache) else {
+            let Ok(identity) = inspect_binary(Path::new(&path)) else {
                 continue;
             };
             let verdict = {
@@ -457,6 +499,67 @@ mod runtime {
             }
         }
 
+        // Poll recent WFP classify-drop events so blocked apps appear in the UI's
+        // "Recently blocked" feed and Running Apps picker with their real exe path.
+        let now_utc = Utc::now();
+        if (now_utc - st.last_event_poll).num_milliseconds() >= 900 {
+            let start_ft = datetime_to_filetime(st.last_event_poll);
+            let end_ft = datetime_to_filetime(now_utc);
+            st.last_event_poll = now_utc;
+
+            let drops = wfp.poll_classify_drops(start_ft, end_ft);
+            for (win32_path, remote_ip, remote_port) in drops {
+                let key = win32_path.to_ascii_lowercase();
+                // Skip if the app is already in an unrestricted allowed group.
+                if st
+                    .groups
+                    .get(&key)
+                    .is_some_and(|g| g.ips.is_none())
+                {
+                    continue;
+                }
+                let filename = Path::new(&win32_path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| win32_path.clone());
+                if filename.eq_ignore_ascii_case("svchost.exe")
+                    || filename.eq_ignore_ascii_case("curb-service.exe")
+                {
+                    continue;
+                }
+
+                let peeked = peek_binary(Path::new(&win32_path)).ok();
+                let signed = peeked
+                    .as_ref()
+                    .and_then(|i| i.signature.as_ref())
+                    .is_some();
+                let signer = peeked
+                    .and_then(|i| i.signature)
+                    .map(|s| s.subject_cn);
+
+                let mut guard = engine.state.lock().unwrap();
+                let destination = guard
+                    .dns_cache
+                    .domain_for_ip(remote_ip)
+                    .unwrap_or_else(|| format!("{remote_ip}:{remote_port}"));
+                let reason = if st.groups.contains_key(&key) {
+                    "Not in app's allowed domain list".into()
+                } else {
+                    "Blocked by Curb".into()
+                };
+                guard.record_blocked_event(BlockedEvent {
+                    id: Uuid::new_v4(),
+                    timestamp: now_utc,
+                    exe: filename,
+                    path: win32_path,
+                    signed,
+                    signer,
+                    destination,
+                    reason,
+                });
+            }
+        }
+
         // Update active filter count for UI status reporting.
         let total: usize = st.groups.values().map(|g| g.filter_ids.len()).sum::<usize>()
             + st.ncsi_filter_ids.len();
@@ -486,19 +589,16 @@ mod runtime {
         PathBuf::from(root).join("System32").join(exe)
     }
 
-    fn inspect_cached(
-        path: &str,
-        cache: &mut HashMap<(String, u64, SystemTime), BinaryIdentity>,
-    ) -> Option<BinaryIdentity> {
-        let meta = std::fs::metadata(path).ok()?;
-        let modified = meta.modified().ok()?;
-        let key = (path.to_ascii_lowercase(), meta.len(), modified);
-        if let Some(existing) = cache.get(&key) {
-            return Some(existing.clone());
+    /// Converts a `DateTime<Utc>` to a Windows `FILETIME` (100-ns intervals since 1601-01-01).
+    fn datetime_to_filetime(dt: DateTime<Utc>) -> FILETIME {
+        const EPOCH_DIFF_SECS: i64 = 11_644_473_600;
+        let secs = dt.timestamp().saturating_add(EPOCH_DIFF_SECS).max(0) as u64;
+        let nanos = dt.timestamp_subsec_nanos() as u64;
+        let ticks = secs.saturating_mul(10_000_000).saturating_add(nanos / 100);
+        FILETIME {
+            dwLowDateTime: (ticks & 0xFFFF_FFFF) as u32,
+            dwHighDateTime: (ticks >> 32) as u32,
         }
-        let identity = inspect_binary(Path::new(path)).ok()?;
-        cache.insert(key, identity.clone());
-        Some(identity)
     }
 
     fn snapshot_live_processes() -> Vec<(u32, u32, String)> {

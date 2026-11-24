@@ -197,19 +197,17 @@ fn match_signature(
         }
     }
     if let Some(expected_product) = product_name {
+        let stem = binary
+            .filename
+            .strip_suffix(".exe")
+            .or_else(|| binary.filename.strip_suffix(".EXE"))
+            .unwrap_or(&binary.filename);
         match &binary.product_name {
             Some(actual) if actual.eq_ignore_ascii_case(expected_product) => {}
+            Some(_)
+                if original_filename.is_some() && stem.eq_ignore_ascii_case(expected_product) => {}
             Some(_) => return false,
             None => {
-                // When PE version metadata is unavailable, compare against the executable
-                // filename stem (e.g. "Signal" for "Signal.exe") so existing rules saved
-                // with a display-name fallback still match without over-allowing unrelated
-                // binaries from the same signer.
-                let stem = binary
-                    .filename
-                    .strip_suffix(".exe")
-                    .or_else(|| binary.filename.strip_suffix(".EXE"))
-                    .unwrap_or(&binary.filename);
                 if !stem.eq_ignore_ascii_case(expected_product) {
                     return false;
                 }
@@ -217,11 +215,23 @@ fn match_signature(
         }
     }
     if let Some(expected_file) = original_filename {
-        let actual = binary
+        if let Some(orig) = binary
             .original_filename
             .as_deref()
-            .unwrap_or(&binary.filename);
-        if !actual.eq_ignore_ascii_case(expected_file) {
+            .filter(|s| !s.is_empty())
+        {
+            if orig.eq_ignore_ascii_case(expected_file) {
+                // Exact PE OriginalFilename match.
+            } else if binary.filename.eq_ignore_ascii_case(expected_file)
+                && !is_restricted_subprocess(orig)
+            {
+                // Allow apphost/.NET/Electron binaries whose internal PE OriginalFilename is
+                // e.g. "App.dll", while blocking renamed restricted browsers/shells (e.g.
+                // powershell.exe renamed to msedge.exe).
+            } else {
+                return false;
+            }
+        } else if !binary.filename.eq_ignore_ascii_case(expected_file) {
             return false;
         }
     }

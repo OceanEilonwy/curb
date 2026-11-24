@@ -23,8 +23,15 @@ const STEAM_STORE_DOMAINS = [
   "checkout.steampowered.com",
   "login.steampowered.com",
   "api.steampowered.com",
+  "help.steampowered.com",
+  "cmp.steampowered.com",
+  "ssa.steampowered.com",
+  "partner.steamgames.com",
+  "steamgames.com",
   "*.steamstatic.com",
   "*.steamcontent.com",
+  "steamcdn-a.akamaihd.net",
+  "*.akamaihd.net",
 ];
 
 export function AllowedView(props: AllowedViewProps) {
@@ -61,10 +68,18 @@ export function AllowedView(props: AllowedViewProps) {
     const list: string[] = [];
     if (props.steam.store_and_library) list.push(...STEAM_STORE_DOMAINS);
     if (props.steam.community_and_workshop) {
-      list.push("steamcommunity.com", "*.steamusercontent.com");
+      list.push(
+        "steamcommunity.com",
+        "*.steamcommunity.com",
+        "*.steamusercontent.com"
+      );
     }
     if (props.steam.friends_and_voice) {
-      list.push("*.steam-chat.com");
+      list.push(
+        "*.steam-chat.com",
+        "*.cm.steampowered.com",
+        "*.steamserver.net"
+      );
     }
     return list;
   };

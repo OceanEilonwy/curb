@@ -15,6 +15,10 @@ pub struct AdapterDnsBackup {
     pub interface_alias: String,
     pub interface_index: u32,
     pub original_servers: Vec<String>,
+    #[serde(default)]
+    pub v4_static: bool,
+    #[serde(default)]
+    pub v6_static: bool,
 }
 
 /// Removes ALL WFP filters owned by Curb (including persistent default-deny filters),
@@ -148,38 +152,25 @@ mod windows_impl {
         if backup_file.exists() {
             if let Ok(backups) = read_json::<Vec<AdapterDnsBackup>>(&backup_file) {
                 for adapter in backups {
-                    let v4_servers: Vec<String> = adapter
-                        .original_servers
-                        .iter()
-                        .filter(|s| {
-                            s.trim()
-                                .parse::<std::net::Ipv4Addr>()
-                                .is_ok_and(|ip| !ip.is_loopback() && !ip.is_unspecified())
-                        })
-                        .map(|s| format!("'{}'", s.replace('\'', "")))
-                        .collect();
-                    let v6_servers: Vec<String> = adapter
-                        .original_servers
-                        .iter()
-                        .filter(|s| {
-                            s.trim().parse::<std::net::Ipv6Addr>().is_ok_and(|ip| {
-                                let prefix = ip.segments()[0] & 0xffc0;
-                                !ip.is_loopback()
-                                    && !ip.is_unspecified()
-                                    && prefix != 0xfe80
-                                    && prefix != 0xfec0
-                            })
-                        })
-                        .map(|s| format!("'{}'", s.replace('\'', "")))
-                        .collect();
+                    // Always reset the interface back to DHCP first to clear both IPv4 (127.0.0.1)
+                    // and IPv6 (::1) overrides before selectively restoring any static DNS family.
+                    let reset_cmd = format!(
+                        "Set-DnsClientServerAddress -InterfaceIndex {} -ResetServerAddresses -ErrorAction SilentlyContinue",
+                        adapter.interface_index
+                    );
+                    let _ = run_powershell(&reset_cmd);
 
-                    if v4_servers.is_empty() && v6_servers.is_empty() {
-                        let cmd = format!(
-                            "Set-DnsClientServerAddress -InterfaceIndex {} -ResetServerAddresses -ErrorAction SilentlyContinue",
-                            adapter.interface_index
-                        );
-                        let _ = run_powershell(&cmd);
-                    } else {
+                    if adapter.v4_static {
+                        let v4_servers: Vec<String> = adapter
+                            .original_servers
+                            .iter()
+                            .filter(|s| {
+                                s.trim()
+                                    .parse::<std::net::Ipv4Addr>()
+                                    .is_ok_and(|ip| !ip.is_loopback() && !ip.is_unspecified())
+                            })
+                            .map(|s| format!("'{}'", s.replace('\'', "")))
+                            .collect();
                         if !v4_servers.is_empty() {
                             let cmd = format!(
                                 "Set-DnsClientServerAddress -InterfaceIndex {} -ServerAddresses ({}) -ErrorAction SilentlyContinue",
@@ -188,6 +179,23 @@ mod windows_impl {
                             );
                             let _ = run_powershell(&cmd);
                         }
+                    }
+
+                    if adapter.v6_static {
+                        let v6_servers: Vec<String> = adapter
+                            .original_servers
+                            .iter()
+                            .filter(|s| {
+                                s.trim().parse::<std::net::Ipv6Addr>().is_ok_and(|ip| {
+                                    let prefix = ip.segments()[0] & 0xffc0;
+                                    !ip.is_loopback()
+                                        && !ip.is_unspecified()
+                                        && prefix != 0xfe80
+                                        && prefix != 0xfec0
+                                })
+                            })
+                            .map(|s| format!("'{}'", s.replace('\'', "")))
+                            .collect();
                         if !v6_servers.is_empty() {
                             let cmd = format!(
                                 "Set-DnsClientServerAddress -InterfaceIndex {} -ServerAddresses ({}) -ErrorAction SilentlyContinue",

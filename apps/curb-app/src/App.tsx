@@ -1,4 +1,4 @@
-import { createEffect, createSignal, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { curbApi } from "./lib/api";
 import type {
   BaselinePolicy,
@@ -27,6 +27,8 @@ export default function App() {
   const [token, setToken] = createSignal<string | null>(null);
   const [unlockOpen, setUnlockOpen] = createSignal(false);
   const [pendingOpenAllow, setPendingOpenAllow] = createSignal(false);
+  const [initialPickedApp, setInitialPickedApp] =
+    createSignal<RunningAppInfo | null>(null);
   const [toast, setToast] = createSignal<string | null>(null);
 
   const [snapshot, setSnapshot] = createSignal<ServiceSnapshot | null>(null);
@@ -68,25 +70,38 @@ export default function App() {
     }
   );
 
-  // Initial load + global Escape handler
+  // Initial load + periodic 3s snapshot polling + global Escape handler
   void refreshSnapshot();
-  window.addEventListener("keydown", (e) => {
+  const pollTimer = window.setInterval(() => {
+    void refreshSnapshot(true);
+  }, 3000);
+  const onKeyDown = (e: KeyboardEvent) => {
     if (e.key === "Escape") {
       if (unlockOpen()) {
         setUnlockOpen(false);
         setPendingOpenAllow(false);
       } else if (screen() === "add") {
+        setInitialPickedApp(null);
         setScreen("main");
       }
     }
+  };
+  window.addEventListener("keydown", onKeyDown);
+  onCleanup(() => {
+    window.clearInterval(pollTimer);
+    window.removeEventListener("keydown", onKeyDown);
   });
 
-  async function refreshSnapshot() {
+  async function refreshSnapshot(silent = false) {
     try {
       const data = await curbApi.getSnapshot();
       setSnapshot(data);
     } catch (err) {
-      showToast(`Service error: ${err instanceof Error ? err.message : err}`);
+      if (!silent) {
+        showToast(
+          `Service error: ${err instanceof Error ? err.message : err}`
+        );
+      }
     }
   }
 
@@ -167,7 +182,10 @@ export default function App() {
       if (t) await curbApi.lock(t);
       setToken(null);
       setPendingOpenAllow(false);
-      if (screen() === "add") setScreen("main");
+      if (screen() === "add") {
+        setInitialPickedApp(null);
+        setScreen("main");
+      }
       showToast("Locked");
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err));
@@ -183,6 +201,7 @@ export default function App() {
       const t = token();
       setToken(null);
       setPendingOpenAllow(false);
+      setInitialPickedApp(null);
       setScreen("main");
       await curbApi.hideToTray(t);
       showToast("Hidden to taskbar tray · locked");
@@ -193,7 +212,8 @@ export default function App() {
     }
   }
 
-  function openAllowSheet() {
+  function openAllowSheet(preselected: RunningAppInfo | null = null) {
+    setInitialPickedApp(preselected);
     if (!requireToken()) {
       setPendingOpenAllow(true);
       return;
@@ -257,6 +277,7 @@ export default function App() {
     setBusyRuleIds((prev) => ({ ...prev, [rule.id]: true }));
     try {
       setSnapshot(await curbApi.upsertRule(t, rule));
+      setInitialPickedApp(null);
       setScreen("main");
       setTab("allowed");
       showToast(`Saved ${rule.name}`);
@@ -309,7 +330,18 @@ export default function App() {
       return;
     }
 
-    openAllowSheet();
+    if (ev.path) {
+      setAllowingBlockedId(ev.id);
+      try {
+        const inspected = await handleInspectPath(ev.path);
+        openAllowSheet(inspected);
+      } finally {
+        setAllowingBlockedId(null);
+      }
+      return;
+    }
+
+    openAllowSheet(null);
   }
 
   async function handleInspectPath(path: string): Promise<RunningAppInfo | null> {
@@ -384,9 +416,12 @@ export default function App() {
 
   const modeVisual = () => {
     const snap = snapshot();
-    const mode = snap?.config.mode.kind ?? "enforcing";
+    const modeObj = snap?.config.mode;
     const isStandard = snap?.protection_tier === "standard_user";
-    if (mode === "enforcing") {
+    const isPausedActive =
+      modeObj?.kind === "paused_until" &&
+      new Date(modeObj.until).getTime() > Date.now();
+    if (!modeObj || modeObj.kind === "enforcing" || (modeObj.kind === "paused_until" && !isPausedActive)) {
       return {
         key: "on" as const,
         bg: "var(--c-green-soft)",
@@ -394,7 +429,7 @@ export default function App() {
         label: isStandard ? "Standard mode" : "Internet limited",
       };
     }
-    if (mode === "paused_until") {
+    if (isPausedActive) {
       return {
         key: "paused" as const,
         bg: "var(--c-amber-soft)",
@@ -458,9 +493,13 @@ export default function App() {
                   loadingRunning={loadingRunningApps()}
                   loadingSteam={loadingSteamGames()}
                   existingRules={snap().config.rules}
+                  initialBrowsed={initialPickedApp()}
                   onRefresh={refreshPickerSources}
                   onInspectPath={handleInspectPath}
-                  onCancel={() => setScreen("main")}
+                  onCancel={() => {
+                    setInitialPickedApp(null);
+                    setScreen("main");
+                  }}
                   onConfirm={handleUpsertRule}
                 />
               }
@@ -650,7 +689,7 @@ export default function App() {
                 <button
                   type="button"
                   disabled={locking() || hidingToTray()}
-                  onClick={openAllowSheet}
+                  onClick={() => openAllowSheet(null)}
                   class="px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
                   style={{ background: "var(--c-accent)", color: "#ffffff" }}
                 >

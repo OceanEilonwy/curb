@@ -240,9 +240,10 @@ async fn handle_dns_packet(
     let upstreams = engine.upstream_dns_servers(fallback_upstream);
     let resp_bytes = forward_to_upstreams(packet, &upstreams, prefer_tcp).await?;
 
-    // Parse A / AAAA records into Curb's TTL cache
+    // Parse CNAME, A, and AAAA records into Curb's TTL cache
     if let Ok(resp_msg) = Message::from_vec(&resp_bytes) {
         let mut ips = Vec::new();
+        let mut cnames = Vec::new();
         let mut min_ttl = u32::MAX;
         for ans in resp_msg.answers() {
             if let Some(rdata) = ans.data() {
@@ -255,15 +256,26 @@ async fn handle_dns_packet(
                         ips.push(IpAddr::V6(aaaa.0));
                         min_ttl = min_ttl.min(ans.ttl());
                     }
+                    RData::CNAME(cname) => {
+                        cnames.push((ans.name().to_utf8(), cname.0.to_utf8()));
+                    }
                     _ => {}
                 }
             }
         }
-        if !ips.is_empty() && !queried_domain.is_empty() {
+        if (!ips.is_empty() || !cnames.is_empty()) && !queried_domain.is_empty() {
             let ttl = if min_ttl == u32::MAX { 60 } else { min_ttl };
             let changed = {
                 let mut guard = engine.state.lock().unwrap();
-                guard.dns_cache.record(&queried_domain, &ips, ttl)
+                for (owner, target) in &cnames {
+                    guard.dns_cache.record_cname(owner, &queried_domain);
+                    guard.dns_cache.record_cname(target, owner);
+                }
+                if !ips.is_empty() {
+                    guard.dns_cache.record(&queried_domain, &ips, ttl)
+                } else {
+                    false
+                }
             };
             if changed {
                 engine.notify_reconcile();

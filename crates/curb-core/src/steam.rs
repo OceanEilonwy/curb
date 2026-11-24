@@ -70,7 +70,10 @@ pub fn parse_library_folders_vdf(vdf: &str) -> Vec<PathBuf> {
             let key = tokens[0].to_ascii_lowercase();
             // Modern Steam uses `"path" "D:\\SteamLibrary"`.
             // Legacy Steam used numeric keys `"1" "D:\\SteamLibrary"`.
-            if key == "path" || (key.chars().all(|c| c.is_ascii_digit()) && tokens[1].contains('\\') || tokens[1].starts_with('/')) {
+            if key == "path"
+                || (key.chars().all(|c| c.is_ascii_digit())
+                    && (tokens[1].contains('\\') || tokens[1].starts_with('/')))
+            {
                 let unescaped = tokens[1].replace("\\\\", "\\");
                 let candidate = PathBuf::from(unescaped);
                 if !paths.contains(&candidate) {
@@ -216,60 +219,85 @@ pub fn find_default_steam_root() -> Option<PathBuf> {
 fn read_steam_path_from_registry() -> Option<PathBuf> {
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ,
-        REG_VALUE_TYPE,
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
+        KEY_READ, REG_SZ, REG_VALUE_TYPE,
     };
 
-    let subkey: Vec<u16> = "SOFTWARE\\WOW6432Node\\Valve\\Steam\0"
-        .encode_utf16()
-        .collect();
-    let value_name: Vec<u16> = "InstallPath\0".encode_utf16().collect();
-
-    unsafe {
-        let mut hkey = HKEY::default();
-        if RegOpenKeyExW(
+    for (root, subkey_str, value_str) in [
+        (
             HKEY_LOCAL_MACHINE,
-            PCWSTR(subkey.as_ptr()),
-            0,
-            KEY_READ,
-            &mut hkey,
-        )
-        .is_err()
-        {
-            return None;
-        }
+            "SOFTWARE\\WOW6432Node\\Valve\\Steam\0",
+            "InstallPath\0",
+        ),
+        (HKEY_CURRENT_USER, "Software\\Valve\\Steam\0", "SteamPath\0"),
+    ] {
+        let subkey: Vec<u16> = subkey_str.encode_utf16().collect();
+        let value_name: Vec<u16> = value_str.encode_utf16().collect();
 
-        let mut buf = [0u16; 512];
-        let mut buf_bytes = (buf.len() * 2) as u32;
-        let mut kind = REG_VALUE_TYPE::default();
-        let res = RegQueryValueExW(
-            hkey,
-            PCWSTR(value_name.as_ptr()),
-            None,
-            Some(&mut kind),
-            Some(buf.as_mut_ptr() as *mut u8),
-            Some(&mut buf_bytes),
-        );
-        let _ = RegCloseKey(hkey);
+        unsafe {
+            let mut hkey = HKEY::default();
+            if RegOpenKeyExW(root, PCWSTR(subkey.as_ptr()), 0, KEY_READ, &mut hkey).is_err() {
+                continue;
+            }
 
-        if res.is_ok() && kind == REG_SZ {
-            let len = (buf_bytes as usize / 2).saturating_sub(1);
-            let path_str = String::from_utf16_lossy(&buf[..len]);
-            return Some(PathBuf::from(path_str));
+            let mut buf = [0u16; 512];
+            let mut buf_bytes = (buf.len() * 2) as u32;
+            let mut kind = REG_VALUE_TYPE::default();
+            let res = RegQueryValueExW(
+                hkey,
+                PCWSTR(value_name.as_ptr()),
+                None,
+                Some(&mut kind),
+                Some(buf.as_mut_ptr() as *mut u8),
+                Some(&mut buf_bytes),
+            );
+            let _ = RegCloseKey(hkey);
+
+            if res.is_ok() && kind == REG_SZ {
+                let char_len = (buf_bytes as usize / 2).min(buf.len());
+                let path_str = String::from_utf16_lossy(&buf[..char_len])
+                    .trim_end_matches('\0')
+                    .replace('/', "\\");
+                if !path_str.is_empty() {
+                    return Some(PathBuf::from(path_str));
+                }
+            }
         }
     }
     None
 }
 
 /// Finds the most likely primary game `.exe` inside `game_dir` (up to depth 3),
-/// filtering out common redistributables and crash reporters, preferring the largest binary.
+/// filtering out common redistributables and crash reporters, preferring Unreal Engine
+/// `-Shipping.exe` binaries, then shallower depth, then larger file size.
 pub fn pick_primary_executable(game_dir: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<(u64, usize, PathBuf)> = Vec::new();
     collect_exes(game_dir, 0, 3, &mut candidates);
 
-    // Prefer shallower depth, then larger file size (game binaries dwarf small helpers).
-    candidates.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)));
+    candidates.sort_by(|a, b| {
+        let a_shipping = a
+            .2
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().ends_with("-shipping.exe"));
+        let b_shipping = b
+            .2
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().ends_with("-shipping.exe"));
+        b_shipping
+            .cmp(&a_shipping)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| b.0.cmp(&a.0))
+    });
     candidates.into_iter().next().map(|(_, _, path)| path)
+}
+
+/// Collects all non-ignored `.exe` paths inside `game_dir` (up to depth 3) so that both
+/// root launcher stubs and nested engine binaries (e.g. `Binaries\Win64\*-Shipping.exe`)
+/// receive proactive 0ms WFP permit filters.
+pub fn collect_game_executables(game_dir: &Path) -> Vec<PathBuf> {
+    let mut candidates: Vec<(u64, usize, PathBuf)> = Vec::new();
+    collect_exes(game_dir, 0, 3, &mut candidates);
+    candidates.into_iter().map(|(_, _, path)| path).collect()
 }
 
 fn collect_exes(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<(u64, usize, PathBuf)>) {

@@ -24,6 +24,7 @@ interface AllowAppSheetProps {
   loadingRunning: boolean;
   loadingSteam: boolean;
   existingRules: Rule[];
+  initialBrowsed?: RunningAppInfo | null;
   onRefresh: () => void;
   onInspectPath: (path: string) => Promise<RunningAppInfo | null>;
   onCancel: () => void;
@@ -61,8 +62,12 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
   const [tab, setTab] = createSignal<"running" | "steam">("running");
   const [search, setSearch] = createSignal("");
   const [showBg, setShowBg] = createSignal(false);
-  const [selectedKey, setSelectedKey] = createSignal<string | null>(null);
-  const [browsed, setBrowsed] = createSignal<RunningAppInfo | null>(null);
+  const [selectedKey, setSelectedKey] = createSignal<string | null>(
+    props.initialBrowsed?.key ?? null
+  );
+  const [browsed, setBrowsed] = createSignal<RunningAppInfo | null>(
+    props.initialBrowsed ?? null
+  );
 
   const [browsing, setBrowsing] = createSignal(false);
   const [browseModalOpen, setBrowseModalOpen] = createSignal(false);
@@ -85,10 +90,27 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
 
   const isRefreshing = () => props.loadingRunning || props.loadingSteam;
 
-  const isAlreadyAllowed = (exe: string) =>
-    props.existingRules.some(
-      (r) => r.exe_hint.toLowerCase() === exe.toLowerCase()
-    );
+  const isAlreadyAllowed = (
+    exe: string,
+    path?: string,
+    steamAppId?: number
+  ) =>
+    props.existingRules.some((r) => {
+      if (
+        steamAppId !== undefined &&
+        r.matcher.kind === "steam_game" &&
+        r.matcher.app_id === steamAppId
+      ) {
+        return true;
+      }
+      if (path && r.exe_path) {
+        return r.exe_path.toLowerCase() === path.toLowerCase();
+      }
+      if (!r.exe_path) {
+        return r.exe_hint.toLowerCase() === exe.toLowerCase();
+      }
+      return false;
+    });
 
   const filteredRunning = createMemo(() => {
     const q = search().trim().toLowerCase();
@@ -102,8 +124,8 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
           (a.signer && a.signer.toLowerCase().includes(q))
       )
       .sort((a, b) => {
-        const aAl = isAlreadyAllowed(a.exe) ? 1 : 0;
-        const bAl = isAlreadyAllowed(b.exe) ? 1 : 0;
+        const aAl = isAlreadyAllowed(a.exe, a.path) ? 1 : 0;
+        const bAl = isAlreadyAllowed(b.exe, b.path) ? 1 : 0;
         if (aAl !== bAl) return aAl - bAl;
         return (b.tried_connect ? 1 : 0) - (a.tried_connect ? 1 : 0);
       });
@@ -111,12 +133,12 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
 
   const triedApps = createMemo(() =>
     filteredRunning().filter(
-      (a) => a.tried_connect && !isAlreadyAllowed(a.exe)
+      (a) => a.tried_connect && !isAlreadyAllowed(a.exe, a.path)
     )
   );
   const otherApps = createMemo(() =>
     filteredRunning().filter(
-      (a) => !(a.tried_connect && !isAlreadyAllowed(a.exe))
+      (a) => !(a.tried_connect && !isAlreadyAllowed(a.exe, a.path))
     )
   );
 
@@ -321,7 +343,7 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
   }
 
   function renderAppRow(app: RunningAppInfo) {
-    const already = () => isAlreadyAllowed(app.exe);
+    const already = () => isAlreadyAllowed(app.exe, app.path);
     const active = () => selectedKey() === app.key && !already();
 
     return (
@@ -609,7 +631,12 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
                     <For each={filteredSteam()}>
                       {(game) => {
                         const key = `steam-${game.app_id}`;
-                        const already = () => isAlreadyAllowed(game.exe_name);
+                        const already = () =>
+                          isAlreadyAllowed(
+                            game.exe_name,
+                            game.exe_path,
+                            game.app_id
+                          );
                         const active = () => selectedKey() === key && !already();
                         return (
                           <button

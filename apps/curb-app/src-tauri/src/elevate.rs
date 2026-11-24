@@ -131,8 +131,11 @@ fn run_elevated_windows(exe: &PathBuf, params: &str) -> Result<(), String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::Foundation::{CloseHandle, HWND};
+    use windows::Win32::System::Threading::WaitForSingleObject;
+    use windows::Win32::UI::Shell::{
+        ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    };
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
     let verb: Vec<u16> = "runas\0".encode_utf16().collect();
@@ -142,20 +145,25 @@ fn run_elevated_windows(exe: &PathBuf, params: &str) -> Result<(), String> {
         .collect();
     let args: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
 
-    let res = unsafe {
-        ShellExecuteW(
-            HWND::default(),
-            PCWSTR(verb.as_ptr()),
-            PCWSTR(file.as_ptr()),
-            PCWSTR(args.as_ptr()),
-            PCWSTR::null(),
-            SW_HIDE,
-        )
+    let mut sei = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        hwnd: HWND::default(),
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(args.as_ptr()),
+        lpDirectory: PCWSTR::null(),
+        nShow: SW_HIDE.0,
+        ..Default::default()
     };
 
-    // ShellExecuteW returns a value > 32 on success.
-    if (res.0 as isize) <= 32 {
-        return Err("Administrator approval was canceled or blocked.".into());
+    unsafe {
+        ShellExecuteExW(&mut sei)
+            .map_err(|_| "Administrator approval was canceled or blocked.".to_string())?;
+        if !sei.hProcess.is_invalid() && !sei.hProcess.0.is_null() {
+            let _ = WaitForSingleObject(sei.hProcess, 30_000);
+            let _ = CloseHandle(sei.hProcess);
+        }
     }
     Ok(())
 }

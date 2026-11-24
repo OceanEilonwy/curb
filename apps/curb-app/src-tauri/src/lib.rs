@@ -48,7 +48,13 @@ async fn get_snapshot(
                 && elevate::is_service_outdated(&data.service_version)
                 && !AUTO_UPGRADE_ATTEMPTED.swap(true, Ordering::SeqCst)
             {
-                if elevate::launch_elevated_service_install(&app).is_ok() {
+                let app_clone = app.clone();
+                if tokio::task::spawn_blocking(move || {
+                    elevate::launch_elevated_service_install(&app_clone)
+                })
+                .await
+                .is_ok_and(|r| r.is_ok())
+                {
                     for _ in 0..24 {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         if let Ok(IpcResponse::Snapshot { data: upgraded }) =
@@ -73,12 +79,14 @@ async fn setup_full_protection(
     app: AppHandle,
     local: State<'_, LocalStandardRuntime>,
 ) -> Result<ServiceSnapshot, String> {
-    elevate::launch_elevated_service_install(&app)?;
+    let app_clone = app.clone();
+    tokio::task::spawn_blocking(move || elevate::launch_elevated_service_install(&app_clone))
+        .await
+        .map_err(|e| format!("Internal error: {e}"))??;
     elevate::ensure_tray_autostart();
 
     // Wait briefly for CurbService to start and open its Named Pipe.
     for _ in 0..24 {
-        tokio::time::sleep(Duration::from_millis(500)).await;
         if let Ok(IpcResponse::Snapshot { data }) =
             ipc_client::send_request(&IpcRequest::GetSnapshot).await
         {
@@ -88,6 +96,7 @@ async fn setup_full_protection(
                 return Ok(data);
             }
         }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
     Err(
@@ -98,7 +107,9 @@ async fn setup_full_protection(
 
 #[tauri::command]
 async fn uninstall_full_protection(app: AppHandle) -> Result<(), String> {
-    elevate::launch_elevated_service_uninstall(&app)
+    tokio::task::spawn_blocking(move || elevate::launch_elevated_service_uninstall(&app))
+        .await
+        .map_err(|e| format!("Internal error: {e}"))?
 }
 
 #[tauri::command]
