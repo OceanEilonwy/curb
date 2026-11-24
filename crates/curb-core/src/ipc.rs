@@ -170,6 +170,15 @@ pub enum IpcRequest {
         token: String,
         id: Uuid,
     },
+    ListPresets,
+    DiscoverPresetItems {
+        preset_id: String,
+    },
+    UpdatePreset {
+        token: String,
+        preset_id: String,
+        state: crate::presets::PresetState,
+    },
     ChangePassword {
         token: String,
         current_password: String,
@@ -189,6 +198,12 @@ pub enum IpcResponse {
     },
     SteamGames {
         games: Vec<DiscoveredSteamGame>,
+    },
+    Presets {
+        presets: Vec<crate::presets::PresetDescriptor>,
+    },
+    PresetItems {
+        items: Vec<crate::presets::DiscoveredPresetItem>,
     },
     Inspected {
         identity: BinaryIdentity,

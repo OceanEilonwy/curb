@@ -10,6 +10,7 @@ use curb_core::ipc::{
     record_grouped_blocked_event, BlockedEvent, IpcRequest, IpcResponse, ProtectionTier,
     ServiceSnapshot, MAX_BLOCKED_HISTORY,
 };
+use curb_core::presets::PresetPlugin;
 use curb_core::store::{load_auth, load_config, save_auth, save_config};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -137,7 +138,9 @@ impl LocalStandardRuntime {
         if !guard.config.mode.is_actively_enforcing(Utc::now()) {
             return true;
         }
-        let mut allowed_domains = guard.config.presets.steam.webhelper_domains();
+        let mut allowed_domains = curb_preset_steam::SteamPresetPlugin::webhelper_domains(
+            &guard.config.presets.steam.to_preset_state(),
+        );
         for rule in &guard.config.rules {
             if rule.enabled {
                 match &rule.network.dns_whitelist {
@@ -211,13 +214,38 @@ impl LocalStandardRuntime {
             }
             IpcRequest::ListSteamGames => {
                 let adaptors = crate::elevate::service_adaptors();
-                let games = adaptors
-                    .steam
-                    .find_steam_root()
-                    .and_then(|root| adaptors.steam.discover_games(&root).ok())
-                    .unwrap_or_default();
+                let games = curb_preset_steam::SteamPresetPlugin
+                    .discover_items(adaptors.preset_host.as_ref())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(curb_preset_steam::SteamPresetPlugin::to_discovered_steam_game)
+                    .collect();
                 IpcResponse::SteamGames { games }
             }
+            IpcRequest::ListPresets => {
+                let mut reg = curb_core::presets::PresetRegistry::new();
+                reg.register(Arc::new(curb_preset_steam::SteamPresetPlugin));
+                IpcResponse::Presets {
+                    presets: reg.descriptors(),
+                }
+            }
+            IpcRequest::DiscoverPresetItems { preset_id } => {
+                let adaptors = crate::elevate::service_adaptors();
+                let mut reg = curb_core::presets::PresetRegistry::new();
+                reg.register(Arc::new(curb_preset_steam::SteamPresetPlugin));
+                let items = reg
+                    .get(&preset_id)
+                    .and_then(|p| p.discover_items(adaptors.preset_host.as_ref()).ok())
+                    .unwrap_or_default();
+                IpcResponse::PresetItems { items }
+            }
+            IpcRequest::UpdatePreset {
+                token,
+                preset_id,
+                state,
+            } => self.mutate(&token, |cfg| {
+                cfg.presets.set_state(&preset_id, state);
+            }),
             IpcRequest::InspectExecutable { path } => {
                 let adaptors = crate::elevate::service_adaptors();
                 match adaptors.verifier.inspect_binary(Path::new(&path)) {
