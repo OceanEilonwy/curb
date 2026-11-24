@@ -23,6 +23,9 @@ jobs:
           shared-key: curb-linux
           cache-on-failure: true
 
+      - name: Install Linux fontconfig dev headers (for Slint)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev pkg-config
+
       - name: Run Rust workspace tests (core, service, cli, Slint UI)
         run: cargo test --workspace
 
