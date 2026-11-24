@@ -39,6 +39,51 @@ export component CurbSwitch inherits Rectangle {
     }
 }
 
+export component ReadOnlyStatusPill inherits Rectangle {
+    in property <bool> active: false;
+    in property <string> active-label: "On";
+    in property <string> inactive-label: "Off";
+    callback clicked();
+
+    horizontal-stretch: 0;
+    height: 22px;
+    border-radius: 11px;
+    background: active
+        ? (ta.has-hover ? Theme.green-soft.brighter(0.12) : Theme.green-soft)
+        : (ta.has-hover ? Theme.card-hover : Theme.sub);
+    border-width: active ? 0px : 1px;
+    border-color: Theme.border;
+
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 10px;
+        spacing: 5px;
+        cross-axis-alignment: center;
+
+        Rectangle {
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            background: root.active ? Theme.green-switch : Theme.toggle-off;
+        }
+
+        Text {
+            text: root.active ? root.active-label : root.inactive-label;
+            color: root.active ? Theme.green-text : Theme.text-muted;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 export component CurbCheckbox inherits Rectangle {
     in property <bool> checked: false;
     in property <bool> enabled: true;

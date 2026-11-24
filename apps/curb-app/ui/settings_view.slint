@@ -1,6 +1,6 @@
 import { Theme } from "theme.slint";
-import { LoadingDots } from "icons.slint";
-import { CurbCheckbox, CurbInput, CurbScrollView, CurbSwitch } from "components.slint";
+import { LoadingDots, LockIcon } from "icons.slint";
+import { CurbCheckbox, CurbInput, CurbScrollView, CurbSwitch, ReadOnlyStatusPill } from "components.slint";
 
 export component SettingsView inherits CurbScrollView {
     in property <bool> unlocked: false;
@@ -157,7 +157,68 @@ export component SettingsView inherits CurbScrollView {
                 }
             }
 
-            HorizontalLayout {
+            if !root.unlocked: Rectangle {
+                height: 36px;
+                border-radius: 8px;
+                background: locked-mode-ta.has-hover ? Theme.card-hover : Theme.surface;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 8px;
+                    cross-axis-alignment: center;
+
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: root.mode-kind == 0
+                            ? Theme.green-switch
+                            : root.mode-kind == 1
+                            ? Theme.amber-solid
+                            : Theme.red-solid;
+                    }
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.mode-kind == 0
+                            ? "Currently: On"
+                            : root.mode-kind == 1
+                            ? "Currently: Paused (15m)"
+                            : "Currently: Off";
+                        color: Theme.text;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 4px;
+                        cross-axis-alignment: center;
+
+                        LockIcon {
+                            color: Theme.text-muted;
+                            size: 10px;
+                        }
+                        Text {
+                            text: "Locked";
+                            color: Theme.text-muted;
+                            font-size: 11px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                locked-mode-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.require-unlock(); }
+                }
+            }
+
+            if root.unlocked: HorizontalLayout {
                 spacing: 8px;
 
                 // On
@@ -168,7 +229,7 @@ export component SettingsView inherits CurbScrollView {
                     background: root.mode-kind == 0 ? Theme.green-solid : Theme.surface;
                     border-width: 1px;
                     border-color: Theme.border-strong;
-                    opacity: (root.unlocked && root.pending-mode < 0) ? 1.0 : 0.55;
+                    opacity: root.pending-mode < 0 ? 1.0 : 0.55;
 
                     HorizontalLayout {
                         alignment: center;
@@ -188,8 +249,8 @@ export component SettingsView inherits CurbScrollView {
                     }
 
                     TouchArea {
-                        enabled: root.unlocked && root.pending-mode < 0;
-                        mouse-cursor: (root.unlocked && root.pending-mode < 0) ? pointer : default;
+                        enabled: root.pending-mode < 0;
+                        mouse-cursor: root.pending-mode < 0 ? pointer : default;
                         clicked => { root.set-mode(0); }
                     }
                 }
@@ -202,7 +263,7 @@ export component SettingsView inherits CurbScrollView {
                     background: root.mode-kind == 1 ? Theme.amber-solid : Theme.surface;
                     border-width: 1px;
                     border-color: Theme.border-strong;
-                    opacity: (root.unlocked && root.pending-mode < 0) ? 1.0 : 0.55;
+                    opacity: root.pending-mode < 0 ? 1.0 : 0.55;
 
                     HorizontalLayout {
                         alignment: center;
@@ -222,8 +283,8 @@ export component SettingsView inherits CurbScrollView {
                     }
 
                     TouchArea {
-                        enabled: root.unlocked && root.pending-mode < 0;
-                        mouse-cursor: (root.unlocked && root.pending-mode < 0) ? pointer : default;
+                        enabled: root.pending-mode < 0;
+                        mouse-cursor: root.pending-mode < 0 ? pointer : default;
                         clicked => { root.set-mode(1); }
                     }
                 }
@@ -236,7 +297,7 @@ export component SettingsView inherits CurbScrollView {
                     background: root.mode-kind == 2 ? Theme.red-solid : Theme.surface;
                     border-width: 1px;
                     border-color: Theme.border-strong;
-                    opacity: (root.unlocked && root.pending-mode < 0) ? 1.0 : 0.55;
+                    opacity: root.pending-mode < 0 ? 1.0 : 0.55;
 
                     HorizontalLayout {
                         alignment: center;
@@ -256,8 +317,8 @@ export component SettingsView inherits CurbScrollView {
                     }
 
                     TouchArea {
-                        enabled: root.unlocked && root.pending-mode < 0;
-                        mouse-cursor: (root.unlocked && root.pending-mode < 0) ? pointer : default;
+                        enabled: root.pending-mode < 0;
+                        mouse-cursor: root.pending-mode < 0 ? pointer : default;
                         clicked => { root.set-mode(2); }
                     }
                 }
@@ -361,7 +422,12 @@ export component SettingsView inherits CurbScrollView {
                     HorizontalLayout {
                         padding-left: 12px;
                         padding-right: 12px;
+                        spacing: 5px;
                         cross-axis-alignment: center;
+                        if !root.unlocked: LockIcon {
+                            color: Theme.text-sec;
+                            size: 11px;
+                        }
                         Text {
                             text: (root.pw-open && root.unlocked) ? "Cancel" : "Change";
                             color: Theme.text;
@@ -575,10 +641,14 @@ export component SettingsView inherits CurbScrollView {
                             Text { text: "DHCP"; color: Theme.text; font-size: 12px; font-weight: 600; }
                             Text { text: "Wi-Fi & Ethernet IP assignment"; color: Theme.text-muted; font-size: 12px; }
                         }
-                        CurbSwitch {
+                        if root.unlocked: CurbSwitch {
                             checked: root.baseline-dhcp;
-                            enabled: root.unlocked && !root.busy-baseline;
+                            enabled: !root.busy-baseline;
                             toggled => { root.toggle-baseline-dhcp(); }
+                        }
+                        if !root.unlocked: ReadOnlyStatusPill {
+                            active: root.baseline-dhcp;
+                            clicked => { root.require-unlock(); }
                         }
                     }
 
@@ -592,10 +662,14 @@ export component SettingsView inherits CurbScrollView {
                             Text { text: "Loopback"; color: Theme.text; font-size: 12px; font-weight: 600; }
                             Text { text: "127.0.0.1 / ::1 local app IPC"; color: Theme.text-muted; font-size: 12px; }
                         }
-                        CurbSwitch {
+                        if root.unlocked: CurbSwitch {
                             checked: root.baseline-loopback;
-                            enabled: root.unlocked && !root.busy-baseline;
+                            enabled: !root.busy-baseline;
                             toggled => { root.toggle-baseline-loopback(); }
+                        }
+                        if !root.unlocked: ReadOnlyStatusPill {
+                            active: root.baseline-loopback;
+                            clicked => { root.require-unlock(); }
                         }
                     }
 
@@ -609,10 +683,14 @@ export component SettingsView inherits CurbScrollView {
                             Text { text: "NTP Time Sync"; color: Theme.text; font-size: 12px; font-weight: 600; }
                             Text { text: "Clock accuracy for HTTPS certificates"; color: Theme.text-muted; font-size: 12px; }
                         }
-                        CurbSwitch {
+                        if root.unlocked: CurbSwitch {
                             checked: root.baseline-ntp;
-                            enabled: root.unlocked && !root.busy-baseline;
+                            enabled: !root.busy-baseline;
                             toggled => { root.toggle-baseline-ntp(); }
+                        }
+                        if !root.unlocked: ReadOnlyStatusPill {
+                            active: root.baseline-ntp;
+                            clicked => { root.require-unlock(); }
                         }
                     }
 
@@ -626,10 +704,14 @@ export component SettingsView inherits CurbScrollView {
                             Text { text: "Windows NCSI"; color: Theme.text; font-size: 12px; font-weight: 600; }
                             Text { text: "Prevents false “No Internet” icon"; color: Theme.text-muted; font-size: 12px; }
                         }
-                        CurbSwitch {
+                        if root.unlocked: CurbSwitch {
                             checked: root.baseline-ncsi;
-                            enabled: root.unlocked && !root.busy-baseline;
+                            enabled: !root.busy-baseline;
                             toggled => { root.toggle-baseline-ncsi(); }
+                        }
+                        if !root.unlocked: ReadOnlyStatusPill {
+                            active: root.baseline-ncsi;
+                            clicked => { root.require-unlock(); }
                         }
                     }
 
@@ -676,12 +758,44 @@ export component SettingsView inherits CurbScrollView {
                                 }
                             }
 
-                            Rectangle {
+                            if !root.unlocked: Rectangle {
+                                horizontal-stretch: 0;
+                                height: 28px;
+                                border-radius: 8px;
+                                background: locked-rm-ta.has-hover ? Theme.card-hover : Theme.sub;
+                                border-width: 1px;
+                                border-color: Theme.border;
+
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 5px;
+                                    cross-axis-alignment: center;
+                                    LockIcon {
+                                        color: Theme.text-muted;
+                                        size: 11px;
+                                    }
+                                    Text {
+                                        text: "Locked";
+                                        color: Theme.text-muted;
+                                        font-size: 11.5px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                locked-rm-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.require-unlock(); }
+                                }
+                            }
+
+                            if root.unlocked: Rectangle {
                                 horizontal-stretch: 0;
                                 height: 28px;
                                 border-radius: 8px;
                                 background: Theme.red-soft;
-                                opacity: (root.unlocked && !root.uninstalling) ? 1.0 : 0.55;
+                                opacity: !root.uninstalling ? 1.0 : 0.55;
 
                                 HorizontalLayout {
                                     padding-left: 10px;
@@ -702,8 +816,8 @@ export component SettingsView inherits CurbScrollView {
                                 }
 
                                 TouchArea {
-                                    enabled: root.unlocked && !root.uninstalling;
-                                    mouse-cursor: (root.unlocked && !root.uninstalling) ? pointer : default;
+                                    enabled: !root.uninstalling;
+                                    mouse-cursor: !root.uninstalling ? pointer : default;
                                     clicked => { root.uninstall-service(); }
                                 }
                             }

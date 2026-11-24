@@ -1,7 +1,7 @@
 import { Theme } from "theme.slint";
 import { RuleItem } from "types.slint";
 import { CheckIcon, ChevronIcon, LoadingDots, WarnIcon } from "icons.slint";
-import { CurbScrollView, CurbSwitch, DomainChip, SubprocessSelector } from "components.slint";
+import { CurbScrollView, CurbSwitch, DomainChip, ReadOnlyStatusPill, SubprocessSelector } from "components.slint";
 
 export component AllowedView inherits CurbScrollView {
     in property <bool> unlocked: false;
@@ -126,10 +126,14 @@ export component AllowedView inherits CurbScrollView {
                         }
                     }
 
-                    CurbSwitch {
+                    if root.unlocked: CurbSwitch {
                         checked: root.steam-enabled;
-                        enabled: root.unlocked && !root.busy-steam;
+                        enabled: !root.busy-steam;
                         toggled => { root.toggle-steam-enabled(); }
+                    }
+                    if !root.unlocked: ReadOnlyStatusPill {
+                        active: root.steam-enabled;
+                        clicked => { root.require-unlock(); }
                     }
 
                     Rectangle {
@@ -191,10 +195,14 @@ export component AllowedView inherits CurbScrollView {
                                 wrap: word-wrap;
                             }
                         }
-                        CurbSwitch {
+                        if root.unlocked: CurbSwitch {
                             checked: root.steam-store;
-                            enabled: root.unlocked && !root.busy-steam;
+                            enabled: !root.busy-steam;
                             toggled => { root.toggle-steam-store(); }
+                        }
+                        if !root.unlocked: ReadOnlyStatusPill {
+                            active: root.steam-store;
+                            clicked => { root.require-unlock(); }
                         }
                     }
 
@@ -217,10 +225,14 @@ export component AllowedView inherits CurbScrollView {
                                 font-size: 12px;
                             }
                         }
-                        CurbSwitch {
+                        if root.unlocked: CurbSwitch {
                             checked: root.steam-community;
-                            enabled: root.unlocked && !root.busy-steam;
+                            enabled: !root.busy-steam;
                             toggled => { root.toggle-steam-community(); }
+                        }
+                        if !root.unlocked: ReadOnlyStatusPill {
+                            active: root.steam-community;
+                            clicked => { root.require-unlock(); }
                         }
                     }
 
@@ -243,10 +255,14 @@ export component AllowedView inherits CurbScrollView {
                                 font-size: 12px;
                             }
                         }
-                        CurbSwitch {
+                        if root.unlocked: CurbSwitch {
                             checked: root.steam-friends;
-                            enabled: root.unlocked && !root.busy-steam;
+                            enabled: !root.busy-steam;
                             toggled => { root.toggle-steam-friends(); }
+                        }
+                        if !root.unlocked: ReadOnlyStatusPill {
+                            active: root.steam-friends;
+                            clicked => { root.require-unlock(); }
                         }
                     }
 
@@ -393,10 +409,14 @@ export component AllowedView inherits CurbScrollView {
                         }
                     }
 
-                    CurbSwitch {
+                    if root.unlocked: CurbSwitch {
                         checked: rule.enabled;
-                        enabled: root.unlocked && !rule.busy;
+                        enabled: !rule.busy;
                         toggled => { root.toggle-rule-enabled(rule.id); }
+                    }
+                    if !root.unlocked: ReadOnlyStatusPill {
+                        active: rule.enabled;
+                        clicked => { root.require-unlock(); }
                     }
 
                     Rectangle {
@@ -458,10 +478,14 @@ export component AllowedView inherits CurbScrollView {
                                 }
                             }
 
-                            CurbSwitch {
+                            if root.unlocked: CurbSwitch {
                                 checked: rule.allow-helpers;
-                                enabled: root.unlocked && !rule.busy;
+                                enabled: !rule.busy;
                                 toggled => { root.toggle-rule-helpers(rule.id); }
+                            }
+                            if !root.unlocked: ReadOnlyStatusPill {
+                                active: rule.allow-helpers;
+                                clicked => { root.require-unlock(); }
                             }
                         }
 
@@ -522,14 +546,14 @@ export component AllowedView inherits CurbScrollView {
                                         vertical-alignment: center;
                                     }
 
-                                    HorizontalLayout {
+                                    if root.unlocked: HorizontalLayout {
                                         spacing: 6px;
 
                                         Rectangle {
                                             height: 24px;
                                             border-radius: 5px;
                                             background: rule.allow-tcp ? Theme.accent : Theme.pill;
-                                            opacity: (root.unlocked && !rule.busy) ? 1.0 : 0.55;
+                                            opacity: !rule.busy ? 1.0 : 0.55;
 
                                             HorizontalLayout {
                                                 padding-left: 10px;
@@ -544,8 +568,8 @@ export component AllowedView inherits CurbScrollView {
                                                 }
                                             }
                                             TouchArea {
-                                                enabled: root.unlocked && !rule.busy;
-                                                mouse-cursor: (root.unlocked && !rule.busy) ? pointer : default;
+                                                enabled: !rule.busy;
+                                                mouse-cursor: !rule.busy ? pointer : default;
                                                 clicked => { root.toggle-rule-tcp(rule.id); }
                                             }
                                         }
@@ -554,7 +578,7 @@ export component AllowedView inherits CurbScrollView {
                                             height: 24px;
                                             border-radius: 5px;
                                             background: rule.allow-udp ? Theme.accent : Theme.pill;
-                                            opacity: (root.unlocked && !rule.busy) ? 1.0 : 0.55;
+                                            opacity: !rule.busy ? 1.0 : 0.55;
 
                                             HorizontalLayout {
                                                 padding-left: 10px;
@@ -569,10 +593,28 @@ export component AllowedView inherits CurbScrollView {
                                                 }
                                             }
                                             TouchArea {
-                                                enabled: root.unlocked && !rule.busy;
-                                                mouse-cursor: (root.unlocked && !rule.busy) ? pointer : default;
+                                                enabled: !rule.busy;
+                                                mouse-cursor: !rule.busy ? pointer : default;
                                                 clicked => { root.toggle-rule-udp(rule.id); }
                                             }
+                                        }
+                                    }
+
+                                    if !root.unlocked: HorizontalLayout {
+                                        spacing: 6px;
+
+                                        ReadOnlyStatusPill {
+                                            active: rule.allow-tcp;
+                                            active-label: "TCP";
+                                            inactive-label: "TCP off";
+                                            clicked => { root.require-unlock(); }
+                                        }
+
+                                        ReadOnlyStatusPill {
+                                            active: rule.allow-udp;
+                                            active-label: "UDP";
+                                            inactive-label: "UDP off";
+                                            clicked => { root.require-unlock(); }
                                         }
                                     }
                                 }
@@ -588,10 +630,16 @@ export component AllowedView inherits CurbScrollView {
                                         font-size: 12px;
                                         vertical-alignment: center;
                                     }
-                                    SubprocessSelector {
+                                    if root.unlocked: SubprocessSelector {
                                         current: rule.subprocess-policy;
-                                        enabled: root.unlocked && !rule.busy;
+                                        enabled: !rule.busy;
                                         selected(val) => { root.set-rule-subprocesses(rule.id, val); }
+                                    }
+                                    if !root.unlocked: ReadOnlyStatusPill {
+                                        active: rule.subprocess-policy > 0;
+                                        active-label: rule.subprocess-policy == 1 ? "Same signer" : "Any safe";
+                                        inactive-label: "Off";
+                                        clicked => { root.require-unlock(); }
                                     }
                                 }
 

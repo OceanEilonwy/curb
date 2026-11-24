@@ -396,41 +396,68 @@ export component MainWindow inherits Window {
                                     }
                                 }
 
-                                // Lock / Unlock button
-                                Rectangle {
+                                // Lock status badge (when locked) / Lock button (when unlocked)
+                                if !root.unlocked: Rectangle {
                                     horizontal-stretch: 0;
-                                    height: 30px;
+                                    height: 24px;
+                                    border-radius: 6px;
+                                    background: locked-badge-ta.has-hover && !root.locking && !root.hiding-to-tray ? Theme.card-hover : Theme.sub;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    opacity: (root.locking || root.hiding-to-tray) ? 0.60 : 1.0;
+
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        spacing: 4px;
+                                        cross-axis-alignment: center;
+
+                                        LockIcon {
+                                            color: Theme.text-muted;
+                                            size: 10px;
+                                        }
+                                        Text {
+                                            text: "Locked";
+                                            color: Theme.text-muted;
+                                            font-size: 11px;
+                                            font-weight: 500;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    locked-badge-ta := TouchArea {
+                                        enabled: !root.locking && !root.hiding-to-tray;
+                                        mouse-cursor: (!root.locking && !root.hiding-to-tray) ? pointer : default;
+                                        clicked => { root.toggle-lock-btn(); }
+                                    }
+                                }
+
+                                if root.unlocked: Rectangle {
+                                    horizontal-stretch: 0;
+                                    height: 28px;
                                     border-radius: 8px;
-                                    background: root.unlocked
-                                        ? Theme.amber-soft
-                                        : (lock-ta.has-hover && !root.locking && !root.hiding-to-tray ? Theme.card-hover : Theme.pill);
+                                    background: Theme.amber-soft;
                                     opacity: (root.locking || root.hiding-to-tray) ? 0.60 : 1.0;
 
                                     HorizontalLayout {
                                         padding-left: 10px;
                                         padding-right: 10px;
-                                        spacing: 6px;
+                                        spacing: 5px;
                                         cross-axis-alignment: center;
 
                                         if root.locking: LoadingDots {
-                                            color: root.unlocked ? Theme.amber-text : Theme.text;
+                                            color: Theme.amber-text;
                                             dot-size: 3px;
                                         }
-                                        if !root.locking && root.unlocked: UnlockIcon {
+                                        if !root.locking: UnlockIcon {
                                             color: Theme.amber-text;
-                                            size: 12px;
-                                        }
-                                        if !root.locking && !root.unlocked: LockIcon {
-                                            color: Theme.text;
-                                            size: 12px;
+                                            size: 11px;
                                         }
 
                                         Text {
-                                            text: root.locking
-                                                ? "Locking…"
-                                                : root.unlocked ? "Lock" : "Unlock";
-                                            color: root.unlocked ? Theme.amber-text : Theme.text;
-                                            font-size: 12px;
+                                            text: root.locking ? "Locking…" : "Lock";
+                                            color: Theme.amber-text;
+                                            font-size: 11.5px;
                                             font-weight: 600;
                                             vertical-alignment: center;
                                         }
@@ -577,6 +604,146 @@ export component MainWindow inherits Window {
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        y: parent.height - 1px;
+                        width: 100%;
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                }
+
+                // View-Only / Editing Lock Strip
+                if !root.unlocked: Rectangle {
+                    background: Theme.lock-banner-bg;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 7px;
+                        padding-bottom: 7px;
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+
+                        Rectangle {
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 6px;
+                            background: Theme.accent-soft;
+
+                            LockIcon {
+                                color: Theme.accent-text;
+                                size: 11px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "View-only mode · Unlock to edit rules";
+                            color: Theme.text-sec;
+                            font-size: 11.5px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 0;
+                            height: 26px;
+                            border-radius: 6px;
+                            background: strip-unlock-ta.has-hover && !root.locking && !root.hiding-to-tray ? Theme.accent-hover : Theme.accent;
+                            opacity: (root.locking || root.hiding-to-tray) ? 0.60 : 1.0;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                cross-axis-alignment: center;
+
+                                Text {
+                                    text: "Unlock";
+                                    color: #ffffff;
+                                    font-size: 11.5px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            strip-unlock-ta := TouchArea {
+                                enabled: !root.locking && !root.hiding-to-tray;
+                                mouse-cursor: (!root.locking && !root.hiding-to-tray) ? pointer : default;
+                                clicked => { root.toggle-lock-btn(); }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        y: parent.height - 1px;
+                        width: 100%;
+                        height: 1px;
+                        background: Theme.lock-banner-border;
+                    }
+                }
+
+                if root.unlocked: Rectangle {
+                    background: Theme.amber-soft;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
+                        spacing: 6px;
+                        cross-axis-alignment: center;
+
+                        UnlockIcon {
+                            color: Theme.amber-text;
+                            size: 12px;
+                        }
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "Unlocked for editing";
+                            color: Theme.amber-text;
+                            font-size: 11.5px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 0;
+                            height: 22px;
+                            border-radius: 5px;
+                            background: strip-lock-ta.has-hover && !root.locking && !root.hiding-to-tray ? Theme.border : transparent;
+                            opacity: (root.locking || root.hiding-to-tray) ? 0.60 : 1.0;
+
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                spacing: 4px;
+                                cross-axis-alignment: center;
+
+                                if root.locking: LoadingDots {
+                                    color: Theme.amber-text;
+                                    dot-size: 3px;
+                                }
+                                Text {
+                                    text: root.locking ? "Locking…" : "Lock now";
+                                    color: Theme.amber-text;
+                                    font-size: 11.5px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            strip-lock-ta := TouchArea {
+                                enabled: !root.locking && !root.hiding-to-tray;
+                                mouse-cursor: (!root.locking && !root.hiding-to-tray) ? pointer : default;
+                                clicked => { root.toggle-lock-btn(); }
                             }
                         }
                     }
@@ -773,22 +940,30 @@ export component MainWindow inherits Window {
                             horizontal-stretch: 0;
                             height: 34px;
                             border-radius: 8px;
-                            background: add-ta.has-hover && !root.locking && !root.hiding-to-tray ? Theme.accent-hover : Theme.accent;
+                            background: root.unlocked
+                                ? (add-ta.has-hover && !root.locking && !root.hiding-to-tray ? Theme.accent-hover : Theme.accent)
+                                : (add-ta.has-hover && !root.locking && !root.hiding-to-tray ? Theme.card-hover : Theme.pill);
+                            border-width: root.unlocked ? 0px : 1px;
+                            border-color: Theme.border-strong;
                             opacity: (root.locking || root.hiding-to-tray) ? 0.60 : 1.0;
 
                             HorizontalLayout {
-                                padding-left: 16px;
-                                padding-right: 16px;
+                                padding-left: root.unlocked ? 16px : 14px;
+                                padding-right: root.unlocked ? 16px : 14px;
                                 spacing: 6px;
                                 cross-axis-alignment: center;
 
-                                PlusIcon {
+                                if root.unlocked: PlusIcon {
                                     color: #ffffff;
                                     size: 13px;
                                 }
+                                if !root.unlocked: LockIcon {
+                                    color: Theme.text-sec;
+                                    size: 12px;
+                                }
                                 Text {
-                                    text: "Allow App or Game";
-                                    color: #ffffff;
+                                    text: root.unlocked ? "Allow App or Game" : "Unlock to Allow App";
+                                    color: root.unlocked ? #ffffff : Theme.text-sec;
                                     font-size: 12px;
                                     font-weight: 600;
                                     vertical-alignment: center;
