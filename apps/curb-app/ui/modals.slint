@@ -339,9 +339,10 @@ export component PromptModal inherits Rectangle {
 
 export component ToastBanner inherits Rectangle {
     in property <string> message: "";
+    in property <length> max-toast-width: 440px;
 
     height: 32px;
-    width: min(440px, toast-layout.preferred-width);
+    width: min(root.max-toast-width, toast-layout.preferred-width);
     border-radius: 8px;
     background: Theme.sub;
     border-width: 1px;

@@ -23,6 +23,7 @@ slint = { version = "1.19.0", default-features = false, features = [
     "accessibility",
     "compat-1-2",
     "system-tray",
+    "unstable-winit-030",
 ] }
 tokio.workspace = true
 uuid.workspace = true

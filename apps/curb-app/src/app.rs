@@ -16,6 +16,7 @@ use slint::{Color, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, Vec
 use uuid::Uuid;
 
 use crate::backend::CurbBackend;
+use crate::window_placement::{capture_geometry, SavedWindowGeometry};
 
 slint::include_modules!();
 
@@ -137,6 +138,7 @@ struct AppController {
     win: Weak<MainWindow>,
     on_window_dropped: Rc<dyn Fn()>,
     theme_dark_pref: Rc<Cell<bool>>,
+    last_geometry: Rc<RefCell<Option<SavedWindowGeometry>>>,
 
     snapshot: Option<ServiceSnapshot>,
     token: Option<String>,
@@ -209,6 +211,7 @@ pub fn clear_active_controller(gen_id: u64) {
 pub fn create_main_window(
     backend: CurbBackend,
     theme_dark_pref: Rc<Cell<bool>>,
+    last_geometry: Rc<RefCell<Option<SavedWindowGeometry>>>,
     on_window_dropped: Rc<dyn Fn()>,
 ) -> Result<(u64, MainWindow), slint::PlatformError> {
     let win = MainWindow::new()?;
@@ -226,6 +229,7 @@ pub fn create_main_window(
         win: win.as_weak(),
         on_window_dropped,
         theme_dark_pref,
+        last_geometry,
         snapshot: None,
         token: None,
         pending_open_allow: false,
@@ -938,6 +942,9 @@ impl AppController {
         }
 
         if let Some(w) = self.window() {
+            if let Some(geo) = capture_geometry(&w) {
+                *self.last_geometry.borrow_mut() = Some(geo);
+            }
             let _ = w.hide();
         }
 

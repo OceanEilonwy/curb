@@ -19,71 +19,72 @@ export component SetupView inherits Rectangle {
         // Header (draggable frameless titlebar)
         Rectangle {
             background: Theme.bg;
+            height: header-content.preferred-height;
 
             WindowMoveArea {
                 width: 100%;
                 height: 100%;
-            }
 
-            VerticalLayout {
-                padding-left: 20px;
-                padding-right: 16px;
-                padding-top: 18px;
-                padding-bottom: 15px;
+                header-content := VerticalLayout {
+                    padding-left: 20px;
+                    padding-right: 16px;
+                    padding-top: 18px;
+                    padding-bottom: 15px;
 
-                HorizontalLayout {
-                    spacing: 10px;
-                    cross-axis-alignment: center;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        cross-axis-alignment: center;
 
-                    Rectangle {
-                        width: 32px;
-                        height: 32px;
-                        border-radius: 8px;
-                        background: Theme.green-soft;
-                        ShieldIcon {
-                            mode: 0;
-                            color: Theme.green-text;
-                            size: 16px;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                        }
-                    }
-
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        spacing: 2px;
-
-                        Text {
-                            text: "Welcome to Curb";
-                            color: Theme.text;
-                            font-size: 14px;
-                            font-weight: 700;
-                        }
-                        Text {
-                            text: "Choose how you want to set up protection on this PC.";
-                            color: Theme.text-sec;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-                    }
-
-                    Rectangle {
-                        width: 30px;
-                        height: 30px;
-                        border-radius: 8px;
-                        background: close-ta.has-hover ? Theme.card : transparent;
-
-                        CloseIcon {
-                            color: Theme.text-sec;
-                            size: 13px;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            border-radius: 8px;
+                            background: Theme.green-soft;
+                            ShieldIcon {
+                                mode: 0;
+                                color: Theme.green-text;
+                                size: 16px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
                         }
 
-                        close-ta := TouchArea {
-                            enabled: !root.busy;
-                            mouse-cursor: root.busy ? default : pointer;
-                            clicked => { root.close-requested(); }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+
+                            Text {
+                                text: "Welcome to Curb";
+                                color: Theme.text;
+                                font-size: 14px;
+                                font-weight: 700;
+                            }
+                            Text {
+                                text: "Choose how you want to set up protection on this PC.";
+                                color: Theme.text-sec;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        Rectangle {
+                            width: 30px;
+                            height: 30px;
+                            border-radius: 8px;
+                            background: close-ta.has-hover ? Theme.card : transparent;
+
+                            CloseIcon {
+                                color: Theme.text-sec;
+                                size: 13px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+
+                            close-ta := TouchArea {
+                                enabled: !root.busy;
+                                mouse-cursor: root.busy ? default : pointer;
+                                clicked => { root.close-requested(); }
+                            }
                         }
                     }
                 }
