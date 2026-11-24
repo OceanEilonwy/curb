@@ -4,8 +4,7 @@ use std::sync::Arc;
 
 use crate::config::BaselinePolicy;
 use crate::ipc::{BlockedEvent, RunningAppInfo};
-use crate::presets::{EffectiveRule, SteamPresetConfig};
-use crate::steam::{collect_game_executables, discover_steam_games, DiscoveredSteamGame};
+use crate::presets::{DefaultPresetHost, PresetHost};
 use crate::verify::{inspect_binary, peek_binary, BinaryIdentity};
 use crate::Result;
 
@@ -31,29 +30,6 @@ pub trait BinaryVerifier: Send + Sync {
 
     /// Fast metadata-only peek for listing many apps without full-file hashing.
     fn peek_binary(&self, path: &Path) -> Result<BinaryIdentity>;
-}
-
-/// Discovers Steam libraries, installed games, and OS-specific Steam preset rules.
-pub trait SteamDiscoverer: Send + Sync {
-    /// Locates the default Steam installation root on this machine.
-    fn find_steam_root(&self) -> Option<PathBuf>;
-
-    /// Scans `steam_root` and all secondary libraries for installed games.
-    fn discover_games(&self, steam_root: &Path) -> Result<Vec<DiscoveredSteamGame>>;
-
-    /// Collects all non-ignored game executables inside `game_dir`.
-    fn collect_game_executables(&self, game_dir: &Path) -> Vec<PathBuf>;
-
-    /// Returns known Steam client binary paths under `steam_root` for proactive firewall rules.
-    fn steam_client_candidate_paths(&self, steam_root: &Path) -> Vec<PathBuf> {
-        let _ = steam_root;
-        Vec::new()
-    }
-
-    /// Expands `SteamPresetConfig` into OS-specific enforcement rules.
-    fn expand_steam_preset(&self, preset: &SteamPresetConfig) -> Vec<EffectiveRule> {
-        preset.expand_windows_rules()
-    }
 }
 
 /// Manages the OS-level default-deny firewall (e.g. Windows WFP, Linux nftables).
@@ -130,7 +106,7 @@ pub trait DesktopIntegration: Send + Sync {
 pub struct ServiceAdaptors {
     pub processes: Arc<dyn ProcessDiscoverer>,
     pub verifier: Arc<dyn BinaryVerifier>,
-    pub steam: Arc<dyn SteamDiscoverer>,
+    pub preset_host: Arc<dyn PresetHost>,
 }
 
 /// Pure-Rust default `BinaryVerifier` (SHA-256 + in-memory cache; no OS signature checks).
@@ -165,30 +141,12 @@ impl ProcessDiscoverer for NoopProcessDiscoverer {
     }
 }
 
-/// Pure-Rust `SteamDiscoverer` backed by VDF/ACF parsing (no OS registry lookups).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct DefaultSteamDiscoverer;
-
-impl SteamDiscoverer for DefaultSteamDiscoverer {
-    fn find_steam_root(&self) -> Option<PathBuf> {
-        None
-    }
-
-    fn discover_games(&self, steam_root: &Path) -> Result<Vec<DiscoveredSteamGame>> {
-        discover_steam_games(steam_root)
-    }
-
-    fn collect_game_executables(&self, game_dir: &Path) -> Vec<PathBuf> {
-        collect_game_executables(game_dir)
-    }
-}
-
 impl Default for ServiceAdaptors {
     fn default() -> Self {
         Self {
             processes: Arc::new(NoopProcessDiscoverer),
             verifier: Arc::new(DefaultBinaryVerifier),
-            steam: Arc::new(DefaultSteamDiscoverer),
+            preset_host: Arc::new(DefaultPresetHost::default()),
         }
     }
 }

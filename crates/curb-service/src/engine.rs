@@ -12,11 +12,18 @@ use curb_core::ipc::{
     record_grouped_blocked_event, BlockedEvent, IpcRequest, IpcResponse, ServiceSnapshot,
     MAX_BLOCKED_HISTORY,
 };
-use curb_core::adaptors::{DefaultSteamDiscoverer, SteamDiscoverer};
-use curb_core::presets::EffectiveRule;
+use curb_core::presets::{DefaultPresetHost, EffectiveRule, PresetHost, PresetRegistry};
 use curb_core::store::{load_auth, load_config, save_auth, save_config};
 use curb_core::verify::BinaryIdentity;
+use curb_preset_steam::SteamPresetPlugin;
 use tokio::sync::Notify;
+
+/// Builds the default built-in preset plugin registry (register new presets here).
+pub fn default_preset_registry() -> Arc<PresetRegistry> {
+    let mut reg = PresetRegistry::new();
+    reg.register(Arc::new(SteamPresetPlugin));
+    Arc::new(reg)
+}
 
 /// Microsoft NCSI probe domains used by Windows to verify internet connectivity
 /// and keep Wi-Fi / Ethernet adapters from showing "No Internet" or bouncing.
@@ -52,18 +59,24 @@ pub struct EngineState {
     pub blocked_events: VecDeque<BlockedEvent>,
     pub tracked_processes: HashMap<u32, TrackedProcess>,
     pub active_wfp_filters: usize,
-    pub steam: Arc<dyn SteamDiscoverer>,
+    pub presets: Arc<PresetRegistry>,
+    pub preset_host: Arc<dyn PresetHost>,
 }
 
 impl EngineState {
     #[allow(dead_code)]
     pub fn load(data_dir: PathBuf) -> curb_core::Result<Self> {
-        Self::load_with_steam(data_dir, Arc::new(DefaultSteamDiscoverer))
+        Self::load_with_presets(
+            data_dir,
+            default_preset_registry(),
+            Arc::new(DefaultPresetHost::default()),
+        )
     }
 
-    pub fn load_with_steam(
+    pub fn load_with_presets(
         data_dir: PathBuf,
-        steam: Arc<dyn SteamDiscoverer>,
+        presets: Arc<PresetRegistry>,
+        preset_host: Arc<dyn PresetHost>,
     ) -> curb_core::Result<Self> {
         let config = load_config(&data_dir)?;
         let auth = load_auth(&data_dir)?;
@@ -78,13 +91,16 @@ impl EngineState {
             blocked_events: VecDeque::with_capacity(MAX_BLOCKED_HISTORY),
             tracked_processes: HashMap::new(),
             active_wfp_filters: 0,
-            steam,
+            presets,
+            preset_host,
         })
     }
 
     /// Compiles all enabled presets and user rules into flat `EffectiveRule`s.
     pub fn effective_rules(&self) -> Vec<EffectiveRule> {
-        let mut out = self.steam.expand_steam_preset(&self.config.presets.steam);
+        let mut out = self
+            .presets
+            .expand_all_rules(&self.config.presets, self.preset_host.target_os());
         for rule in &self.config.rules {
             if rule.enabled {
                 out.push(EffectiveRule {
@@ -190,10 +206,10 @@ impl EngineState {
             if let curb_core::config::ExecutableMatcher::SteamGame { install_dir, .. } =
                 &rule.matcher
             {
-                for exe in self
-                    .steam
-                    .collect_game_executables(std::path::Path::new(install_dir))
-                {
+                for exe in curb_core::steam::collect_game_executables_with(
+                    std::path::Path::new(install_dir),
+                    |p| self.preset_host.is_executable(p),
+                ) {
                     let s = exe.to_string_lossy().to_string();
                     if !paths.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
                         paths.push(s);
@@ -202,14 +218,13 @@ impl EngineState {
             }
         }
 
-        if self.config.presets.steam.enabled {
-            if let Some(root) = self.steam.find_steam_root() {
-                for candidate in self.steam.steam_client_candidate_paths(&root) {
-                    let s = candidate.to_string_lossy().to_string();
-                    if !paths.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
-                        paths.push(s);
-                    }
-                }
+        for candidate in self
+            .presets
+            .collect_candidate_paths(&self.config.presets, self.preset_host.as_ref())
+        {
+            let s = candidate.to_string_lossy().to_string();
+            if !paths.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
+                paths.push(s);
             }
         }
 
@@ -365,9 +380,10 @@ impl ServiceEngine {
     ) -> curb_core::Result<Self> {
         let (wfp_dns_sync_tx, wfp_dns_sync_rx) = tokio::sync::watch::channel(0u64);
         Ok(Self {
-            state: Arc::new(Mutex::new(EngineState::load_with_steam(
+            state: Arc::new(Mutex::new(EngineState::load_with_presets(
                 data_dir,
-                adaptors.steam.clone(),
+                default_preset_registry(),
+                adaptors.preset_host.clone(),
             )?)),
             adaptors,
             reconcile_notify: Arc::new(Notify::new()),
@@ -489,14 +505,38 @@ impl ServiceEngine {
             }
 
             IpcRequest::ListSteamGames => {
-                let games = self
-                    .adaptors
-                    .steam
-                    .find_steam_root()
-                    .and_then(|root| self.adaptors.steam.discover_games(&root).ok())
-                    .unwrap_or_default();
+                let presets = self.state.lock().unwrap().presets.clone();
+                let games = presets
+                    .get(curb_preset_steam::STEAM_PRESET_ID)
+                    .and_then(|p| p.discover_items(self.adaptors.preset_host.as_ref()).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(SteamPresetPlugin::to_discovered_steam_game)
+                    .collect();
                 IpcResponse::SteamGames { games }
             }
+
+            IpcRequest::ListPresets => {
+                let presets = self.state.lock().unwrap().presets.descriptors();
+                IpcResponse::Presets { presets }
+            }
+
+            IpcRequest::DiscoverPresetItems { preset_id } => {
+                let presets = self.state.lock().unwrap().presets.clone();
+                let items = presets
+                    .get(&preset_id)
+                    .and_then(|p| p.discover_items(self.adaptors.preset_host.as_ref()).ok())
+                    .unwrap_or_default();
+                IpcResponse::PresetItems { items }
+            }
+
+            IpcRequest::UpdatePreset {
+                token,
+                preset_id,
+                state,
+            } => self.mutate_config(&token, |cfg| {
+                cfg.presets.set_state(&preset_id, state);
+            }),
 
             IpcRequest::InspectExecutable { path } => {
                 match self.adaptors.verifier.inspect_binary(std::path::Path::new(&path)) {

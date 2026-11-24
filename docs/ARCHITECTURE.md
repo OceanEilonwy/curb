@@ -16,12 +16,14 @@ Curb is a default-deny, application-centric Windows internet limiter designed fo
 ```text
 curb/
 ├── crates/
-│   ├── curb-core/            # Domain schema, presets, DNS matcher/cache, Argon2id auth, Steam VDF parser, IPC types, & common adaptor traits
-│   ├── curb-service/         # System enforcement daemon (wires OS adaptors + DNS proxy + IPC server)
+│   ├── curb-core/            # Domain schema, DNS matcher/cache, Argon2id auth, IPC types, adaptor traits, & PresetPlugin/PresetRegistry
+│   ├── presets/
+│   │   └── steam/            # curb-preset-steam (SteamPresetPlugin: VDF/ACF discovery, rules, toggles, blocked-domain hints)
+│   ├── curb-service/         # System enforcement daemon (wires OS adaptors + PresetRegistry + DNS proxy + IPC server)
 │   ├── curb-cli/             # Elevated admin & recovery CLI (wires ServiceManager + FirewallManager + DnsManager)
 │   └── adaptors/
-│       ├── windows/          # curb-windows (WFP, ETW, SCM, WinTrust, UAC, Registry)
-│       ├── linux/            # curb-linux (/proc, ELF, Steam, resolv.conf, SO_MARK)
+│       ├── windows/          # curb-windows (WFP, ETW, SCM, WinTrust, UAC, Registry, WindowsPresetHost)
+│       ├── linux/            # curb-linux (/proc, ELF, resolv.conf, SO_MARK, LinuxPresetHost)
 │       ├── nftables/         # curb-nftables (nftables table inet curb + Netlink NFQUEUE)
 │       ├── systemd/          # curb-systemd (systemctl curb.service lifecycle)
 │       └── xdg/              # curb-xdg (Polkit pkexec, .desktop names, autostart, GNOME/KDE proxy)

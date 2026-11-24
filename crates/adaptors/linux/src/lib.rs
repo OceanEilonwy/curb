@@ -1,11 +1,11 @@
 #[cfg(target_os = "linux")]
 pub mod dns;
 #[cfg(target_os = "linux")]
+pub mod preset_host;
+#[cfg(target_os = "linux")]
 pub mod proc_net;
 #[cfg(target_os = "linux")]
 pub mod processes;
-#[cfg(target_os = "linux")]
-pub mod steam;
 
 /// Netfilter `SO_MARK` ("CURB" in ASCII) applied to `curb-service`'s own upstream
 /// DNS sockets so they bypass Curb's firewall DNS redirect and packet queue.
@@ -14,9 +14,9 @@ pub const CURB_FW_MARK: u32 = 0x4355_5242;
 #[cfg(target_os = "linux")]
 pub use dns::LinuxDnsManager;
 #[cfg(target_os = "linux")]
-pub use processes::LinuxProcessDiscoverer;
+pub use preset_host::LinuxPresetHost;
 #[cfg(target_os = "linux")]
-pub use steam::LinuxSteamDiscoverer;
+pub use processes::LinuxProcessDiscoverer;
 
 /// Returns the default Curb data directory on Linux:
 /// `/var/lib/curb` when running as root, or `$XDG_DATA_HOME/curb` / `$HOME/.local/share/curb` otherwise.
@@ -56,6 +56,6 @@ pub fn service_adaptors() -> curb_core::adaptors::ServiceAdaptors {
     curb_core::adaptors::ServiceAdaptors {
         processes: Arc::new(LinuxProcessDiscoverer),
         verifier: Arc::new(curb_core::adaptors::DefaultBinaryVerifier),
-        steam: Arc::new(LinuxSteamDiscoverer),
+        preset_host: Arc::new(LinuxPresetHost),
     }
 }

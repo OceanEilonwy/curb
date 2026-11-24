@@ -50,6 +50,7 @@ impl DemoState {
                             community_and_workshop: false,
                             friends_and_voice: false,
                         },
+                        ..Default::default()
                     },
                     rules: vec![
                         Rule {

@@ -5,11 +5,11 @@ pub mod dns;
 #[cfg(windows)]
 pub mod firewall;
 #[cfg(windows)]
+pub mod preset_host;
+#[cfg(windows)]
 pub mod processes;
 #[cfg(windows)]
 pub mod scm;
-#[cfg(windows)]
-pub mod steam;
 #[cfg(windows)]
 pub mod verify;
 
@@ -20,11 +20,11 @@ pub use dns::{restore_adapter_dns_clean, WindowsDnsManager};
 #[cfg(windows)]
 pub use firewall::{purge_all_curb_wfp_objects, WindowsFirewallManager};
 #[cfg(windows)]
+pub use preset_host::WindowsPresetHost;
+#[cfg(windows)]
 pub use processes::WindowsProcessDiscoverer;
 #[cfg(windows)]
 pub use scm::WindowsServiceManager;
-#[cfg(windows)]
-pub use steam::WindowsSteamDiscoverer;
 #[cfg(windows)]
 pub use verify::WindowsBinaryVerifier;
 
@@ -44,6 +44,6 @@ pub fn service_adaptors() -> curb_core::adaptors::ServiceAdaptors {
     curb_core::adaptors::ServiceAdaptors {
         processes: Arc::new(WindowsProcessDiscoverer),
         verifier: Arc::new(WindowsBinaryVerifier),
-        steam: Arc::new(WindowsSteamDiscoverer),
+        preset_host: Arc::new(WindowsPresetHost),
     }
 }

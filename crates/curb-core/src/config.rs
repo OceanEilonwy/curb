@@ -409,12 +409,36 @@ pub struct Rule {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PresetsConfig {
     pub steam: SteamPresetConfig,
+    /// Generic state storage for all additional preset plugins keyed by `PresetPlugin::id()`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub plugins: std::collections::BTreeMap<String, crate::presets::PresetState>,
 }
 
 impl Default for PresetsConfig {
     fn default() -> Self {
         Self {
             steam: SteamPresetConfig::default(),
+            plugins: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl PresetsConfig {
+    /// Returns the generic [`PresetState`] for `preset_id` (bridging legacy `steam` field).
+    pub fn state_for(&self, preset_id: &str) -> Option<crate::presets::PresetState> {
+        if preset_id == "steam" {
+            Some(self.steam.to_preset_state())
+        } else {
+            self.plugins.get(preset_id).cloned()
+        }
+    }
+
+    /// Updates the generic [`PresetState`] for `preset_id` (bridging legacy `steam` field).
+    pub fn set_state(&mut self, preset_id: &str, state: crate::presets::PresetState) {
+        if preset_id == "steam" {
+            self.steam = SteamPresetConfig::from_preset_state(&state);
+        } else {
+            self.plugins.insert(preset_id.to_string(), state);
         }
     }
 }

@@ -13,6 +13,7 @@ winresource = "0.1"
 [dependencies]
 chrono.workspace = true
 curb-core = { path = "../../crates/curb-core" }
+curb-preset-steam = { path = "../../crates/presets/steam" }
 serde.workspace = true
 serde_json.workspace = true
 slint = { version = "1.19.0", default-features = false, features = [

@@ -554,11 +554,11 @@ impl AppController {
         win.set_steam_summary(steam_summary(steam).into());
         win.set_steam_expanded(self.expanded_id.as_deref() == Some("steam"));
         win.set_steam_adv_open(self.adv_open.contains("steam"));
-        let steam_doms: Vec<SharedString> = steam
-            .webhelper_domains()
-            .into_iter()
-            .map(SharedString::from)
-            .collect();
+        let steam_doms: Vec<SharedString> =
+            curb_preset_steam::SteamPresetPlugin::webhelper_domains(&steam.to_preset_state())
+                .into_iter()
+                .map(SharedString::from)
+                .collect();
         win.set_steam_domains(ModelRc::new(VecModel::from(steam_doms)));
 
         // Baseline

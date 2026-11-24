@@ -252,15 +252,15 @@ async fn handle_dns_packet(
         {
             let mut guard = engine.state.lock().unwrap();
             let clean_domain = queried_domain.trim_end_matches('.').to_string();
-            let is_steam_community = clean_domain.contains("steamcommunity.com");
+            let hint = guard.presets.classify_blocked_domain(&clean_domain);
+            let (app_name, is_steam_community) = match hint {
+                Some(h) => (h.app_name, h.is_steam_community),
+                None => ("DNS Request".into(), false),
+            };
             guard.record_blocked_event(BlockedEvent {
                 id: Uuid::new_v4(),
                 timestamp: Utc::now(),
-                app_name: if is_steam_community {
-                    "Steam Community".into()
-                } else {
-                    "DNS Request".into()
-                },
+                app_name,
                 exe: "dnscache".into(),
                 path: String::new(),
                 destination: clean_domain,
