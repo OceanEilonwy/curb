@@ -13,9 +13,3 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-windows.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true

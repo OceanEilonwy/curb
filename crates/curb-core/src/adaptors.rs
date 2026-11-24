@@ -44,9 +44,15 @@ pub trait SteamDiscoverer: Send + Sync {
     /// Collects all non-ignored game executables inside `game_dir`.
     fn collect_game_executables(&self, game_dir: &Path) -> Vec<PathBuf>;
 
+    /// Returns known Steam client binary paths under `steam_root` for proactive firewall rules.
+    fn steam_client_candidate_paths(&self, steam_root: &Path) -> Vec<PathBuf> {
+        let _ = steam_root;
+        Vec::new()
+    }
+
     /// Expands `SteamPresetConfig` into OS-specific enforcement rules.
     fn expand_steam_preset(&self, preset: &SteamPresetConfig) -> Vec<EffectiveRule> {
-        preset.expand_rules()
+        preset.expand_windows_rules()
     }
 }
 
@@ -114,6 +120,9 @@ pub trait DesktopIntegration: Send + Sync {
 
     /// Default per-user Standard Mode data directory.
     fn user_data_dir(&self) -> PathBuf;
+
+    /// Returns `(description, placeholder)` for the "Add Executable by Path" UI prompt.
+    fn exe_path_prompt(&self) -> (&'static str, &'static str);
 }
 
 /// Composed set of OS/subsystem adaptors injected into `ServiceEngine`.

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::verify::peek_binary;
+use crate::verify::{peek_binary, BinaryIdentity};
 use crate::Result;
 
 /// A Steam game discovered from `libraryfolders.vdf` + `appmanifest_<appid>.acf`.
@@ -19,7 +19,7 @@ pub struct DiscoveredSteamGame {
     pub sha256: String,
 }
 
-/// Filenames (lowercased substrings) skipped when picking the primary game `.exe`.
+/// Filenames (lowercased substrings) skipped when picking the primary game executable.
 const IGNORED_EXE_PATTERNS: &[&str] = &[
     "vcredist",
     "dxsetup",
@@ -41,7 +41,7 @@ const IGNORED_EXE_PATTERNS: &[&str] = &[
     "easyanticheat_setup",
 ];
 
-/// Subdirectory names (lowercased) skipped during recursive `.exe` search to avoid
+/// Subdirectory names (lowercased) skipped during recursive executable search to avoid
 /// traversing huge non-executable game asset trees.
 const IGNORED_DIR_NAMES: &[&str] = &[
     "_commonredist",
@@ -117,9 +117,24 @@ pub fn parse_app_manifest_acf(acf: &str) -> Option<AppManifest> {
     })
 }
 
-/// Scans a Steam installation root (e.g. `C:\Program Files (x86)\Steam`) and all
-/// secondary library folders for installed games and peeks their main `.exe` metadata.
-pub fn discover_steam_games(steam_root: &Path) -> Result<Vec<DiscoveredSteamGame>> {
+/// Pure-Rust filename predicate matching Windows PE `.exe` binaries.
+pub fn is_windows_exe(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().ends_with(".exe"))
+}
+
+/// Scans a Steam installation root and all secondary library folders for installed games,
+/// using OS-adaptor callbacks for executable detection (`is_executable`) and metadata
+/// inspection (`peek_fn`).
+pub fn discover_steam_games_with<F, P>(
+    steam_root: &Path,
+    is_executable: F,
+    peek_fn: P,
+) -> Result<Vec<DiscoveredSteamGame>>
+where
+    F: Fn(&Path) -> bool,
+    P: Fn(&Path) -> Result<BinaryIdentity>,
+{
     let mut library_roots = vec![steam_root.to_path_buf()];
 
     let vdf_path = steam_root.join("steamapps").join("libraryfolders.vdf");
@@ -156,8 +171,8 @@ pub fn discover_steam_games(steam_root: &Path) -> Result<Vec<DiscoveredSteamGame
             }
 
             let game_dir = steamapps.join("common").join(&manifest.install_dir);
-            if let Some(exe_path) = pick_primary_executable(&game_dir) {
-                if let Ok(identity) = peek_binary(&exe_path) {
+            if let Some(exe_path) = pick_primary_executable_with(&game_dir, &is_executable) {
+                if let Ok(identity) = peek_fn(&exe_path) {
                     let signed = if identity.sha256.is_empty() {
                         identity.signature.is_some()
                     } else {
@@ -182,115 +197,20 @@ pub fn discover_steam_games(steam_root: &Path) -> Result<Vec<DiscoveredSteamGame
     Ok(games)
 }
 
-/// Locates Steam's install directory on Windows via the registry or common paths.
-pub fn find_default_steam_root() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Some(path) = read_steam_path_from_registry() {
-            if path.exists() {
-                return Some(path);
-            }
-        }
-        let default = PathBuf::from(r"C:\Program Files (x86)\Steam");
-        if default.exists() {
-            return Some(default);
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        let mut home_dirs = Vec::new();
-        if let Ok(home) = std::env::var("HOME") {
-            home_dirs.push(PathBuf::from(home));
-        }
-        // When running as root (e.g. systemd curb-service), scan /home/* so
-        // Steam libraries belonging to interactive desktop users are discovered.
-        if let Ok(entries) = fs::read_dir("/home") {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_dir() && !home_dirs.contains(&p) {
-                    home_dirs.push(p);
-                }
-            }
-        }
-
-        for home in home_dirs {
-            let candidates = [
-                home.join(".local/share/Steam"),
-                home.join(".steam/steam"),
-                home.join(".steam/debian-installation"),
-                home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
-                home.join("snap/steam/common/.local/share/Steam"),
-            ];
-            for c in candidates {
-                if c.join("steamapps").exists() {
-                    return Some(c);
-                }
-            }
-        }
-    }
-
-    None
+/// Pure-Rust default Steam game scanner (matches `.exe` binaries without OS signature peeks).
+pub fn discover_steam_games(steam_root: &Path) -> Result<Vec<DiscoveredSteamGame>> {
+    discover_steam_games_with(steam_root, is_windows_exe, peek_binary)
 }
 
-#[cfg(windows)]
-fn read_steam_path_from_registry() -> Option<PathBuf> {
-    use windows::core::PCWSTR;
-    use windows::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
-        KEY_READ, REG_SZ, REG_VALUE_TYPE,
-    };
-
-    for (root, subkey_str, value_str) in [
-        (
-            HKEY_LOCAL_MACHINE,
-            "SOFTWARE\\WOW6432Node\\Valve\\Steam\0",
-            "InstallPath\0",
-        ),
-        (HKEY_CURRENT_USER, "Software\\Valve\\Steam\0", "SteamPath\0"),
-    ] {
-        let subkey: Vec<u16> = subkey_str.encode_utf16().collect();
-        let value_name: Vec<u16> = value_str.encode_utf16().collect();
-
-        unsafe {
-            let mut hkey = HKEY::default();
-            if RegOpenKeyExW(root, PCWSTR(subkey.as_ptr()), 0, KEY_READ, &mut hkey).is_err() {
-                continue;
-            }
-
-            let mut buf = [0u16; 512];
-            let mut buf_bytes = (buf.len() * 2) as u32;
-            let mut kind = REG_VALUE_TYPE::default();
-            let res = RegQueryValueExW(
-                hkey,
-                PCWSTR(value_name.as_ptr()),
-                None,
-                Some(&mut kind),
-                Some(buf.as_mut_ptr() as *mut u8),
-                Some(&mut buf_bytes),
-            );
-            let _ = RegCloseKey(hkey);
-
-            if res.is_ok() && kind == REG_SZ {
-                let char_len = (buf_bytes as usize / 2).min(buf.len());
-                let path_str = String::from_utf16_lossy(&buf[..char_len])
-                    .trim_end_matches('\0')
-                    .replace('/', "\\");
-                if !path_str.is_empty() {
-                    return Some(PathBuf::from(path_str));
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Finds the most likely primary game `.exe` inside `game_dir` (up to depth 3),
+/// Finds the most likely primary game binary inside `game_dir` (up to depth 3),
 /// filtering out common redistributables and crash reporters, preferring Unreal Engine
 /// `-Shipping.exe` binaries, then shallower depth, then larger file size.
-pub fn pick_primary_executable(game_dir: &Path) -> Option<PathBuf> {
+pub fn pick_primary_executable_with<F>(game_dir: &Path, is_executable: &F) -> Option<PathBuf>
+where
+    F: Fn(&Path) -> bool,
+{
     let mut candidates: Vec<(u64, usize, PathBuf)> = Vec::new();
-    collect_exes(game_dir, 0, 3, &mut candidates);
+    collect_exes(game_dir, 0, 3, is_executable, &mut candidates);
 
     candidates.sort_by(|a, b| {
         let a_shipping = a
@@ -309,16 +229,36 @@ pub fn pick_primary_executable(game_dir: &Path) -> Option<PathBuf> {
     candidates.into_iter().next().map(|(_, _, path)| path)
 }
 
-/// Collects all non-ignored `.exe` paths inside `game_dir` (up to depth 3) so that both
-/// root launcher stubs and nested engine binaries (e.g. `Binaries\Win64\*-Shipping.exe`)
-/// receive proactive 0ms WFP permit filters.
-pub fn collect_game_executables(game_dir: &Path) -> Vec<PathBuf> {
+/// Pure-Rust default primary `.exe` picker.
+pub fn pick_primary_executable(game_dir: &Path) -> Option<PathBuf> {
+    pick_primary_executable_with(game_dir, &is_windows_exe)
+}
+
+/// Collects all non-ignored game executables inside `game_dir` (up to depth 3)
+/// matching the OS-adaptor predicate `is_executable`.
+pub fn collect_game_executables_with<F>(game_dir: &Path, is_executable: F) -> Vec<PathBuf>
+where
+    F: Fn(&Path) -> bool,
+{
     let mut candidates: Vec<(u64, usize, PathBuf)> = Vec::new();
-    collect_exes(game_dir, 0, 3, &mut candidates);
+    collect_exes(game_dir, 0, 3, &is_executable, &mut candidates);
     candidates.into_iter().map(|(_, _, path)| path).collect()
 }
 
-fn collect_exes(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<(u64, usize, PathBuf)>) {
+/// Pure-Rust default `.exe` collector.
+pub fn collect_game_executables(game_dir: &Path) -> Vec<PathBuf> {
+    collect_game_executables_with(game_dir, is_windows_exe)
+}
+
+fn collect_exes<F>(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    is_executable: &F,
+    out: &mut Vec<(u64, usize, PathBuf)>,
+) where
+    F: Fn(&Path) -> bool,
+{
     if depth > max_depth {
         return;
     }
@@ -334,50 +274,22 @@ fn collect_exes(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<(u64, 
             if depth < max_depth {
                 let dir_lower = entry.file_name().to_string_lossy().to_ascii_lowercase();
                 if !IGNORED_DIR_NAMES.contains(&dir_lower.as_str()) {
-                    collect_exes(&entry.path(), depth + 1, max_depth, out);
+                    collect_exes(&entry.path(), depth + 1, max_depth, is_executable, out);
                 }
             }
         } else if file_type.is_file() {
-            let file_name = entry.file_name();
-            let name_lower = file_name.to_string_lossy().to_ascii_lowercase();
-            let is_win_exe = name_lower.ends_with(".exe");
-            #[cfg(target_os = "linux")]
-            let is_linux_elf = !is_win_exe && is_executable_elf(&entry.path(), &name_lower);
-            #[cfg(not(target_os = "linux"))]
-            let is_linux_elf = false;
-
-            if !is_win_exe && !is_linux_elf {
+            let path = entry.path();
+            let name_lower = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if !is_executable(&path) {
                 continue;
             }
             if IGNORED_EXE_PATTERNS.iter().any(|p| name_lower.contains(p)) {
                 continue;
             }
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            out.push((size, depth, entry.path()));
+            out.push((size, depth, path));
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn is_executable_elf(path: &Path, name_lower: &str) -> bool {
-    use std::io::Read;
-    use std::os::unix::fs::PermissionsExt;
-
-    // Skip shared libraries and common non-game files.
-    if name_lower.contains(".so") || name_lower.ends_with(".sh") || name_lower.ends_with(".py") {
-        return false;
-    }
-    let Ok(meta) = fs::metadata(path) else {
-        return false;
-    };
-    if meta.permissions().mode() & 0o111 == 0 {
-        return false;
-    }
-    let Ok(mut f) = fs::File::open(path) else {
-        return false;
-    };
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic).is_ok() && magic == *b"\x7fELF"
 }
 
 fn extract_quoted_tokens(line: &str) -> Vec<String> {

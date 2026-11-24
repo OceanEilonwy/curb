@@ -102,30 +102,9 @@ impl SteamPresetConfig {
         domains
     }
 
-    /// Expands this preset into concrete enforcement rules.
-    pub fn expand_rules(&self) -> Vec<EffectiveRule> {
-        if !self.enabled {
-            return Vec::new();
-        }
-
-        #[cfg(target_os = "linux")]
-        let (core_matcher, svc_matcher, web_matcher) = (
-            ExecutableMatcher::Path {
-                path: "ubuntu12_32/steam".into(),
-                filename_hint: "steam".into(),
-            },
-            ExecutableMatcher::Path {
-                path: "steam-runtime-launcher-service".into(),
-                filename_hint: "steam-runtime-launcher-service".into(),
-            },
-            ExecutableMatcher::Path {
-                path: "ubuntu12_64/steamwebhelper".into(),
-                filename_hint: "steamwebhelper".into(),
-            },
-        );
-
-        #[cfg(not(target_os = "linux"))]
-        let (core_matcher, svc_matcher, web_matcher) = (
+    /// Expands this preset into Windows Authenticode-verified Steam rules.
+    pub fn expand_windows_rules(&self) -> Vec<EffectiveRule> {
+        self.expand_with_matchers(
             ExecutableMatcher::Signature {
                 subject_cn: VALVE_SIGNER.into(),
                 issuer_cn: None,
@@ -144,7 +123,36 @@ impl SteamPresetConfig {
                 product_name: None,
                 original_filename: Some("steamwebhelper.exe".into()),
             },
-        );
+        )
+    }
+
+    /// Expands this preset into Linux path-matched Steam rules.
+    pub fn expand_linux_rules(&self) -> Vec<EffectiveRule> {
+        self.expand_with_matchers(
+            ExecutableMatcher::Path {
+                path: "ubuntu12_32/steam".into(),
+                filename_hint: "steam".into(),
+            },
+            ExecutableMatcher::Path {
+                path: "steam-runtime-launcher-service".into(),
+                filename_hint: "steam-runtime-launcher-service".into(),
+            },
+            ExecutableMatcher::Path {
+                path: "ubuntu12_64/steamwebhelper".into(),
+                filename_hint: "steamwebhelper".into(),
+            },
+        )
+    }
+
+    fn expand_with_matchers(
+        &self,
+        core_matcher: ExecutableMatcher,
+        svc_matcher: ExecutableMatcher,
+        web_matcher: ExecutableMatcher,
+    ) -> Vec<EffectiveRule> {
+        if !self.enabled {
+            return Vec::new();
+        }
 
         let mut rules = vec![
             EffectiveRule {
@@ -197,18 +205,19 @@ mod tests {
     #[test]
     fn steam_preset_restricts_webhelper_with_dns_whitelist() {
         let cfg = SteamPresetConfig::default();
-        let rules = cfg.expand_rules();
-        assert_eq!(rules.len(), 3);
+        for rules in [cfg.expand_windows_rules(), cfg.expand_linux_rules()] {
+            assert_eq!(rules.len(), 3);
 
-        let web = &rules[2];
-        assert!(web.network.allow_tcp);
-        assert!(web.network.allow_udp);
-        let dns = web.network.dns_whitelist.as_ref().expect("DNS whitelist");
-        assert!(dns.iter().any(|d| d == "store.steampowered.com"));
-        assert!(dns.iter().any(|d| d == "*.steampowered.com"));
-        assert!(dns.iter().any(|d| d == "*.steamserver.net"));
-        assert!(dns.iter().any(|d| d == "*.akamaized.net"));
-        assert!(!dns.iter().any(|d| d == "steamcommunity.com"));
+            let web = &rules[2];
+            assert!(web.network.allow_tcp);
+            assert!(web.network.allow_udp);
+            let dns = web.network.dns_whitelist.as_ref().expect("DNS whitelist");
+            assert!(dns.iter().any(|d| d == "store.steampowered.com"));
+            assert!(dns.iter().any(|d| d == "*.steampowered.com"));
+            assert!(dns.iter().any(|d| d == "*.steamserver.net"));
+            assert!(dns.iter().any(|d| d == "*.akamaized.net"));
+            assert!(!dns.iter().any(|d| d == "steamcommunity.com"));
+        }
     }
 
     #[test]
@@ -217,7 +226,8 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        assert!(cfg.expand_rules().is_empty());
+        assert!(cfg.expand_windows_rules().is_empty());
+        assert!(cfg.expand_linux_rules().is_empty());
     }
 
     #[test]

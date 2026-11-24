@@ -165,6 +165,13 @@ impl DesktopIntegration for XdgDesktopIntegration {
         }
         PathBuf::from("/tmp/curb-user")
     }
+
+    fn exe_path_prompt(&self) -> (&'static str, &'static str) {
+        (
+            "Enter or paste the full path to an executable binary on this computer.",
+            "/usr/bin/example",
+        )
+    }
 }
 
 /// Reads `.desktop` files from standard XDG, Flatpak, and Snap application directories

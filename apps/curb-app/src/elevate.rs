@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use curb_core::adaptors::DesktopIntegration;
+use curb_core::adaptors::{DesktopIntegration, ServiceAdaptors};
 
 fn desktop_adaptor() -> Option<Box<dyn DesktopIntegration>> {
     #[cfg(windows)]
@@ -16,6 +16,24 @@ fn desktop_adaptor() -> Option<Box<dyn DesktopIntegration>> {
     #[cfg(all(not(windows), not(target_os = "linux")))]
     {
         None
+    }
+}
+
+/// Returns the active OS `ServiceAdaptors` bundle (`ProcessDiscoverer`, `BinaryVerifier`, `SteamDiscoverer`).
+pub fn service_adaptors() -> ServiceAdaptors {
+    #[cfg(windows)]
+    {
+        curb_windows::service_adaptors()
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        curb_linux::service_adaptors()
+    }
+
+    #[cfg(all(not(windows), not(target_os = "linux")))]
+    {
+        ServiceAdaptors::default()
     }
 }
 
@@ -65,4 +83,14 @@ pub fn user_data_dir() -> PathBuf {
         return PathBuf::from(home).join(".local/share/curb-user");
     }
     PathBuf::from("/tmp/curb-user")
+}
+
+/// Returns `(description, placeholder)` for the "Add Executable by Path" dialog.
+pub fn exe_path_prompt() -> (&'static str, &'static str) {
+    desktop_adaptor()
+        .map(|a| a.exe_path_prompt())
+        .unwrap_or((
+            "Enter or paste the full path to an executable binary on this computer.",
+            "/usr/bin/example",
+        ))
 }

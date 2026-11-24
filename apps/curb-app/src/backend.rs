@@ -426,7 +426,8 @@ impl CurbBackend {
         if let Some(demo) = &self.demo {
             return Ok(demo.lock().unwrap().running_apps.clone());
         }
-        let visible_pids = tokio::task::spawn_blocking(curb_core::processes::visible_window_pids)
+        let adaptors = crate::elevate::service_adaptors();
+        let visible_pids = tokio::task::spawn_blocking(move || adaptors.processes.visible_window_pids())
             .await
             .map_err(|e| format!("Internal error: {e}"))?;
         match self

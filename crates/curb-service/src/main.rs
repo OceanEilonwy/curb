@@ -8,10 +8,24 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
-use curb_core::store::default_data_dir;
 use tracing::{error, info, warn};
 
 use crate::engine::ServiceEngine;
+
+fn default_data_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        curb_windows::default_data_dir()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        curb_linux::default_data_dir()
+    }
+    #[cfg(all(not(windows), not(target_os = "linux")))]
+    {
+        PathBuf::from("/tmp/curb-data")
+    }
+}
 
 #[cfg(target_os = "linux")]
 const DEFAULT_DNS_BIND: &str = "127.0.0.1:5353";

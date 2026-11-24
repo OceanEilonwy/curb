@@ -19,7 +19,9 @@ mod runtime {
     use curb_core::config::NetworkPolicy;
     use curb_core::ipc::BlockedEvent;
     use curb_core::store::save_config;
-    use curb_core::verify::{inspect_binary, peek_binary, BinaryIdentity};
+    use curb_core::adaptors::BinaryVerifier;
+    use curb_core::verify::BinaryIdentity;
+    use curb_windows::WindowsBinaryVerifier;
     use tracing::{info, warn};
     use uuid::Uuid;
     use windows::core::PWSTR;
@@ -157,7 +159,7 @@ mod runtime {
         if !starts_enforcing {
             let dir = data_dir.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                let _ = curb_core::cleanup::purge_all_curb_wfp_objects();
+                let _ = curb_windows::purge_all_curb_wfp_objects();
                 if curb_core::store::dns_backup_path(&dir).exists() {
                     let _ = restore_original_adapter_dns(&dir);
                 }
@@ -502,7 +504,7 @@ mod runtime {
                 } else {
                     false
                 };
-                let Ok(identity) = inspect_binary(Path::new(&path)) else {
+                let Ok(identity) = WindowsBinaryVerifier.inspect_binary(Path::new(&path)) else {
                     if locked_now {
                         st.locks.release_pid(pid);
                     }
@@ -598,7 +600,7 @@ mod runtime {
         let mut verified_proactive: Vec<(BinaryIdentity, NetworkPolicy)> = Vec::new();
         let mut active_learned = HashSet::new();
         for path in candidate_paths {
-            let Ok(identity) = inspect_binary(Path::new(&path)) else {
+            let Ok(identity) = WindowsBinaryVerifier.inspect_binary(Path::new(&path)) else {
                 continue;
             };
             let verdict = {
@@ -757,7 +759,7 @@ mod runtime {
                     continue;
                 }
 
-                let peeked = peek_binary(Path::new(&win32_path)).ok();
+                let peeked = WindowsBinaryVerifier.peek_binary(Path::new(&win32_path)).ok();
                 let signed = peeked
                     .as_ref()
                     .and_then(|i| i.signature.as_ref())

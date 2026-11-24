@@ -1751,20 +1751,9 @@ impl AppController {
         }
         self.prompt_purpose = PromptPurpose::BrowseExe;
         win.set_prompt_title("Add Executable by Path".into());
-        #[cfg(windows)]
-        {
-            win.set_prompt_description(
-                "Enter or paste the full path to an executable (.exe) on this computer.".into(),
-            );
-            win.set_prompt_placeholder(r"C:\Program Files\Example\App.exe".into());
-        }
-        #[cfg(not(windows))]
-        {
-            win.set_prompt_description(
-                "Enter or paste the full path to an executable binary on this computer.".into(),
-            );
-            win.set_prompt_placeholder("/usr/bin/example".into());
-        }
+        let (prompt_desc, prompt_placeholder) = crate::elevate::exe_path_prompt();
+        win.set_prompt_description(prompt_desc.into());
+        win.set_prompt_placeholder(prompt_placeholder.into());
         win.set_prompt_submit_label("Inspect File".into());
         win.set_prompt_busy_label("Inspecting…".into());
         win.set_prompt_mono(true);
