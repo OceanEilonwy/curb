@@ -21,16 +21,22 @@ pub struct AdapterDnsBackup {
     pub v6_static: bool,
 }
 
-/// Removes ALL WFP filters owned by Curb (including persistent default-deny filters),
-/// plus Curb's WFP sublayer and provider. Safe to call even if CurbService is stopped
-/// or previously crashed.
+/// Removes ALL firewall objects owned by Curb:
+/// - Windows: WFP filters (including persistent default-deny filters), sublayer, and provider.
+/// - Linux: `nftables` `inet curb` table (filter + NAT DNS redirect).
+/// Safe to call even if `curb-service` is stopped or previously crashed.
 pub fn purge_all_curb_wfp_objects() -> Result<usize, String> {
     #[cfg(windows)]
     {
         windows_impl::purge_wfp()
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_impl::purge_nftables()
+    }
+
+    #[cfg(all(not(windows), not(target_os = "linux")))]
     {
         Ok(0)
     }
@@ -39,6 +45,8 @@ pub fn purge_all_curb_wfp_objects() -> Result<usize, String> {
 /// Restores every adapter's original DNS settings from `dns_backup.json`, AND as a
 /// fail-safe resets any active adapter still pointed at `127.0.0.1` or `::1` back to
 /// automatic DHCP DNS so uninstalling/disabling can never strand a PC offline.
+/// (On Linux, DNS interception uses transparent nftables NAT redirect so `/etc/resolv.conf`
+/// is never modified and deleting `table inet curb` immediately restores normal DNS.)
 pub fn restore_adapter_dns_clean(data_dir: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -49,6 +57,39 @@ pub fn restore_adapter_dns_clean(data_dir: &Path) -> Result<(), String> {
     {
         let _ = data_dir;
         Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux_impl {
+    use std::process::Command;
+
+    pub fn purge_nftables() -> Result<usize, String> {
+        // Check if table inet curb exists first so uninstall/reset is cleanly idempotent.
+        let check = Command::new("nft")
+            .args(["list", "table", "inet", "curb"])
+            .output();
+
+        let Ok(out) = check else {
+            // `nft` not installed or inaccessible (e.g. non-root unit tests).
+            return Ok(0);
+        };
+
+        if !out.status.success() {
+            return Ok(0);
+        }
+
+        let del = Command::new("nft")
+            .args(["delete", "table", "inet", "curb"])
+            .output()
+            .map_err(|e| format!("Failed to invoke nft: {e}"))?;
+
+        if del.status.success() {
+            Ok(1)
+        } else {
+            let stderr = String::from_utf8_lossy(&del.stderr);
+            Err(format!("nft delete table inet curb failed: {}", stderr.trim()))
+        }
     }
 }
 

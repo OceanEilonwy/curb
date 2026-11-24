@@ -1,0 +1,13 @@
+[package]
+name = "curb-nftables"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+curb-core = { path = "../../curb-core" }
+curb-linux = { path = "../linux" }
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

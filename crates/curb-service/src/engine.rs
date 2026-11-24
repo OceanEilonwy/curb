@@ -13,10 +13,9 @@ use curb_core::ipc::{
     MAX_BLOCKED_HISTORY,
 };
 use curb_core::presets::EffectiveRule;
-use curb_core::processes::collect_running_apps;
-use curb_core::steam::{discover_steam_games, find_default_steam_root};
+use curb_core::steam::find_default_steam_root;
 use curb_core::store::{load_auth, load_config, save_auth, save_config};
-use curb_core::verify::{inspect_binary, BinaryIdentity};
+use curb_core::verify::BinaryIdentity;
 use tokio::sync::Notify;
 
 /// Microsoft NCSI probe domains used by Windows to verify internet connectivity
@@ -339,6 +338,7 @@ fn path_is_within_normalized_dir(exe_path: &str, norm_dir_with_slash: &str) -> b
 #[derive(Clone)]
 pub struct ServiceEngine {
     pub state: Arc<Mutex<EngineState>>,
+    pub adaptors: curb_core::adaptors::ServiceAdaptors,
     pub reconcile_notify: Arc<Notify>,
     pub dns_refresh_notify: Arc<Notify>,
     pub dns_v4_ready: Arc<AtomicBool>,
@@ -349,10 +349,19 @@ pub struct ServiceEngine {
 }
 
 impl ServiceEngine {
+    #[allow(dead_code)]
     pub fn new(data_dir: PathBuf) -> curb_core::Result<Self> {
+        Self::with_adaptors(data_dir, curb_core::adaptors::ServiceAdaptors::default())
+    }
+
+    pub fn with_adaptors(
+        data_dir: PathBuf,
+        adaptors: curb_core::adaptors::ServiceAdaptors,
+    ) -> curb_core::Result<Self> {
         let (wfp_dns_sync_tx, wfp_dns_sync_rx) = tokio::sync::watch::channel(0u64);
         Ok(Self {
             state: Arc::new(Mutex::new(EngineState::load(data_dir)?)),
+            adaptors,
             reconcile_notify: Arc::new(Notify::new()),
             dns_refresh_notify: Arc::new(Notify::new()),
             dns_v4_ready: Arc::new(AtomicBool::new(false)),
@@ -464,23 +473,31 @@ impl ServiceEngine {
                     let guard = self.state.lock().unwrap();
                     guard.blocked_events.iter().cloned().collect::<Vec<_>>()
                 };
-                let apps = collect_running_apps(&blocked_snapshot, visible_pids.as_deref());
+                let apps = self
+                    .adaptors
+                    .processes
+                    .collect_running_apps(&blocked_snapshot, visible_pids.as_deref());
                 IpcResponse::RunningApps { apps }
             }
 
             IpcRequest::ListSteamGames => {
-                let games = find_default_steam_root()
-                    .and_then(|root| discover_steam_games(&root).ok())
+                let games = self
+                    .adaptors
+                    .steam
+                    .find_steam_root()
+                    .and_then(|root| self.adaptors.steam.discover_games(&root).ok())
                     .unwrap_or_default();
                 IpcResponse::SteamGames { games }
             }
 
-            IpcRequest::InspectExecutable { path } => match inspect_binary(std::path::Path::new(&path)) {
-                Ok(identity) => IpcResponse::Inspected { identity },
-                Err(e) => IpcResponse::Error {
-                    message: format!("Could not inspect file: {e}"),
-                },
-            },
+            IpcRequest::InspectExecutable { path } => {
+                match self.adaptors.verifier.inspect_binary(std::path::Path::new(&path)) {
+                    Ok(identity) => IpcResponse::Inspected { identity },
+                    Err(e) => IpcResponse::Error {
+                        message: format!("Could not inspect file: {e}"),
+                    },
+                }
+            }
 
             IpcRequest::Unlock { password } => {
                 let mut guard = self.state.lock().unwrap();
@@ -656,6 +673,17 @@ mod tests {
         let mut state = EngineState::load(dir.clone()).unwrap();
 
         // Steam preset is enabled by default with Store DNS whitelist.
+        #[cfg(target_os = "linux")]
+        let webhelper = BinaryIdentity {
+            path: "/home/alice/.local/share/Steam/ubuntu12_64/steamwebhelper".into(),
+            filename: "steamwebhelper".into(),
+            sha256: "deadbeef".into(),
+            signature: None,
+            product_name: None,
+            original_filename: None,
+            file_description: None,
+        };
+        #[cfg(not(target_os = "linux"))]
         let webhelper = BinaryIdentity {
             path: r"C:\Program Files (x86)\Steam\bin\cef\steamwebhelper.exe".into(),
             filename: "steamwebhelper.exe".into(),

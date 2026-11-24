@@ -20,18 +20,9 @@ use uuid::Uuid;
 
 pub const LOCAL_PROXY_PORT: u16 = 48921;
 
-/// Returns the per-user Curb data directory (`%LOCALAPPDATA%\Curb` on Windows).
+/// Returns the per-user Curb data directory (`%LOCALAPPDATA%\Curb` on Windows, XDG on Linux).
 pub fn user_data_dir() -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            return PathBuf::from(local).join("Curb");
-        }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".local/share/curb-user");
-    }
-    PathBuf::from("/tmp/curb-user")
+    crate::elevate::user_data_dir()
 }
 
 pub fn standard_mode_marker(dir: &Path) -> PathBuf {
@@ -422,79 +413,7 @@ async fn handle_proxy_conn(
     Ok(())
 }
 
-/// Configures Windows per-user proxy settings in HKCU (requires zero admin rights).
+/// Configures per-user desktop proxy settings via the active `DesktopIntegration` adaptor.
 fn set_windows_user_proxy(enable: bool) {
-    #[cfg(windows)]
-    {
-        use windows::core::PCWSTR;
-        use windows::Win32::System::Registry::{
-            RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
-            REG_DWORD, REG_SZ,
-        };
-
-        let subkey: Vec<u16> =
-            "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\0"
-                .encode_utf16()
-                .collect();
-        unsafe {
-            let mut hkey = HKEY::default();
-            if RegOpenKeyExW(
-                HKEY_CURRENT_USER,
-                PCWSTR(subkey.as_ptr()),
-                0,
-                KEY_SET_VALUE,
-                &mut hkey,
-            )
-            .is_ok()
-            {
-                let enable_name: Vec<u16> = "ProxyEnable\0".encode_utf16().collect();
-                let enable_val: u32 = if enable { 1 } else { 0 };
-                let _ = RegSetValueExW(
-                    hkey,
-                    PCWSTR(enable_name.as_ptr()),
-                    0,
-                    REG_DWORD,
-                    Some(&enable_val.to_le_bytes()),
-                );
-
-                if enable {
-                    let server_name: Vec<u16> = "ProxyServer\0".encode_utf16().collect();
-                    let server_val: Vec<u16> = format!("127.0.0.1:{LOCAL_PROXY_PORT}\0")
-                        .encode_utf16()
-                        .collect();
-                    let bytes = std::slice::from_raw_parts(
-                        server_val.as_ptr() as *const u8,
-                        server_val.len() * 2,
-                    );
-                    let _ = RegSetValueExW(
-                        hkey,
-                        PCWSTR(server_name.as_ptr()),
-                        0,
-                        REG_SZ,
-                        Some(bytes),
-                    );
-
-                    let override_name: Vec<u16> = "ProxyOverride\0".encode_utf16().collect();
-                    let override_val: Vec<u16> =
-                        "localhost;127.0.0.1;<local>\0".encode_utf16().collect();
-                    let obytes = std::slice::from_raw_parts(
-                        override_val.as_ptr() as *const u8,
-                        override_val.len() * 2,
-                    );
-                    let _ = RegSetValueExW(
-                        hkey,
-                        PCWSTR(override_name.as_ptr()),
-                        0,
-                        REG_SZ,
-                        Some(obytes),
-                    );
-                }
-                let _ = RegCloseKey(hkey);
-            }
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = enable;
-    }
+    crate::elevate::set_user_proxy(enable, LOCAL_PROXY_PORT);
 }

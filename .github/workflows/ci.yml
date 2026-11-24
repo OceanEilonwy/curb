@@ -23,11 +23,18 @@ jobs:
           shared-key: curb-linux
           cache-on-failure: true
 
-      - name: Install Linux fontconfig dev headers (for Slint)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev pkg-config
+      - name: Install Linux build & packaging dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev pkg-config rpm
 
       - name: Run Rust workspace tests (core, service, cli, Slint UI)
         run: cargo test --workspace
+
+      - name: Build Linux release binaries & verify .deb / .rpm packaging
+        run: |
+          cargo build --release --workspace
+          ./packaging/linux/build-deb.sh
+          ./packaging/linux/build-rpm.sh
+          ls -lh dist-release/
 
   windows-e2e:
     name: Windows Service, Slint UI & Installer E2E

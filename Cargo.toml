@@ -2,6 +2,11 @@
 resolver = "2"
 members = [
     "crates/curb-core",
+    "crates/adaptors/windows",
+    "crates/adaptors/linux",
+    "crates/adaptors/nftables",
+    "crates/adaptors/systemd",
+    "crates/adaptors/xdg",
     "crates/curb-service",
     "crates/curb-cli",
     "apps/curb-app",
@@ -17,6 +22,7 @@ argon2 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 hickory-proto = "0.24"
+libc = "0.2"
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

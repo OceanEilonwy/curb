@@ -408,6 +408,10 @@ async fn forward_udp(packet: &[u8], upstream: SocketAddr, timeout: Duration) -> 
         "0.0.0.0:0"
     };
     let sock = UdpSocket::bind(bind_local).await.ok()?;
+    #[cfg(target_os = "linux")]
+    {
+        let _ = curb_linux::dns::set_curb_fw_mark(&sock);
+    }
     sock.connect(upstream).await.ok()?;
     sock.send(packet).await.ok()?;
 
@@ -423,6 +427,20 @@ async fn forward_tcp(packet: &[u8], upstream: SocketAddr, timeout: Duration) -> 
     if packet.len() > u16::MAX as usize {
         return None;
     }
+    #[cfg(target_os = "linux")]
+    let mut stream = {
+        let tcp_sock = if upstream.is_ipv6() {
+            tokio::net::TcpSocket::new_v6().ok()?
+        } else {
+            tokio::net::TcpSocket::new_v4().ok()?
+        };
+        let _ = curb_linux::dns::set_curb_fw_mark(&tcp_sock);
+        tokio::time::timeout(timeout, tcp_sock.connect(upstream))
+            .await
+            .ok()?
+            .ok()?
+    };
+    #[cfg(not(target_os = "linux"))]
     let mut stream = tokio::time::timeout(timeout, TcpStream::connect(upstream))
         .await
         .ok()?

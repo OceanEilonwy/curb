@@ -8,9 +8,13 @@ use crate::auth::AuthRecord;
 use crate::config::Config;
 use crate::Result;
 
+/// Default system data directory on Linux when running as root (`curb-service` / `sudo curb-cli`).
+pub const LINUX_SYSTEM_DATA_DIR: &str = "/var/lib/curb";
+
 /// Returns the default Curb data directory:
 /// - Windows: `C:\ProgramData\Curb`
-/// - Non-Windows (dev): `$HOME/.local/share/curb`
+/// - Linux (root / systemd service): `/var/lib/curb`
+/// - Linux/Unix (non-root): `$XDG_DATA_HOME/curb` or `$HOME/.local/share/curb`
 pub fn default_data_dir() -> PathBuf {
     #[cfg(windows)]
     {
@@ -20,11 +24,25 @@ pub fn default_data_dir() -> PathBuf {
         PathBuf::from(r"C:\ProgramData\Curb")
     }
 
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
+        let is_root = unsafe { libc::geteuid() == 0 };
+        if is_root {
+            return PathBuf::from(LINUX_SYSTEM_DATA_DIR);
+        }
+        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+            if !xdg.is_empty() {
+                return PathBuf::from(xdg).join("curb");
+            }
+        }
         if let Ok(home) = std::env::var("HOME") {
             return PathBuf::from(home).join(".local/share/curb");
         }
+        PathBuf::from("/tmp/curb-data")
+    }
+
+    #[cfg(all(not(windows), not(unix)))]
+    {
         PathBuf::from("/tmp/curb-data")
     }
 }
@@ -66,7 +84,14 @@ pub fn load_auth(data_dir: &Path) -> Result<Option<AuthRecord>> {
 }
 
 pub fn save_auth(data_dir: &Path, record: &AuthRecord) -> Result<()> {
-    write_json_atomic(&auth_path(data_dir), record)
+    let path = auth_path(data_dir);
+    write_json_atomic(&path, record)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {

@@ -1,0 +1,31 @@
+# Maintainer: Curb Maintainers <https://github.com/OceanEilonwy/curb>
+pkgname=curb
+pkgver=0.3.5
+pkgrel=1
+pkgdesc="Default-deny application internet limiter (nftables + NFQUEUE + Slint UI)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/OceanEilonwy/curb"
+license=('AGPL-3.0-or-later')
+depends=('nftables' 'polkit' 'fontconfig')
+makedepends=('cargo' 'pkgconf')
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/OceanEilonwy/curb/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  export CARGO_TARGET_DIR=target
+  cargo build --release --workspace
+}
+
+package() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  install -Dm755 target/release/curb-app "${pkgdir}/usr/bin/curb-app"
+  install -Dm755 target/release/curb-cli "${pkgdir}/usr/bin/curb-cli"
+  install -Dm755 target/release/curb-service "${pkgdir}/usr/libexec/curb/curb-service"
+  install -Dm644 packaging/linux/curb.service "${pkgdir}/usr/lib/systemd/system/curb.service"
+  install -Dm644 packaging/linux/curb.desktop "${pkgdir}/usr/share/applications/curb.desktop"
+  install -Dm644 packaging/linux/org.curb.policy "${pkgdir}/usr/share/polkit-1/actions/org.curb.policy"
+  install -Dm644 apps/curb-app/icons/128x128.png "${pkgdir}/usr/share/icons/hicolor/128x128/apps/curb.png"
+  install -Dm644 apps/curb-app/icons/32x32.png "${pkgdir}/usr/share/icons/hicolor/32x32/apps/curb.png"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

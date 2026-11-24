@@ -108,15 +108,48 @@ impl SteamPresetConfig {
             return Vec::new();
         }
 
+        #[cfg(target_os = "linux")]
+        let (core_matcher, svc_matcher, web_matcher) = (
+            ExecutableMatcher::Path {
+                path: "ubuntu12_32/steam".into(),
+                filename_hint: "steam".into(),
+            },
+            ExecutableMatcher::Path {
+                path: "steam-runtime-launcher-service".into(),
+                filename_hint: "steam-runtime-launcher-service".into(),
+            },
+            ExecutableMatcher::Path {
+                path: "ubuntu12_64/steamwebhelper".into(),
+                filename_hint: "steamwebhelper".into(),
+            },
+        );
+
+        #[cfg(not(target_os = "linux"))]
+        let (core_matcher, svc_matcher, web_matcher) = (
+            ExecutableMatcher::Signature {
+                subject_cn: VALVE_SIGNER.into(),
+                issuer_cn: None,
+                product_name: None,
+                original_filename: Some("steam.exe".into()),
+            },
+            ExecutableMatcher::Signature {
+                subject_cn: VALVE_SIGNER.into(),
+                issuer_cn: None,
+                product_name: None,
+                original_filename: Some("steamservice.exe".into()),
+            },
+            ExecutableMatcher::Signature {
+                subject_cn: VALVE_SIGNER.into(),
+                issuer_cn: None,
+                product_name: None,
+                original_filename: Some("steamwebhelper.exe".into()),
+            },
+        );
+
         let mut rules = vec![
             EffectiveRule {
                 label: "Steam Client (Core & Downloads)".into(),
-                matcher: ExecutableMatcher::Signature {
-                    subject_cn: VALVE_SIGNER.into(),
-                    issuer_cn: None,
-                    product_name: None,
-                    original_filename: Some("steam.exe".into()),
-                },
+                matcher: core_matcher,
                 network: NetworkPolicy {
                     allow_tcp: true,
                     allow_udp: true,
@@ -126,12 +159,7 @@ impl SteamPresetConfig {
             },
             EffectiveRule {
                 label: "Steam Client Service".into(),
-                matcher: ExecutableMatcher::Signature {
-                    subject_cn: VALVE_SIGNER.into(),
-                    issuer_cn: None,
-                    product_name: None,
-                    original_filename: Some("steamservice.exe".into()),
-                },
+                matcher: svc_matcher,
                 network: NetworkPolicy {
                     allow_tcp: true,
                     allow_udp: true,
@@ -145,12 +173,7 @@ impl SteamPresetConfig {
         if !web_domains.is_empty() {
             rules.push(EffectiveRule {
                 label: "Steam Web Helper (DNS-restricted)".into(),
-                matcher: ExecutableMatcher::Signature {
-                    subject_cn: VALVE_SIGNER.into(),
-                    issuer_cn: None,
-                    product_name: None,
-                    original_filename: Some("steamwebhelper.exe".into()),
-                },
+                matcher: web_matcher,
                 network: NetworkPolicy {
                     allow_tcp: true,
                     // UDP is scoped to `dns_whitelist` IPs (plus LAN SSDP/mDNS for Media

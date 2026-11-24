@@ -12,8 +12,24 @@ use crate::verify::BinaryIdentity;
 /// Named pipe path used on Windows between `curb-app` and `curb-service`.
 pub const WINDOWS_PIPE_NAME: &str = r"\\.\pipe\curb-ipc";
 
-/// Unix socket path used during non-Windows development.
+/// System-wide Unix domain socket path used by `curb-service` on Linux (systemd).
+pub const LINUX_UNIX_SOCKET_PATH: &str = "/run/curb/ipc.sock";
+
+/// Fallback Unix socket path used during unprivileged non-Windows development.
 pub const DEV_UNIX_SOCKET_PATH: &str = "/tmp/curb-ipc.sock";
+
+/// Resolves the preferred Unix socket path for `curb-service` / `curb-app` on Unix:
+/// uses `/run/curb/ipc.sock` when running as root or when the system socket already
+/// exists, otherwise falls back to `/tmp/curb-ipc.sock`.
+#[cfg(unix)]
+pub fn default_unix_socket_path() -> &'static str {
+    let is_root = unsafe { libc::geteuid() == 0 };
+    if is_root || std::path::Path::new(LINUX_UNIX_SOCKET_PATH).exists() {
+        LINUX_UNIX_SOCKET_PATH
+    } else {
+        DEV_UNIX_SOCKET_PATH
+    }
+}
 
 /// Maximum number of unique `(app, destination)` blocked entries retained in memory.
 pub const MAX_BLOCKED_HISTORY: usize = 100;

@@ -199,13 +199,31 @@ pub fn find_default_steam_root() -> Option<PathBuf> {
 
     #[cfg(not(windows))]
     {
+        let mut home_dirs = Vec::new();
         if let Ok(home) = std::env::var("HOME") {
+            home_dirs.push(PathBuf::from(home));
+        }
+        // When running as root (e.g. systemd curb-service), scan /home/* so
+        // Steam libraries belonging to interactive desktop users are discovered.
+        if let Ok(entries) = fs::read_dir("/home") {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() && !home_dirs.contains(&p) {
+                    home_dirs.push(p);
+                }
+            }
+        }
+
+        for home in home_dirs {
             let candidates = [
-                PathBuf::from(&home).join(".local/share/Steam"),
-                PathBuf::from(&home).join(".steam/steam"),
+                home.join(".local/share/Steam"),
+                home.join(".steam/steam"),
+                home.join(".steam/debian-installation"),
+                home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+                home.join("snap/steam/common/.local/share/Steam"),
             ];
             for c in candidates {
-                if c.exists() {
+                if c.join("steamapps").exists() {
                     return Some(c);
                 }
             }
@@ -322,7 +340,13 @@ fn collect_exes(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<(u64, 
         } else if file_type.is_file() {
             let file_name = entry.file_name();
             let name_lower = file_name.to_string_lossy().to_ascii_lowercase();
-            if !name_lower.ends_with(".exe") {
+            let is_win_exe = name_lower.ends_with(".exe");
+            #[cfg(target_os = "linux")]
+            let is_linux_elf = !is_win_exe && is_executable_elf(&entry.path(), &name_lower);
+            #[cfg(not(target_os = "linux"))]
+            let is_linux_elf = false;
+
+            if !is_win_exe && !is_linux_elf {
                 continue;
             }
             if IGNORED_EXE_PATTERNS.iter().any(|p| name_lower.contains(p)) {
@@ -332,6 +356,28 @@ fn collect_exes(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<(u64, 
             out.push((size, depth, entry.path()));
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn is_executable_elf(path: &Path, name_lower: &str) -> bool {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+
+    // Skip shared libraries and common non-game files.
+    if name_lower.contains(".so") || name_lower.ends_with(".sh") || name_lower.ends_with(".py") {
+        return false;
+    }
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if meta.permissions().mode() & 0o111 == 0 {
+        return false;
+    }
+    let Ok(mut f) = fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic).is_ok() && magic == *b"\x7fELF"
 }
 
 fn extract_quoted_tokens(line: &str) -> Vec<String> {

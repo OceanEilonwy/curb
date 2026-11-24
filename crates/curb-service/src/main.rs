@@ -1,6 +1,7 @@
 mod dns_proxy;
 mod engine;
 mod ipc_server;
+mod linux;
 mod windows;
 
 use std::net::SocketAddr;
@@ -12,19 +13,24 @@ use tracing::{error, info, warn};
 
 use crate::engine::ServiceEngine;
 
+#[cfg(target_os = "linux")]
+const DEFAULT_DNS_BIND: &str = "127.0.0.1:5353";
+#[cfg(not(target_os = "linux"))]
+const DEFAULT_DNS_BIND: &str = "127.0.0.1:53";
+
 #[derive(Debug, Parser)]
-#[command(name = "curb-service", about = "Curb LocalSystem enforcement service")]
+#[command(name = "curb-service", about = "Curb system enforcement service")]
 struct Args {
     /// Run interactively in the foreground console instead of Windows SCM.
     #[arg(long)]
     console: bool,
 
-    /// Override the Curb data directory (defaults to C:\ProgramData\Curb on Windows).
+    /// Override the Curb data directory (defaults to C:\ProgramData\Curb on Windows, /var/lib/curb on Linux).
     #[arg(long)]
     data_dir: Option<PathBuf>,
 
     /// Local DNS proxy bind address.
-    #[arg(long, default_value = "127.0.0.1:53")]
+    #[arg(long, default_value = DEFAULT_DNS_BIND)]
     dns_bind: SocketAddr,
 
     /// Upstream DNS resolver address.
@@ -141,9 +147,59 @@ fn main() {
     }
 
     init_logging(false, &data_dir);
-    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    rt.block_on(run_service_runtime(args, shutdown_rx, None));
+    rt.block_on(async move {
+        #[cfg(unix)]
+        {
+            let tx = shutdown_tx.clone();
+            tokio::spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigterm = signal(SignalKind::terminate()).ok();
+                let mut sigint = signal(SignalKind::interrupt()).ok();
+                tokio::select! {
+                    _ = async {
+                        if let Some(ref mut s) = sigterm {
+                            s.recv().await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        info!("Received SIGTERM — initiating graceful shutdown");
+                    }
+                    _ = async {
+                        if let Some(ref mut s) = sigint {
+                            s.recv().await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        info!("Received SIGINT — initiating graceful shutdown");
+                    }
+                }
+                let _ = tx.send(true);
+            });
+        }
+        let _keep_tx = shutdown_tx;
+        run_service_runtime(args, shutdown_rx, None).await;
+    });
+}
+
+fn build_service_adaptors() -> curb_core::adaptors::ServiceAdaptors {
+    #[cfg(windows)]
+    {
+        curb_windows::service_adaptors()
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        curb_linux::service_adaptors()
+    }
+
+    #[cfg(all(not(windows), not(target_os = "linux")))]
+    {
+        curb_core::adaptors::ServiceAdaptors::default()
+    }
 }
 
 async fn run_service_runtime(
@@ -154,7 +210,8 @@ async fn run_service_runtime(
     let data_dir = args.data_dir.unwrap_or_else(default_data_dir);
     info!("Starting curb-service with data dir: {}", data_dir.display());
 
-    let engine = match ServiceEngine::new(data_dir.clone()) {
+    let adaptors = build_service_adaptors();
+    let engine = match ServiceEngine::with_adaptors(data_dir.clone(), adaptors) {
         Ok(e) => e,
         Err(e) => {
             error!("Failed to initialize Curb engine: {e}");
@@ -194,6 +251,18 @@ async fn run_service_runtime(
         })
     };
 
+    #[cfg(target_os = "linux")]
+    let linux_task = {
+        let lx_engine = engine.clone();
+        let lx_dns_port = args.dns_bind.port();
+        let lx_upstream = args.dns_upstream;
+        let lx_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            linux::run_linux_enforcement_loop(lx_engine, lx_dns_port, lx_upstream, lx_shutdown)
+                .await;
+        })
+    };
+
     if !args.no_dns {
         let dns_engine = engine.clone();
         let bind = args.dns_bind;
@@ -215,6 +284,11 @@ async fn run_service_runtime(
     #[cfg(windows)]
     {
         let _ = wf_task.await;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = linux_task.await;
     }
 }
 

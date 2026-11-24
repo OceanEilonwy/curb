@@ -1,4 +1,4 @@
-name: Build & Release (Windows)
+name: Build & Release (Windows & Linux)
 
 on:
   push:
@@ -30,6 +30,57 @@ jobs:
 
       - name: Run Rust workspace tests
         run: cargo test --workspace
+
+  release-linux:
+    name: Build Linux Release (.deb, .rpm, .tar.gz, PKGBUILD)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: curb-linux
+          cache-on-failure: true
+
+      - name: Install Linux build & packaging dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev pkg-config rpm
+
+      - name: Build curb-service, curb-cli & Slint curb-app (release)
+        run: cargo build --release --workspace
+
+      - name: Package .deb, .rpm, and universal .tar.gz
+        run: |
+          VERSION="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          ./packaging/linux/build-deb.sh "$VERSION" amd64 dist-release
+          ./packaging/linux/build-rpm.sh "$VERSION" x86_64 dist-release
+
+          TAR_DIR="dist-release/curb-${VERSION}-linux-x86_64"
+          mkdir -p "$TAR_DIR"
+          cp target/release/curb-app target/release/curb-cli target/release/curb-service "$TAR_DIR/"
+          cp packaging/linux/curb.service packaging/linux/curb.desktop packaging/linux/org.curb.policy "$TAR_DIR/"
+          cp packaging/linux/install.sh packaging/linux/uninstall.sh "$TAR_DIR/"
+          cp apps/curb-app/icons/128x128.png "$TAR_DIR/icon-128.png"
+          cp apps/curb-app/icons/32x32.png "$TAR_DIR/icon-32.png"
+          cp README.md LICENSE "$TAR_DIR/"
+          tar -C dist-release -czf "dist-release/curb-${VERSION}-linux-x86_64.tar.gz" "curb-${VERSION}-linux-x86_64"
+          cp packaging/linux/PKGBUILD dist-release/PKGBUILD
+          ls -lh dist-release/
+
+      - name: Publish Linux Artifacts to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist-release/*.deb
+            dist-release/*.rpm
+            dist-release/*.tar.gz
+            dist-release/PKGBUILD
 
   release-windows:
     name: Build Windows Release

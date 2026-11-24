@@ -1,0 +1,12 @@
+[package]
+name = "curb-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+curb-core = { path = "../../curb-core" }
+curb-xdg = { path = "../xdg" }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

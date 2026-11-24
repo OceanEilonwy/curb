@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Curb
+GenericName=Application Firewall
+Comment=Block everything. Allow only what matters.
+Exec=/usr/bin/curb-app
+Icon=curb
+Terminal=false
+Categories=Network;Security;System;
+Keywords=firewall;internet;limiter;parental;nftables;
+StartupNotify=true
