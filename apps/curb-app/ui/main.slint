@@ -49,9 +49,12 @@ export component MainWindow inherits Window {
     title: "Curb";
     icon: @image-url("../icons/128x128.png");
     default-font-family: "Inter";
-    width: 480px;
-    height: 600px;
+    preferred-width: 480px;
+    preferred-height: 600px;
+    min-width: 400px;
+    min-height: 460px;
     no-frame: true;
+    resize-border-width: 6px;
     background: Theme.surface;
 
     // Top-level screen state:
@@ -285,20 +288,20 @@ export component MainWindow inherits Window {
 
                 WindowMoveArea {
                     width: 100%;
-                    height: 44px;
-                }
+                    height: 100%;
 
-                HorizontalLayout {
-                    alignment: center;
-                    spacing: 8px;
-                    cross-axis-alignment: center;
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        cross-axis-alignment: center;
 
-                    LoadingDots { color: Theme.text-sec; }
-                    Text {
-                        text: "Connecting to Curb…";
-                        color: Theme.text-sec;
-                        font-size: 12px;
-                        vertical-alignment: center;
+                        LoadingDots { color: Theme.text-sec; }
+                        Text {
+                            text: "Connecting to Curb…";
+                            color: Theme.text-sec;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }
@@ -326,245 +329,249 @@ export component MainWindow inherits Window {
                 Rectangle {
                     background: Theme.bg;
 
-                    WindowMoveArea {
-                        width: 100%;
-                        height: 46px;
-                    }
-
                     VerticalLayout {
-                        padding-left: 16px;
-                        padding-right: 16px;
-                        padding-top: 12px;
-                        padding-bottom: 12px;
-                        spacing: 10px;
+                        // Draggable Titlebar Row: Brand + Mode Pill + Lock/Close buttons
+                        WindowMoveArea {
+                            height: top-row.preferred-height;
 
-                        // Brand + Mode Pill + Lock/Close buttons
-                        HorizontalLayout {
-                            spacing: 8px;
-                            cross-axis-alignment: center;
-
-                            HorizontalLayout {
-                                horizontal-stretch: 1;
+                            top-row := HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                padding-top: 12px;
+                                padding-bottom: 10px;
                                 spacing: 8px;
-                                alignment: start;
                                 cross-axis-alignment: center;
 
-                                Rectangle {
-                                    width: 28px;
-                                    height: 28px;
-                                    border-radius: 8px;
-                                    background: root.mode-bg;
+                                HorizontalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 8px;
+                                    alignment: start;
+                                    cross-axis-alignment: center;
 
-                                    ShieldIcon {
-                                        mode: root.mode-kind;
-                                        color: root.mode-fg;
-                                        size: 15px;
-                                        x: (parent.width - self.width) / 2;
-                                        y: (parent.height - self.height) / 2;
+                                    Rectangle {
+                                        width: 28px;
+                                        height: 28px;
+                                        border-radius: 8px;
+                                        background: root.mode-bg;
+
+                                        ShieldIcon {
+                                            mode: root.mode-kind;
+                                            color: root.mode-fg;
+                                            size: 15px;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                    }
+
+                                    Text {
+                                        text: "Curb";
+                                        color: Theme.text;
+                                        font-size: 14px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Rectangle {
+                                        horizontal-stretch: 0;
+                                        height: 22px;
+                                        border-radius: 11px;
+                                        background: root.mode-bg;
+
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            cross-axis-alignment: center;
+
+                                            Text {
+                                                text: root.mode-label;
+                                                color: root.mode-fg;
+                                                font-size: 11.5px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                            }
+                                        }
                                     }
                                 }
 
-                                Text {
-                                    text: "Curb";
-                                    color: Theme.text;
-                                    font-size: 14px;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                }
-
+                                // Lock / Unlock button
                                 Rectangle {
                                     horizontal-stretch: 0;
-                                    height: 22px;
-                                    border-radius: 11px;
-                                    background: root.mode-bg;
+                                    height: 30px;
+                                    border-radius: 8px;
+                                    background: root.unlocked
+                                        ? Theme.amber-soft
+                                        : (lock-ta.has-hover && !root.locking && !root.hiding-to-tray ? Theme.card-hover : Theme.pill);
+                                    opacity: (root.locking || root.hiding-to-tray) ? 0.60 : 1.0;
 
                                     HorizontalLayout {
-                                        padding-left: 8px;
-                                        padding-right: 8px;
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 6px;
                                         cross-axis-alignment: center;
 
+                                        if root.locking: LoadingDots {
+                                            color: root.unlocked ? Theme.amber-text : Theme.text;
+                                            dot-size: 3px;
+                                        }
+                                        if !root.locking && root.unlocked: UnlockIcon {
+                                            color: Theme.amber-text;
+                                            size: 12px;
+                                        }
+                                        if !root.locking && !root.unlocked: LockIcon {
+                                            color: Theme.text;
+                                            size: 12px;
+                                        }
+
                                         Text {
-                                            text: root.mode-label;
-                                            color: root.mode-fg;
-                                            font-size: 11.5px;
+                                            text: root.locking
+                                                ? "Locking…"
+                                                : root.unlocked ? "Lock" : "Unlock";
+                                            color: root.unlocked ? Theme.amber-text : Theme.text;
+                                            font-size: 12px;
                                             font-weight: 600;
                                             vertical-alignment: center;
                                         }
                                     }
+
+                                    lock-ta := TouchArea {
+                                        enabled: !root.locking && !root.hiding-to-tray;
+                                        mouse-cursor: (!root.locking && !root.hiding-to-tray) ? pointer : default;
+                                        clicked => { root.toggle-lock-btn(); }
+                                    }
                                 }
-                            }
 
-                            // Lock / Unlock button
-                            Rectangle {
-                                horizontal-stretch: 0;
-                                height: 30px;
-                                border-radius: 8px;
-                                background: root.unlocked
-                                    ? Theme.amber-soft
-                                    : (lock-ta.has-hover && !root.locking && !root.hiding-to-tray ? Theme.card-hover : Theme.pill);
-                                opacity: (root.locking || root.hiding-to-tray) ? 0.60 : 1.0;
+                                // Hide to tray button
+                                Rectangle {
+                                    width: 32px;
+                                    height: 32px;
+                                    border-radius: 8px;
+                                    background: hide-ta.has-hover && !root.hiding-to-tray ? Theme.card : transparent;
+                                    opacity: root.hiding-to-tray ? 0.60 : 1.0;
 
-                                HorizontalLayout {
-                                    padding-left: 10px;
-                                    padding-right: 10px;
-                                    spacing: 6px;
-                                    cross-axis-alignment: center;
-
-                                    if root.locking: LoadingDots {
-                                        color: root.unlocked ? Theme.amber-text : Theme.text;
+                                    if root.hiding-to-tray: LoadingDots {
+                                        color: Theme.text-sec;
                                         dot-size: 3px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
                                     }
-                                    if !root.locking && root.unlocked: UnlockIcon {
-                                        color: Theme.amber-text;
-                                        size: 12px;
-                                    }
-                                    if !root.locking && !root.unlocked: LockIcon {
-                                        color: Theme.text;
-                                        size: 12px;
+                                    if !root.hiding-to-tray: CloseIcon {
+                                        color: Theme.text-sec;
+                                        size: 13px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
                                     }
 
-                                    Text {
-                                        text: root.locking
-                                            ? "Locking…"
-                                            : root.unlocked ? "Lock" : "Unlock";
-                                        color: root.unlocked ? Theme.amber-text : Theme.text;
-                                        font-size: 12px;
-                                        font-weight: 600;
-                                        vertical-alignment: center;
+                                    hide-ta := TouchArea {
+                                        enabled: !root.hiding-to-tray;
+                                        mouse-cursor: !root.hiding-to-tray ? pointer : default;
+                                        clicked => { root.close-to-tray(); }
                                     }
-                                }
-
-                                lock-ta := TouchArea {
-                                    enabled: !root.locking && !root.hiding-to-tray;
-                                    mouse-cursor: (!root.locking && !root.hiding-to-tray) ? pointer : default;
-                                    clicked => { root.toggle-lock-btn(); }
-                                }
-                            }
-
-                            // Hide to tray button
-                            Rectangle {
-                                width: 32px;
-                                height: 32px;
-                                border-radius: 8px;
-                                background: hide-ta.has-hover && !root.hiding-to-tray ? Theme.card : transparent;
-                                opacity: root.hiding-to-tray ? 0.60 : 1.0;
-
-                                if root.hiding-to-tray: LoadingDots {
-                                    color: Theme.text-sec;
-                                    dot-size: 3px;
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                }
-                                if !root.hiding-to-tray: CloseIcon {
-                                    color: Theme.text-sec;
-                                    size: 13px;
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                }
-
-                                hide-ta := TouchArea {
-                                    enabled: !root.hiding-to-tray;
-                                    mouse-cursor: !root.hiding-to-tray ? pointer : default;
-                                    clicked => { root.close-to-tray(); }
                                 }
                             }
                         }
 
                         // Segmented Tab Bar (Allowed | Blocked | Settings)
-                        Rectangle {
-                            height: 34px;
-                            border-radius: 8px;
-                            background: Theme.sub;
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            padding-bottom: 12px;
 
-                            HorizontalLayout {
-                                padding: 4px;
-                                spacing: 4px;
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 34px;
+                                border-radius: 8px;
+                                background: Theme.sub;
 
-                                // Allowed Tab
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: 6px;
-                                    background: root.active-tab == 0 ? Theme.surface : transparent;
+                                HorizontalLayout {
+                                    padding: 4px;
+                                    spacing: 4px;
 
-                                    Text {
-                                        text: "Allowed";
-                                        color: root.active-tab == 0 ? Theme.text : Theme.text-muted;
-                                        font-size: 12px;
-                                        font-weight: 600;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-
-                                    TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => { root.tab-selected(0); }
-                                    }
-                                }
-
-                                // Blocked Tab
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: 6px;
-                                    background: root.active-tab == 1 ? Theme.surface : transparent;
-
-                                    HorizontalLayout {
-                                        alignment: center;
-                                        spacing: 6px;
-                                        cross-axis-alignment: center;
+                                    // Allowed Tab
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        border-radius: 6px;
+                                        background: root.active-tab == 0 ? Theme.surface : transparent;
 
                                         Text {
-                                            text: "Blocked";
-                                            color: root.active-tab == 1 ? Theme.text : Theme.text-muted;
+                                            text: "Allowed";
+                                            color: root.active-tab == 0 ? Theme.text : Theme.text-muted;
                                             font-size: 12px;
                                             font-weight: 600;
+                                            horizontal-alignment: center;
                                             vertical-alignment: center;
                                         }
 
-                                        if root.blocked-events.length > 0: Rectangle {
-                                            height: 17px;
-                                            min-width: 18px;
-                                            border-radius: 8.5px;
-                                            background: Theme.red-soft;
-
-                                            HorizontalLayout {
-                                                padding-left: 5px;
-                                                padding-right: 5px;
-                                                cross-axis-alignment: center;
-                                                Text {
-                                                    text: root.blocked-events.length;
-                                                    color: Theme.red-text;
-                                                    font-size: 11px;
-                                                    font-weight: 700;
-                                                    vertical-alignment: center;
-                                                }
-                                            }
+                                        TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.tab-selected(0); }
                                         }
                                     }
 
-                                    TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => { root.tab-selected(1); }
+                                    // Blocked Tab
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        border-radius: 6px;
+                                        background: root.active-tab == 1 ? Theme.surface : transparent;
+
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            spacing: 6px;
+                                            cross-axis-alignment: center;
+
+                                            Text {
+                                                text: "Blocked";
+                                                color: root.active-tab == 1 ? Theme.text : Theme.text-muted;
+                                                font-size: 12px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                            }
+
+                                            if root.blocked-events.length > 0: Rectangle {
+                                                height: 17px;
+                                                min-width: 18px;
+                                                border-radius: 8.5px;
+                                                background: Theme.red-soft;
+
+                                                HorizontalLayout {
+                                                    padding-left: 5px;
+                                                    padding-right: 5px;
+                                                    cross-axis-alignment: center;
+                                                    Text {
+                                                        text: root.blocked-events.length;
+                                                        color: Theme.red-text;
+                                                        font-size: 11px;
+                                                        font-weight: 700;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.tab-selected(1); }
+                                        }
                                     }
-                                }
 
-                                // Settings Tab
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: 6px;
-                                    background: root.active-tab == 2 ? Theme.surface : transparent;
+                                    // Settings Tab
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        border-radius: 6px;
+                                        background: root.active-tab == 2 ? Theme.surface : transparent;
 
-                                    Text {
-                                        text: "Settings";
-                                        color: root.active-tab == 2 ? Theme.text : Theme.text-muted;
-                                        font-size: 12px;
-                                        font-weight: 600;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
+                                        Text {
+                                            text: "Settings";
+                                            color: root.active-tab == 2 ? Theme.text : Theme.text-muted;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
 
-                                    TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => { root.tab-selected(2); }
+                                        TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.tab-selected(2); }
+                                        }
                                     }
                                 }
                             }
@@ -765,6 +772,7 @@ export component MainWindow inherits Window {
             // Live Toast Banner
             if root.toast-message != "": ToastBanner {
                 message: root.toast-message;
+                max-toast-width: min(440px, parent.width - 32px);
                 x: (parent.width - self.width) / 2;
                 y: parent.height - self.height - 64px;
             }

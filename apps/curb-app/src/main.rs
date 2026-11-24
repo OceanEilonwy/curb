@@ -5,6 +5,7 @@ mod backend;
 mod elevate;
 mod ipc_client;
 mod local_mode;
+mod window_placement;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -13,6 +14,9 @@ use slint::ComponentHandle;
 
 use crate::app::{clear_active_controller, create_main_window, CurbTray, MainWindow};
 use crate::backend::CurbBackend;
+use crate::window_placement::{
+    focus_existing_window, place_after_show, prepare_before_show, SavedWindowGeometry,
+};
 
 fn main() {
     let demo_mode = std::env::args().any(|a| a == "--demo")
@@ -22,15 +26,17 @@ fn main() {
     backend.maybe_autostart_standard_proxy();
 
     let theme_dark_pref = Rc::new(Cell::new(true));
+    let last_geometry: Rc<RefCell<Option<SavedWindowGeometry>>> = Rc::new(RefCell::new(None));
     let active_window: Rc<RefCell<Option<(u64, MainWindow)>>> = Rc::new(RefCell::new(None));
 
     let open_or_focus: Rc<dyn Fn()> = {
         let backend = backend.clone();
         let theme_dark_pref = theme_dark_pref.clone();
+        let last_geometry = last_geometry.clone();
         let active_window = active_window.clone();
         Rc::new(move || {
             if let Some((_, existing)) = active_window.borrow().as_ref() {
-                let _ = existing.show();
+                focus_existing_window(existing);
                 return;
             }
 
@@ -39,9 +45,17 @@ fn main() {
                 *active_for_drop.borrow_mut() = None;
             });
 
-            match create_main_window(backend.clone(), theme_dark_pref.clone(), on_drop) {
+            let saved = *last_geometry.borrow();
+            match create_main_window(
+                backend.clone(),
+                theme_dark_pref.clone(),
+                last_geometry.clone(),
+                on_drop,
+            ) {
                 Ok((gen_id, win)) => {
+                    prepare_before_show(&win, saved);
                     let _ = win.show();
+                    place_after_show(&win, saved);
                     *active_window.borrow_mut() = Some((gen_id, win));
                 }
                 Err(e) => {

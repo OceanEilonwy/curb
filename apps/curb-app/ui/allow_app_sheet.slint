@@ -343,181 +343,185 @@ export component AllowAppSheet inherits Rectangle {
         Rectangle {
             background: Theme.bg;
 
-            WindowMoveArea {
-                width: 100%;
-                height: 44px;
-            }
-
             VerticalLayout {
-                padding-left: 16px;
-                padding-right: 16px;
-                padding-top: 12px;
-                padding-bottom: 12px;
-                spacing: 10px;
+                // Draggable Top Row: Back | Title | Refresh
+                WindowMoveArea {
+                    height: top-row.preferred-height;
 
-                // Top Row: Back | Title | Refresh
-                HorizontalLayout {
-                    cross-axis-alignment: center;
+                    top-row := HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 12px;
+                        padding-bottom: 10px;
+                        cross-axis-alignment: center;
 
+                        Rectangle {
+                            horizontal-stretch: 0;
+                            height: 28px;
+                            border-radius: 6px;
+                            background: back-ta.has-hover && !root.saving ? Theme.card : transparent;
+                            opacity: root.saving ? 0.55 : 1.0;
+
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                padding-right: 8px;
+                                spacing: 4px;
+                                cross-axis-alignment: center;
+
+                                BackIcon {
+                                    color: Theme.text-sec;
+                                    size: 15px;
+                                }
+                                Text {
+                                    text: "Back";
+                                    color: Theme.text-sec;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            back-ta := TouchArea {
+                                enabled: !root.saving;
+                                mouse-cursor: root.saving ? default : pointer;
+                                clicked => { root.cancel(); }
+                            }
+                        }
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "Allow an App or Game";
+                            color: Theme.text;
+                            font-size: 14px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            width: 30px;
+                            height: 30px;
+                            border-radius: 6px;
+                            background: ref-ta.has-hover && !root.is-refreshing && !root.saving ? Theme.card : transparent;
+                            opacity: (root.is-refreshing || root.saving) ? 0.60 : 1.0;
+
+                            if root.is-refreshing: LoadingDots {
+                                color: Theme.text-sec;
+                                dot-size: 3.5px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                            if !root.is-refreshing: RefreshIcon {
+                                color: Theme.text-sec;
+                                size: 14px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+
+                            ref-ta := TouchArea {
+                                enabled: !root.is-refreshing && !root.saving;
+                                mouse-cursor: (!root.is-refreshing && !root.saving) ? pointer : default;
+                                clicked => { root.refresh(); }
+                            }
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-bottom: 12px;
+                    spacing: 10px;
+
+                    // Segmented tab: Running Apps | Steam Games
                     Rectangle {
-                        horizontal-stretch: 0;
-                        height: 28px;
-                        border-radius: 6px;
-                        background: back-ta.has-hover && !root.saving ? Theme.card : transparent;
-                        opacity: root.saving ? 0.55 : 1.0;
+                        height: 34px;
+                        border-radius: 8px;
+                        background: Theme.sub;
 
                         HorizontalLayout {
-                            padding-left: 4px;
-                            padding-right: 8px;
+                            padding: 4px;
                             spacing: 4px;
-                            cross-axis-alignment: center;
 
-                            BackIcon {
-                                color: Theme.text-sec;
-                                size: 15px;
-                            }
-                            Text {
-                                text: "Back";
-                                color: Theme.text-sec;
-                                font-size: 12px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-                        }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                border-radius: 6px;
+                                background: root.source-tab == 0 ? Theme.surface : transparent;
 
-                        back-ta := TouchArea {
-                            enabled: !root.saving;
-                            mouse-cursor: root.saving ? default : pointer;
-                            clicked => { root.cancel(); }
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: 6px;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: "Running Apps";
+                                        color: root.source-tab == 0 ? Theme.text : Theme.text-muted;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                    if root.loading-running: LoadingDots {
+                                        color: Theme.text-muted;
+                                        dot-size: 3px;
+                                    }
+                                }
+
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.source-tab = 0; }
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                border-radius: 6px;
+                                background: root.source-tab == 1 ? Theme.surface : transparent;
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: 6px;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: "Steam Games";
+                                        color: root.source-tab == 1 ? Theme.text : Theme.text-muted;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                    if root.loading-steam: LoadingDots {
+                                        color: Theme.text-muted;
+                                        dot-size: 3px;
+                                    }
+                                }
+
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.source-tab = 1; }
+                                }
+                            }
                         }
                     }
 
-                    Text {
-                        horizontal-stretch: 1;
-                        text: "Allow an App or Game";
-                        color: Theme.text;
-                        font-size: 14px;
-                        font-weight: 600;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-
+                    // Search input
                     Rectangle {
-                        width: 30px;
-                        height: 30px;
-                        border-radius: 6px;
-                        background: ref-ta.has-hover && !root.is-refreshing && !root.saving ? Theme.card : transparent;
-                        opacity: (root.is-refreshing || root.saving) ? 0.60 : 1.0;
+                        height: 34px;
+                        background: transparent;
 
-                        if root.is-refreshing: LoadingDots {
-                            color: Theme.text-sec;
-                            dot-size: 3.5px;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
+                        CurbInput {
+                            width: 100%;
+                            height: 100%;
+                            text <=> root.search-text;
+                            fill-color: Theme.sub;
+                            leading-padding: 32px;
+                            placeholder: root.source-tab == 0 ? "Search running apps…" : "Search installed Steam games…";
+                            edited(q) => { root.search-changed(q); }
                         }
-                        if !root.is-refreshing: RefreshIcon {
-                            color: Theme.text-sec;
+
+                        SearchIcon {
+                            x: 10px;
+                            y: (parent.height - self.height) / 2;
+                            color: Theme.text-muted;
                             size: 14px;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
                         }
-
-                        ref-ta := TouchArea {
-                            enabled: !root.is-refreshing && !root.saving;
-                            mouse-cursor: (!root.is-refreshing && !root.saving) ? pointer : default;
-                            clicked => { root.refresh(); }
-                        }
-                    }
-                }
-
-                // Segmented tab: Running Apps | Steam Games
-                Rectangle {
-                    height: 34px;
-                    border-radius: 8px;
-                    background: Theme.sub;
-
-                    HorizontalLayout {
-                        padding: 4px;
-                        spacing: 4px;
-
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            border-radius: 6px;
-                            background: root.source-tab == 0 ? Theme.surface : transparent;
-
-                            HorizontalLayout {
-                                alignment: center;
-                                spacing: 6px;
-                                cross-axis-alignment: center;
-                                Text {
-                                    text: "Running Apps";
-                                    color: root.source-tab == 0 ? Theme.text : Theme.text-muted;
-                                    font-size: 12px;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                }
-                                if root.loading-running: LoadingDots {
-                                    color: Theme.text-muted;
-                                    dot-size: 3px;
-                                }
-                            }
-
-                            TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.source-tab = 0; }
-                            }
-                        }
-
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            border-radius: 6px;
-                            background: root.source-tab == 1 ? Theme.surface : transparent;
-
-                            HorizontalLayout {
-                                alignment: center;
-                                spacing: 6px;
-                                cross-axis-alignment: center;
-                                Text {
-                                    text: "Steam Games";
-                                    color: root.source-tab == 1 ? Theme.text : Theme.text-muted;
-                                    font-size: 12px;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                }
-                                if root.loading-steam: LoadingDots {
-                                    color: Theme.text-muted;
-                                    dot-size: 3px;
-                                }
-                            }
-
-                            TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.source-tab = 1; }
-                            }
-                        }
-                    }
-                }
-
-                // Search input
-                Rectangle {
-                    height: 34px;
-                    background: transparent;
-
-                    CurbInput {
-                        width: 100%;
-                        height: 100%;
-                        text <=> root.search-text;
-                        fill-color: Theme.sub;
-                        leading-padding: 32px;
-                        placeholder: root.source-tab == 0 ? "Search running apps…" : "Search installed Steam games…";
-                        edited(q) => { root.search-changed(q); }
-                    }
-
-                    SearchIcon {
-                        x: 10px;
-                        y: (parent.height - self.height) / 2;
-                        color: Theme.text-muted;
-                        size: 14px;
                     }
                 }
             }
