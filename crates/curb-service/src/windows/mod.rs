@@ -41,7 +41,7 @@ mod runtime {
 
     /// How often to re-apply adapter DNS redirection so newly connected / reconnected
     /// adapters (e.g. Wi-Fi roaming) keep resolving through Curb instead of losing DNS.
-    const DNS_REDIRECT_REFRESH: Duration = Duration::from_secs(60);
+    const DNS_REDIRECT_REFRESH: Duration = Duration::from_secs(300);
     /// Back-off before retrying a failed adapter DNS redirect.
     const DNS_REDIRECT_RETRY: Duration = Duration::from_secs(15);
     /// How often to refresh Microsoft NCSI probe IPs (well under their 600s cache TTL floor)
@@ -283,7 +283,7 @@ mod runtime {
     /// Fast-path WFP update for DNS-scoped app groups (e.g. `steamwebhelper.exe`) and
     /// Windows NCSI probes when a new DNS answer arrives, skipping process enumeration.
     fn sync_dns_scoped_filters(engine: &ServiceEngine, wfp: &WfpController, st: &mut LoopState) {
-        let (updates, ncsi_ips) = {
+        let (updates, ncsi_enabled, ncsi_ips) = {
             let guard = engine.state.lock().unwrap();
             let mut updates = Vec::new();
             for (key, g) in &st.groups {
@@ -294,7 +294,11 @@ mod runtime {
                     }
                 }
             }
-            (updates, guard.ncsi_allowed_ips())
+            (
+                updates,
+                guard.config.baseline.ncsi,
+                guard.ncsi_allowed_ips(),
+            )
         };
 
         for (key, new_ips) in updates {
@@ -315,31 +319,51 @@ mod runtime {
             }
         }
 
-        if st.ncsi_ips.as_ref() != Some(&ncsi_ips) {
-            let svchost = system32_path("svchost.exe");
-            let res = if ncsi_ips.is_empty() {
-                wfp.remove_dynamic_filters(&st.ncsi_filter_ids);
-                Ok(Vec::new())
-            } else {
-                wfp.replace_app_dynamic(
-                    &st.ncsi_filter_ids,
-                    &svchost,
-                    &NetworkPolicy {
-                        allow_tcp: true,
-                        allow_udp: false,
-                        dns_whitelist: None,
-                    },
-                    Some(&ncsi_ips),
-                    Some(80),
-                )
-            };
-            match res {
-                Ok(ids) => {
-                    st.ncsi_filter_ids = ids;
-                    st.ncsi_ips = Some(ncsi_ips);
-                }
-                Err(e) => warn!("Failed fast-path NCSI WFP update: {e}"),
+        update_ncsi_filters(wfp, st, ncsi_enabled, ncsi_ips);
+    }
+
+    /// Updates dynamic WFP permit filters for Windows NCSI (`svchost.exe` / `NlaSvc`)
+    /// on TCP 80 and TCP 443 to resolved Microsoft connectivity-check IPs.
+    /// While `ncsi_enabled` is true, keeps existing NCSI permit filters pinned if the
+    /// cache momentarily empties between refreshes rather than tearing them down.
+    fn update_ncsi_filters(
+        wfp: &WfpController,
+        st: &mut LoopState,
+        ncsi_enabled: bool,
+        ncsi_ips: Vec<IpAddr>,
+    ) {
+        let should_update = if !ncsi_enabled {
+            !st.ncsi_filter_ids.is_empty() || st.ncsi_ips.as_ref().is_some_and(|v| !v.is_empty())
+        } else {
+            !ncsi_ips.is_empty() && st.ncsi_ips.as_ref() != Some(&ncsi_ips)
+        };
+        if !should_update {
+            return;
+        }
+
+        let svchost = system32_path("svchost.exe");
+        let res = if !ncsi_enabled {
+            wfp.remove_dynamic_filters(&st.ncsi_filter_ids);
+            Ok(Vec::new())
+        } else {
+            wfp.replace_app_dynamic_ports(
+                &st.ncsi_filter_ids,
+                &svchost,
+                &NetworkPolicy {
+                    allow_tcp: true,
+                    allow_udp: false,
+                    dns_whitelist: None,
+                },
+                Some(&ncsi_ips),
+                &[80, 443],
+            )
+        };
+        match res {
+            Ok(ids) => {
+                st.ncsi_filter_ids = ids;
+                st.ncsi_ips = Some(if ncsi_enabled { ncsi_ips } else { Vec::new() });
             }
+            Err(e) => warn!("Failed to apply NCSI connectivity-check WFP filters: {e}"),
         }
     }
 
@@ -577,41 +601,9 @@ mod runtime {
         }
 
         // Windows NCSI: allow the Network List Service (svchost.exe) to reach the
-        // resolved Microsoft connectivity-check hosts on TCP 80 so Windows does not
+        // resolved Microsoft connectivity-check hosts on TCP 80 & 443 so Windows does not
         // flag Wi-Fi as "No Internet" and bounce the connection.
-        // While baseline.ncsi is enabled, keep existing NCSI permit filters pinned
-        // if the cache momentarily empties between refreshes rather than tearing them down.
-        let should_update_ncsi = if !ncsi_enabled {
-            !st.ncsi_filter_ids.is_empty() || st.ncsi_ips.as_ref().is_some_and(|v| !v.is_empty())
-        } else {
-            !ncsi_ips.is_empty() && st.ncsi_ips.as_ref() != Some(&ncsi_ips)
-        };
-        if should_update_ncsi {
-            let svchost = system32_path("svchost.exe");
-            let res = if !ncsi_enabled {
-                wfp.remove_dynamic_filters(&st.ncsi_filter_ids);
-                Ok(Vec::new())
-            } else {
-                wfp.replace_app_dynamic(
-                    &st.ncsi_filter_ids,
-                    &svchost,
-                    &NetworkPolicy {
-                        allow_tcp: true,
-                        allow_udp: false,
-                        dns_whitelist: None,
-                    },
-                    Some(&ncsi_ips),
-                    Some(80),
-                )
-            };
-            match res {
-                Ok(ids) => {
-                    st.ncsi_filter_ids = ids;
-                    st.ncsi_ips = Some(if ncsi_enabled { ncsi_ips } else { Vec::new() });
-                }
-                Err(e) => warn!("Failed to apply NCSI connectivity-check WFP filters: {e}"),
-            }
-        }
+        update_ncsi_filters(wfp, st, ncsi_enabled, ncsi_ips);
 
         // Poll recent WFP classify-drop events so blocked apps appear in the UI's
         // "Recently blocked" feed and Running Apps picker with their real exe path.

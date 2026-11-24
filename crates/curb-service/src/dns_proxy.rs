@@ -169,9 +169,13 @@ async fn handle_tcp_client(
 pub async fn prewarm_ncsi_dns(engine: &ServiceEngine, fallback_upstream: SocketAddr) {
     let probes = [
         ("www.msftconnecttest.com.", RecordType::A),
+        ("www.msftconnecttest.com.", RecordType::AAAA),
         ("www.msftncsi.com.", RecordType::A),
+        ("www.msftncsi.com.", RecordType::AAAA),
         ("ipv6.msftconnecttest.com.", RecordType::AAAA),
         ("ipv6.msftncsi.com.", RecordType::AAAA),
+        ("dns.msftncsi.com.", RecordType::A),
+        ("dns.msftncsi.com.", RecordType::AAAA),
     ];
     for (idx, (host, rtype)) in probes.iter().enumerate() {
         let Ok(name) = Name::from_utf8(*host) else {

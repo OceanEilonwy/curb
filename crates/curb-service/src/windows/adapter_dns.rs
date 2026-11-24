@@ -44,20 +44,30 @@ pub fn enable_local_dns_redirect(
 
     // Set IPv4 and IPv6 DNS in separate calls because MSFT_DNSClientServerAddress
     // has distinct per-family CIM instances and rejects mixed IPv4+IPv6 arrays.
+    // Only touch IPv6 DNS on adapters that actually have a routable (non-link-local)
+    // IPv6 address, and only flush the DNS cache if a Set-DnsClientServerAddress call
+    // actually succeeded—otherwise IPv4-only or virtual adapters trigger Clear-DnsClientCache
+    // on every refresh cycle and cause Windows NCSI to flap to "No Internet".
     let ps = if include_ipv6 {
         r#"
             $changed = $false
             Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
                 $idx = $_.ifIndex
-                $v4 = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses })
-                if (-not (($v4.Count -eq 1) -and ($v4[0] -eq '127.0.0.1'))) {
-                    Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ('127.0.0.1') -ErrorAction SilentlyContinue
-                    $changed = $true
+                $hasV4 = @(Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' }).Count -gt 0
+                if ($hasV4) {
+                    $v4 = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses })
+                    if (-not (($v4.Count -eq 1) -and ($v4[0] -eq '127.0.0.1'))) {
+                        Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ('127.0.0.1') -ErrorAction SilentlyContinue
+                        if ($?) { $changed = $true }
+                    }
                 }
-                $v6 = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv6 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses })
-                if (-not (($v6.Count -eq 1) -and ($v6[0] -eq '::1'))) {
-                    Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ('::1') -ErrorAction SilentlyContinue
-                    $changed = $true
+                $hasRoutableV6 = @(Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike 'fe80:*' -and $_.IPAddress -ne '::1' }).Count -gt 0
+                if ($hasRoutableV6) {
+                    $v6 = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv6 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses })
+                    if (-not (($v6.Count -eq 1) -and ($v6[0] -eq '::1'))) {
+                        Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ('::1') -ErrorAction SilentlyContinue
+                        if ($?) { $changed = $true }
+                    }
                 }
             }
             if ($changed) {
@@ -69,10 +79,13 @@ pub fn enable_local_dns_redirect(
             $changed = $false
             Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
                 $idx = $_.ifIndex
-                $v4 = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses })
-                if (-not (($v4.Count -eq 1) -and ($v4[0] -eq '127.0.0.1'))) {
-                    Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ('127.0.0.1') -ErrorAction SilentlyContinue
-                    $changed = $true
+                $hasV4 = @(Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' }).Count -gt 0
+                if ($hasV4) {
+                    $v4 = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses })
+                    if (-not (($v4.Count -eq 1) -and ($v4[0] -eq '127.0.0.1'))) {
+                        Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ('127.0.0.1') -ErrorAction SilentlyContinue
+                        if ($?) { $changed = $true }
+                    }
                 }
             }
             if ($changed) {

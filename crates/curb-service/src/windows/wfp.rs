@@ -310,6 +310,26 @@ impl WfpController {
         allowed_ips: Option<&[IpAddr]>,
         fixed_remote_port: Option<u16>,
     ) -> Result<Vec<u64>, String> {
+        let ports = fixed_remote_port.map(|p| [p]);
+        self.replace_app_dynamic_ports(
+            old_ids,
+            exe_path,
+            network,
+            allowed_ips,
+            ports.as_ref().map_or(&[], |p| p.as_slice()),
+        )
+    }
+
+    /// Atomically replaces `old_ids` with dynamic `PERMIT` filters for `exe_path`,
+    /// optionally scoped to one or more `fixed_remote_ports` (e.g. TCP 80 & 443 for NCSI).
+    pub fn replace_app_dynamic_ports(
+        &self,
+        old_ids: &[u64],
+        exe_path: &Path,
+        network: &NetworkPolicy,
+        allowed_ips: Option<&[IpAddr]>,
+        fixed_remote_ports: &[u16],
+    ) -> Result<Vec<u64>, String> {
         let app_blob = get_app_id_blob(exe_path)?;
         let mut protos = Vec::new();
         if network.allow_tcp {
@@ -318,6 +338,12 @@ impl WfpController {
         if network.allow_udp {
             protos.push(IPPROTO_UDP);
         }
+
+        let port_opts: Vec<Option<u16>> = if fixed_remote_ports.is_empty() {
+            vec![None]
+        } else {
+            fixed_remote_ports.iter().copied().map(Some).collect()
+        };
 
         let app_cond = FWPM_FILTER_CONDITION0 {
             fieldKey: FWPM_CONDITION_ALE_APP_ID,
@@ -337,85 +363,91 @@ impl WfpController {
             }
 
             for &proto in &protos {
-                match allowed_ips {
-                    None => {
-                        let mut conds = vec![app_cond, proto_condition(proto)];
-                        if let Some(port) = fixed_remote_port {
-                            conds.push(remote_port_condition(port));
+                for &fixed_port in &port_opts {
+                    match allowed_ips {
+                        None => {
+                            let mut conds = vec![app_cond, proto_condition(proto)];
+                            if let Some(port) = fixed_port {
+                                conds.push(remote_port_condition(port));
+                            }
+                            for layer in [
+                                FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+                                FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+                            ] {
+                                let id = self.add_filter(
+                                    self.dynamic_engine,
+                                    layer,
+                                    "Curb Dynamic App Allow",
+                                    FWP_ACTION_PERMIT,
+                                    15,
+                                    Default::default(),
+                                    &conds,
+                                )?;
+                                ids.push(id);
+                            }
                         }
-                        for layer in [
-                            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-                            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-                        ] {
-                            let id = self.add_filter(
-                                self.dynamic_engine,
-                                layer,
-                                "Curb Dynamic App Allow",
-                                FWP_ACTION_PERMIT,
-                                15,
-                                Default::default(),
-                                &conds,
-                            )?;
-                            ids.push(id);
-                        }
-                    }
-                    Some(ips) => {
-                        for &ip in ips {
-                            match ip {
-                                IpAddr::V4(v4) => {
-                                    let ip_u32 = u32::from(v4);
-                                    let ip_cond = FWPM_FILTER_CONDITION0 {
-                                        fieldKey: FWPM_CONDITION_IP_REMOTE_ADDRESS,
-                                        matchType: FWP_MATCH_EQUAL,
-                                        conditionValue: FWP_CONDITION_VALUE0 {
-                                            r#type: FWP_UINT32,
-                                            Anonymous: FWP_CONDITION_VALUE0_0 { uint32: ip_u32 },
-                                        },
-                                    };
-                                    let mut conds = vec![app_cond, proto_condition(proto), ip_cond];
-                                    if let Some(port) = fixed_remote_port {
-                                        conds.push(remote_port_condition(port));
-                                    }
-                                    if let Ok(id) = self.add_filter(
-                                        self.dynamic_engine,
-                                        FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-                                        "Curb Dynamic DNS-Scoped Allow v4",
-                                        FWP_ACTION_PERMIT,
-                                        15,
-                                        Default::default(),
-                                        &conds,
-                                    ) {
-                                        ids.push(id);
-                                    }
-                                }
-                                IpAddr::V6(v6) => {
-                                    let mut arr = FWP_BYTE_ARRAY16 {
-                                        byteArray16: v6.octets(),
-                                    };
-                                    let ip_cond = FWPM_FILTER_CONDITION0 {
-                                        fieldKey: FWPM_CONDITION_IP_REMOTE_ADDRESS,
-                                        matchType: FWP_MATCH_EQUAL,
-                                        conditionValue: FWP_CONDITION_VALUE0 {
-                                            r#type: FWP_BYTE_ARRAY16_TYPE,
-                                            Anonymous: FWP_CONDITION_VALUE0_0 {
-                                                byteArray16: &mut arr,
+                        Some(ips) => {
+                            for &ip in ips {
+                                match ip {
+                                    IpAddr::V4(v4) => {
+                                        let ip_u32 = u32::from(v4);
+                                        let ip_cond = FWPM_FILTER_CONDITION0 {
+                                            fieldKey: FWPM_CONDITION_IP_REMOTE_ADDRESS,
+                                            matchType: FWP_MATCH_EQUAL,
+                                            conditionValue: FWP_CONDITION_VALUE0 {
+                                                r#type: FWP_UINT32,
+                                                Anonymous: FWP_CONDITION_VALUE0_0 {
+                                                    uint32: ip_u32,
+                                                },
                                             },
-                                        },
-                                    };
-                                    let mut conds = vec![app_cond, proto_condition(proto), ip_cond];
-                                    if let Some(port) = fixed_remote_port {
-                                        conds.push(remote_port_condition(port));
+                                        };
+                                        let mut conds =
+                                            vec![app_cond, proto_condition(proto), ip_cond];
+                                        if let Some(port) = fixed_port {
+                                            conds.push(remote_port_condition(port));
+                                        }
+                                        if let Ok(id) = self.add_filter(
+                                            self.dynamic_engine,
+                                            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+                                            "Curb Dynamic DNS-Scoped Allow v4",
+                                            FWP_ACTION_PERMIT,
+                                            15,
+                                            Default::default(),
+                                            &conds,
+                                        ) {
+                                            ids.push(id);
+                                        }
                                     }
-                                    if let Ok(id) = self.add_filter(
-                                        self.dynamic_engine,
-                                        FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-                                        "Curb Dynamic DNS-Scoped Allow v6",
-                                        FWP_ACTION_PERMIT,
-                                        15,
-                                        Default::default(),
-                                        &conds,
-                                    ) {
-                                        ids.push(id);
+                                    IpAddr::V6(v6) => {
+                                        let mut arr = FWP_BYTE_ARRAY16 {
+                                            byteArray16: v6.octets(),
+                                        };
+                                        let ip_cond = FWPM_FILTER_CONDITION0 {
+                                            fieldKey: FWPM_CONDITION_IP_REMOTE_ADDRESS,
+                                            matchType: FWP_MATCH_EQUAL,
+                                            conditionValue: FWP_CONDITION_VALUE0 {
+                                                r#type: FWP_BYTE_ARRAY16_TYPE,
+                                                Anonymous: FWP_CONDITION_VALUE0_0 {
+                                                    byteArray16: &mut arr,
+                                                },
+                                            },
+                                        };
+                                        let mut conds =
+                                            vec![app_cond, proto_condition(proto), ip_cond];
+                                        if let Some(port) = fixed_port {
+                                            conds.push(remote_port_condition(port));
+                                        }
+                                        if let Ok(id) = self.add_filter(
+                                            self.dynamic_engine,
+                                            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+                                            "Curb Dynamic DNS-Scoped Allow v6",
+                                            FWP_ACTION_PERMIT,
+                                            15,
+                                            Default::default(),
+                                            &conds,
+                                        ) {
+                                            ids.push(id);
+                                        }
                                     }
                                 }
                             }
@@ -427,7 +459,7 @@ impl WfpController {
             // Permit Media Router / Cast LAN multicast discovery (SSDP + mDNS) for
             // DNS-scoped apps with UDP enabled (such as `steamwebhelper.exe`), without
             // opening arbitrary UDP destinations.
-            if allowed_ips.is_some() && network.allow_udp && fixed_remote_port.is_none() {
+            if allowed_ips.is_some() && network.allow_udp && fixed_remote_ports.is_empty() {
                 for (v4, port, label) in [
                     (
                         Ipv4Addr::new(239, 255, 255, 250),
