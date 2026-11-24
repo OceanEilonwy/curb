@@ -865,8 +865,11 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::path::PathBuf;
 
+    static WFP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn wfp_dynamic_permit_filters_install_replace_and_remove_cleanly() {
+        let _guard = WFP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let ctrl = WfpController::open().expect("open WFP controller as Administrator");
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
         let target_exe = PathBuf::from(root).join("System32").join("notepad.exe");
@@ -902,6 +905,26 @@ mod tests {
 
         // 4. Clean removal
         ctrl.remove_dynamic_filters(&media_router_ids);
+        drop(ctrl);
+        let _ = curb_core::cleanup::purge_all_curb_wfp_objects();
+    }
+
+    #[test]
+    fn install_default_deny_and_baseline_permits_only_service_exe_on_port_53() {
+        let _guard = WFP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ctrl = WfpController::open().expect("open WFP controller as Administrator");
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let service_exe = PathBuf::from(root).join("System32").join("notepad.exe");
+        assert!(service_exe.exists(), "notepad.exe must exist on Windows");
+
+        ctrl.install_default_deny_and_baseline(&BaselinePolicy::default(), Some(&service_exe))
+            .expect("install default-deny and baseline filters");
+
+        // Only `service_exe` (not `svchost.exe`) receives external port-53 permits:
+        // IPv4/IPv6 x TCP/UDP = 4 filters.
+        assert_eq!(ctrl.service_dns_filter_ids.len(), 4);
+
+        ctrl.clear_persistent_filters();
         drop(ctrl);
         let _ = curb_core::cleanup::purge_all_curb_wfp_objects();
     }

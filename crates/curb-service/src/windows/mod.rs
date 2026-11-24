@@ -908,4 +908,30 @@ mod runtime {
             norm.starts_with(&prefix)
         })
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::is_admin_protected_path;
+
+        #[test]
+        fn admin_protected_path_excludes_user_writable_and_prefix_collisions() {
+            assert!(is_admin_protected_path(
+                r"C:\Program Files\Mozilla Firefox\firefox.exe"
+            ));
+            assert!(is_admin_protected_path(
+                r"C:\Program Files (x86)\Steam\steam.exe"
+            ));
+            assert!(is_admin_protected_path(r"C:\Windows\System32\svchost.exe"));
+
+            assert!(!is_admin_protected_path(
+                r"C:\Users\alice\AppData\Local\Programs\signal-desktop\Signal.exe"
+            ));
+            assert!(!is_admin_protected_path(
+                r"D:\SteamLibrary\steamapps\common\DRG\game.exe"
+            ));
+            assert!(!is_admin_protected_path(
+                r"C:\Program Files Evil\fake.exe"
+            ));
+        }
+    }
 }

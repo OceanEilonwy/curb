@@ -196,4 +196,28 @@ mod tests {
         };
         assert!(cfg.expand_rules().is_empty());
     }
+
+    #[test]
+    fn steam_webhelper_domains_deduplicates_overlapping_entries() {
+        let cfg = SteamPresetConfig {
+            enabled: true,
+            store_and_library: true,
+            community_and_workshop: true,
+            friends_and_voice: true,
+        };
+        let domains = cfg.webhelper_domains();
+        let steamserver_count = domains
+            .iter()
+            .filter(|d| d.eq_ignore_ascii_case("*.steamserver.net"))
+            .count();
+        assert_eq!(steamserver_count, 1);
+
+        let mut unique = std::collections::HashSet::new();
+        for d in &domains {
+            assert!(
+                unique.insert(d.to_ascii_lowercase()),
+                "duplicate domain in webhelper_domains: {d}"
+            );
+        }
+    }
 }

@@ -535,4 +535,158 @@ mod tests {
         mock_task.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn handle_dns_packet_waits_for_wfp_sync_before_returning_reply() {
+        let dir = std::env::temp_dir().join(format!("curb_dns_wfp_sync_{}", Uuid::new_v4()));
+        let engine = ServiceEngine::new(dir.clone()).unwrap();
+        engine.set_wfp_loop_active(true);
+
+        let mock_upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = mock_upstream.local_addr().unwrap();
+        let mock_task = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            while let Ok((len, peer)) = mock_upstream.recv_from(&mut buf).await {
+                if let Ok(req) = Message::from_vec(&buf[..len]) {
+                    let mut resp = Message::new();
+                    resp.set_id(req.id());
+                    resp.set_message_type(MessageType::Response);
+                    resp.set_recursion_desired(true);
+                    resp.set_recursion_available(true);
+                    for q in req.queries() {
+                        resp.add_query(q.clone());
+                        resp.add_answer(Record::from_rdata(
+                            q.name().clone(),
+                            60,
+                            RData::A(A(Ipv4Addr::new(198, 51, 100, 99))),
+                        ));
+                    }
+                    if let Ok(bytes) = resp.to_vec() {
+                        let _ = mock_upstream.send_to(&bytes, peer).await;
+                    }
+                }
+            }
+        });
+
+        let applied_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let applied_bg = applied_flag.clone();
+        let eng_bg = engine.clone();
+        let sync_task = tokio::spawn(async move {
+            eng_bg.reconcile_notify.notified().await;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let ver = eng_bg.state.lock().unwrap().dns_cache.version();
+            applied_bg.store(true, std::sync::atomic::Ordering::Release);
+            eng_bg.mark_wfp_dns_applied(ver);
+        });
+
+        let mut q = Message::new();
+        q.set_id(0x2222);
+        q.set_message_type(MessageType::Query);
+        q.add_query(Query::query(
+            Name::from_utf8("store.steampowered.com.").unwrap(),
+            RecordType::A,
+        ));
+
+        let resp = handle_dns_packet(&engine, &q.to_vec().unwrap(), upstream_addr, false)
+            .await
+            .expect("DNS response after WFP sync");
+        assert!(
+            applied_flag.load(std::sync::atomic::Ordering::Acquire),
+            "handle_dns_packet returned before WFP filters were marked applied"
+        );
+        let parsed = Message::from_vec(&resp).unwrap();
+        assert_eq!(parsed.response_code(), ResponseCode::NoError);
+
+        sync_task.await.unwrap();
+        mock_task.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn udp_proxy_survives_client_disconnect_and_respects_concurrency_cap() {
+        let dir = std::env::temp_dir().join(format!("curb_dns_udp_resil_{}", Uuid::new_v4()));
+        let engine = ServiceEngine::new(dir.clone()).unwrap();
+
+        let mock_upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = mock_upstream.local_addr().unwrap();
+        let mock_task = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            while let Ok((len, peer)) = mock_upstream.recv_from(&mut buf).await {
+                if let Ok(req) = Message::from_vec(&buf[..len]) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    let mut resp = Message::new();
+                    resp.set_id(req.id());
+                    resp.set_message_type(MessageType::Response);
+                    resp.set_recursion_desired(true);
+                    resp.set_recursion_available(true);
+                    for q in req.queries() {
+                        resp.add_query(q.clone());
+                        resp.add_answer(Record::from_rdata(
+                            q.name().clone(),
+                            60,
+                            RData::A(A(Ipv4Addr::new(203, 0, 113, 77))),
+                        ));
+                    }
+                    if let Ok(bytes) = resp.to_vec() {
+                        let _ = mock_upstream.send_to(&bytes, peer).await;
+                    }
+                }
+            }
+        });
+
+        let proxy_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let proxy_addr = proxy_sock.local_addr().unwrap();
+        let permits = Arc::new(tokio::sync::Semaphore::new(2));
+        let loop_task = tokio::spawn(run_udp_loop(
+            proxy_sock,
+            engine.clone(),
+            upstream_addr,
+            permits.clone(),
+        ));
+
+        let mut q = Message::new();
+        q.set_id(0x3333);
+        q.set_message_type(MessageType::Query);
+        q.add_query(Query::query(
+            Name::from_utf8("store.steampowered.com.").unwrap(),
+            RecordType::A,
+        ));
+        let pkt = q.to_vec().unwrap();
+
+        // 1. Client sends a query and immediately drops its socket before reply arrives
+        //    (triggers ICMP Port Unreachable / WSAECONNRESET on Windows).
+        {
+            let ephemeral = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            ephemeral.send_to(&pkt, proxy_addr).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        // 2. When concurrency permits are exhausted, burst packets are dropped without crashing.
+        let held = permits.acquire_many(2).await.unwrap();
+        let saturated_client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        saturated_client.send_to(&pkt, proxy_addr).await.unwrap();
+        let mut drop_buf = [0u8; 512];
+        let timed_out = tokio::time::timeout(
+            Duration::from_millis(60),
+            saturated_client.recv(&mut drop_buf),
+        )
+        .await;
+        assert!(timed_out.is_err(), "expected burst packet to be dropped when saturated");
+        drop(held);
+
+        // 3. Subsequent normal query still succeeds cleanly.
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.send_to(&pkt, proxy_addr).await.unwrap();
+        let mut resp_buf = [0u8; 2048];
+        let n = tokio::time::timeout(Duration::from_secs(2), client.recv(&mut resp_buf))
+            .await
+            .expect("proxy reply timeout")
+            .expect("proxy recv");
+        let parsed = Message::from_vec(&resp_buf[..n]).unwrap();
+        assert_eq!(parsed.response_code(), ResponseCode::NoError);
+
+        loop_task.abort();
+        mock_task.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

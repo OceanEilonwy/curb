@@ -218,4 +218,36 @@ mod tests {
         assert!(allowed.contains(&v6));
         assert!(!allowed.contains(&other));
     }
+
+    #[test]
+    fn dns_cache_enforces_ttl_floor_and_bounds_auxiliary_maps() {
+        let mut cache = DnsCache::new();
+        let zero_ttl_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+
+        // Even with ttl_secs = 0, the 300s minimum TTL floor keeps the IP valid.
+        assert!(cache.record("store.steampowered.com", &[zero_ttl_ip], 0));
+        assert!(!cache.prune_expired());
+        assert_eq!(
+            cache.allowed_ips_for_patterns(&["store.steampowered.com".to_string()]),
+            vec![zero_ttl_ip]
+        );
+
+        // Filling ip_to_domain and cname_to_origin beyond MAX_AUX_CACHE_ENTRIES stays bounded.
+        for i in 0..(MAX_AUX_CACHE_ENTRIES + 50) {
+            let ip = IpAddr::V4(Ipv4Addr::from(0x0A00_0000u32 + i as u32));
+            cache.record(&format!("h{i}.steamstatic.com"), &[ip], 60);
+            cache.record_cname(&format!("alias{i}.cdn.net"), "store.steampowered.com");
+        }
+        assert!(cache.ip_to_domain.len() <= MAX_AUX_CACHE_ENTRIES);
+        assert!(cache.cname_to_origin.len() <= MAX_AUX_CACHE_ENTRIES);
+
+        let last_ip = IpAddr::V4(Ipv4Addr::from(
+            0x0A00_0000u32 + (MAX_AUX_CACHE_ENTRIES + 49) as u32,
+        ));
+        assert!(cache.domain_for_ip(last_ip).is_some());
+        assert_eq!(
+            cache.origin_for_domain(&format!("alias{}.cdn.net", MAX_AUX_CACHE_ENTRIES + 49)),
+            Some("store.steampowered.com".to_string())
+        );
+    }
 }
