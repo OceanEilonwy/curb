@@ -60,6 +60,7 @@ mod runtime {
 
     struct LoopState {
         groups: HashMap<String, ExeGroup>,
+        learned_paths: HashSet<String>,
         ncsi_filter_ids: Vec<u64>,
         ncsi_ips: Option<Vec<IpAddr>>,
         locks: ImageLockTable,
@@ -104,6 +105,7 @@ mod runtime {
         let service_exe = std::env::current_exe().ok();
         let mut st = LoopState {
             groups: HashMap::new(),
+            learned_paths: HashSet::new(),
             ncsi_filter_ids: Vec::new(),
             ncsi_ips: None,
             locks: ImageLockTable::default(),
@@ -118,7 +120,7 @@ mod runtime {
         let mut last_dns_attempt: Option<Instant> = None;
 
         let notify = engine.reconcile_notify.clone();
-        let mut ticker = tokio::time::interval(Duration::from_millis(1000));
+        let mut ticker = tokio::time::interval(Duration::from_millis(300));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -255,6 +257,13 @@ mod runtime {
                     continue;
                 };
                 let mut guard = engine.state.lock().unwrap();
+                // Backfill exe_path on legacy rules when a direct match is observed so
+                // install-directory helper matching and proactive WFP filters work automatically.
+                for rule in &mut guard.config.rules {
+                    if rule.enabled && rule.exe_path.is_none() && rule.matcher.matches(&identity) {
+                        rule.exe_path = Some(identity.path.clone());
+                    }
+                }
                 match guard.evaluate_process(Some(ppid), &identity) {
                     Some((rule_label, network, allow_subprocesses)) => {
                         if !prev_tracked.contains_key(&pid) {
@@ -263,6 +272,7 @@ mod runtime {
                                 identity.filename
                             );
                         }
+                        st.learned_paths.insert(identity.path.clone());
                         guard.tracked_processes.insert(
                             pid,
                             TrackedProcess {
@@ -285,6 +295,37 @@ mod runtime {
             }
         }
 
+        // Gather proactive candidate paths from enabled rules/presets plus any previously
+        // matched executable paths so allowed apps keep their WFP permit filters even
+        // while closed or restarting (eliminating the startup race on launch).
+        let candidate_paths = {
+            let guard = engine.state.lock().unwrap();
+            let mut paths = guard.candidate_rule_paths();
+            for p in &st.learned_paths {
+                if !paths.iter().any(|x| x.eq_ignore_ascii_case(p)) {
+                    paths.push(p.clone());
+                }
+            }
+            paths
+        };
+
+        let mut verified_proactive: Vec<(BinaryIdentity, NetworkPolicy)> = Vec::new();
+        let mut active_learned = HashSet::new();
+        for path in candidate_paths {
+            let Some(identity) = inspect_cached(&path, &mut st.verify_cache) else {
+                continue;
+            };
+            let verdict = {
+                let guard = engine.state.lock().unwrap();
+                guard.evaluate_process(None, &identity)
+            };
+            if let Some((_label, network, _sub)) = verdict {
+                active_learned.insert(identity.path.clone());
+                verified_proactive.push((identity, network));
+            }
+        }
+        st.learned_paths = active_learned;
+
         // Compute desired per-executable groups and NCSI permit IPs.
         let (desired, tracked_pids, ncsi_ips) = {
             let guard = engine.state.lock().unwrap();
@@ -298,6 +339,14 @@ mod runtime {
                     exe_path: t.identity.path.clone(),
                     network: t.network.clone(),
                     ips: guard.allowed_ips_for_network(&t.network),
+                });
+            }
+            for (identity, network) in verified_proactive {
+                let key = identity.path.to_ascii_lowercase();
+                desired.entry(key).or_insert_with(|| DesiredGroup {
+                    exe_path: identity.path,
+                    ips: guard.allowed_ips_for_network(&network),
+                    network,
                 });
             }
             let tracked: HashSet<u32> = guard.tracked_processes.keys().copied().collect();
@@ -420,6 +469,7 @@ mod runtime {
         for (_, g) in st.groups.drain() {
             wfp.remove_dynamic_filters(&g.filter_ids);
         }
+        st.learned_paths.clear();
         wfp.remove_dynamic_filters(&st.ncsi_filter_ids);
         st.ncsi_filter_ids.clear();
         st.ncsi_ips = None;

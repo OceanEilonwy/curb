@@ -263,7 +263,9 @@ pub enum SubprocessPolicy {
 
 impl SubprocessPolicy {
     pub fn allows_child(&self, parent: &BinaryIdentity, child: &BinaryIdentity) -> bool {
-        if is_restricted_subprocess(&child.filename) {
+        if !parent.filename.eq_ignore_ascii_case(&child.filename)
+            && is_restricted_subprocess(&child.filename)
+        {
             return false;
         }
         match self {
@@ -314,6 +316,10 @@ pub struct Rule {
     pub network: NetworkPolicy,
     pub subprocesses: SubprocessPolicy,
     pub exe_hint: String,
+    /// Full executable path captured when the rule was created, enabling proactive
+    /// 0ms WFP filter installation even before the application launches.
+    #[serde(default)]
+    pub exe_path: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

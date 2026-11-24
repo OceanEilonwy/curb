@@ -65,6 +65,8 @@ pub struct ServiceSnapshot {
     pub active_wfp_filters: usize,
     #[serde(default)]
     pub protection_tier: ProtectionTier,
+    #[serde(default)]
+    pub service_version: String,
 }
 
 /// Requests sent from `curb-app` (or `curb-cli`) to `curb-service`.

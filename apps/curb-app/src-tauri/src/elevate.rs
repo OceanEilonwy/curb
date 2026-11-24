@@ -27,6 +27,13 @@ pub fn launch_elevated_service_install(app: &AppHandle) -> Result<(), String> {
     }
 }
 
+/// Returns true if a running `CurbService` reports a different version than this
+/// `curb-app` build (e.g. after running a per-user NSIS update while an older
+/// `C:\ProgramData\Curb\bin\curb-service.exe` was already running).
+pub fn is_service_outdated(reported_version: &str) -> bool {
+    reported_version != env!("CARGO_PKG_VERSION")
+}
+
 #[cfg(windows)]
 fn locate_bundled_binaries(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
     let mut search_dirs = Vec::new();

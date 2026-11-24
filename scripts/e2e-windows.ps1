@@ -155,6 +155,7 @@ try {
     $snap = Wait-ForCurbPipe 15
     Assert-True ($snap.status -eq "snapshot") "GetSnapshot returned snapshot"
     Assert-True ($snap.data.protection_tier -eq "full_service") "protection_tier is full_service"
+    Assert-True (-not [string]::IsNullOrEmpty($snap.data.service_version)) "service_version is reported ($($snap.data.service_version))"
     Assert-True ($snap.data.password_configured -eq $true) "migrated password is recognized"
     Assert-True ($snap.data.config.mode.kind -eq "disabled") "mode is disabled (runner-safe)"
 
@@ -206,6 +207,32 @@ try {
         }
     }
     Assert-True ($updated.status -eq "snapshot" -and $updated.data.config.presets.steam.community_and_workshop -eq $true) "Authenticated config mutation persisted"
+
+    $ruleId = [Guid]::NewGuid().ToString()
+    $ruleUpsert = Invoke-CurbIpc @{
+        op    = "upsert_rule"
+        token = $token
+        rule  = @{
+            id           = $ruleId
+            name         = "E2E Allowed App"
+            enabled      = $true
+            matcher      = @{
+                kind          = "hash"
+                sha256        = $inspected.identity.sha256
+                filename_hint = $expectedFileName
+            }
+            network      = @{
+                allow_tcp     = $true
+                allow_udp     = $true
+                dns_whitelist = $null
+            }
+            subprocesses = "same_signer_or_dir"
+            exe_hint     = $expectedFileName
+            exe_path     = $inspectTarget
+            created_at   = (Get-Date).ToUniversalTime().ToString("o")
+        }
+    }
+    Assert-True ($ruleUpsert.status -eq "snapshot" -and $ruleUpsert.data.config.rules.Count -eq 1 -and $ruleUpsert.data.config.rules[0].exe_path -eq $inspectTarget) "UpsertRule persisted exe_path for proactive WFP filter installation"
 
     $pwChange = Invoke-CurbIpc @{
         op               = "change_password"

@@ -308,6 +308,7 @@ export function AllowAppSheet(props: AllowAppSheetProps) {
       },
       subprocesses: subPolicy(),
       exe_hint: sel.exe,
+      exe_path: sel.path,
       created_at: new Date().toISOString(),
     };
 

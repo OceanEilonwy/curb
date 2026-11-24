@@ -148,30 +148,62 @@ mod windows_impl {
         if backup_file.exists() {
             if let Ok(backups) = read_json::<Vec<AdapterDnsBackup>>(&backup_file) {
                 for adapter in backups {
-                    let cmd = if adapter.original_servers.is_empty() {
-                        format!(
-                            "Set-DnsClientServerAddress -InterfaceIndex {} -ResetServerAddresses",
+                    let v4_servers: Vec<String> = adapter
+                        .original_servers
+                        .iter()
+                        .filter(|s| {
+                            s.trim()
+                                .parse::<std::net::Ipv4Addr>()
+                                .is_ok_and(|ip| !ip.is_loopback() && !ip.is_unspecified())
+                        })
+                        .map(|s| format!("'{}'", s.replace('\'', "")))
+                        .collect();
+                    let v6_servers: Vec<String> = adapter
+                        .original_servers
+                        .iter()
+                        .filter(|s| {
+                            s.trim().parse::<std::net::Ipv6Addr>().is_ok_and(|ip| {
+                                let prefix = ip.segments()[0] & 0xffc0;
+                                !ip.is_loopback()
+                                    && !ip.is_unspecified()
+                                    && prefix != 0xfe80
+                                    && prefix != 0xfec0
+                            })
+                        })
+                        .map(|s| format!("'{}'", s.replace('\'', "")))
+                        .collect();
+
+                    if v4_servers.is_empty() && v6_servers.is_empty() {
+                        let cmd = format!(
+                            "Set-DnsClientServerAddress -InterfaceIndex {} -ResetServerAddresses -ErrorAction SilentlyContinue",
                             adapter.interface_index
-                        )
+                        );
+                        let _ = run_powershell(&cmd);
                     } else {
-                        let quoted = adapter
-                            .original_servers
-                            .iter()
-                            .map(|s| format!("'{}'", s.replace('\'', "")))
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        format!(
-                            "Set-DnsClientServerAddress -InterfaceIndex {} -ServerAddresses ({quoted})",
-                            adapter.interface_index
-                        )
-                    };
-                    let _ = run_powershell(&cmd);
+                        if !v4_servers.is_empty() {
+                            let cmd = format!(
+                                "Set-DnsClientServerAddress -InterfaceIndex {} -ServerAddresses ({}) -ErrorAction SilentlyContinue",
+                                adapter.interface_index,
+                                v4_servers.join(",")
+                            );
+                            let _ = run_powershell(&cmd);
+                        }
+                        if !v6_servers.is_empty() {
+                            let cmd = format!(
+                                "Set-DnsClientServerAddress -InterfaceIndex {} -ServerAddresses ({}) -ErrorAction SilentlyContinue",
+                                adapter.interface_index,
+                                v6_servers.join(",")
+                            );
+                            let _ = run_powershell(&cmd);
+                        }
+                    }
                 }
             }
             let _ = std::fs::remove_file(&backup_file);
         }
 
-        // Fail-safe sweep: reset any adapter still pointed at Curb's 127.0.0.1 / ::1 back to DHCP.
+        // Fail-safe sweep: reset any adapter still pointed at Curb's 127.0.0.1 / ::1 back to DHCP
+        // and flush Windows DNS client cache.
         let sweep = r#"
             Get-NetAdapter | ForEach-Object {
                 $idx = $_.ifIndex
@@ -180,6 +212,7 @@ mod windows_impl {
                     Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -ErrorAction SilentlyContinue
                 }
             }
+            Clear-DnsClientCache -ErrorAction SilentlyContinue
         "#;
         let _ = run_powershell(sweep);
         Ok(())

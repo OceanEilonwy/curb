@@ -125,7 +125,92 @@ impl EngineState {
             }
         }
 
+        // 3. Install-directory helper inheritance for apps/games whose initial launcher
+        // stub process already exited (leaving an orphaned parent_pid on Windows).
+        if !curb_core::config::is_restricted_subprocess(&identity.filename) {
+            for rule in &self.config.rules {
+                if !rule.enabled
+                    || rule.subprocesses == curb_core::config::SubprocessPolicy::Disabled
+                {
+                    continue;
+                }
+                if let curb_core::config::ExecutableMatcher::SteamGame { install_dir, .. } =
+                    &rule.matcher
+                {
+                    if path_is_within_dir(&identity.path, install_dir) {
+                        return Some((
+                            format!("{} (helper)", rule.name),
+                            rule.network.clone(),
+                            rule.subprocesses,
+                        ));
+                    }
+                }
+                if let Some(rule_exe) = &rule.exe_path {
+                    if let Some(rule_dir) = parent_dir_normalized(rule_exe) {
+                        if path_is_within_normalized_dir(&identity.path, &rule_dir) {
+                            return Some((
+                                format!("{} (helper)", rule.name),
+                                rule.network.clone(),
+                                rule.subprocesses,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         None
+    }
+
+    /// Returns known on-disk executable paths for enabled rules and presets so
+    /// Curb can proactively install their WFP `ALE_APP_ID` permit filters with
+    /// 0ms startup delay (before the process even launches or across restarts).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn candidate_rule_paths(&self) -> Vec<String> {
+        let mut paths = Vec::new();
+        for rule in &self.config.rules {
+            if !rule.enabled {
+                continue;
+            }
+            if let Some(p) = &rule.exe_path {
+                if !p.is_empty() && !paths.iter().any(|x: &String| x.eq_ignore_ascii_case(p)) {
+                    paths.push(p.clone());
+                }
+            }
+            if let curb_core::config::ExecutableMatcher::SteamGame { install_dir, .. } =
+                &rule.matcher
+            {
+                if let Some(primary) =
+                    curb_core::steam::pick_primary_executable(std::path::Path::new(install_dir))
+                {
+                    let s = primary.to_string_lossy().to_string();
+                    if !paths.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
+                        paths.push(s);
+                    }
+                }
+            }
+        }
+
+        if self.config.presets.steam.enabled {
+            if let Some(root) = find_default_steam_root() {
+                for rel in [
+                    "steam.exe",
+                    r"bin\steamservice.exe",
+                    r"bin\cef\cef.win7x64\steamwebhelper.exe",
+                    r"bin\cef\steamwebhelper.exe",
+                ] {
+                    let candidate = root.join(rel);
+                    if candidate.exists() {
+                        let s = candidate.to_string_lossy().to_string();
+                        if !paths.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
+                            paths.push(s);
+                        }
+                    }
+                }
+            }
+        }
+
+        paths
     }
 
     /// Returns true if `domain` is permitted to be resolved by Curb's local DNS proxy.
@@ -196,8 +281,40 @@ impl EngineState {
             blocked_events: self.blocked_events.iter().cloned().collect(),
             active_wfp_filters: self.active_wfp_filters,
             protection_tier: curb_core::ipc::ProtectionTier::FullService,
+            service_version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
+}
+
+fn parent_dir_normalized(path: &str) -> Option<String> {
+    let norm = path.replace('\\', "/").to_ascii_lowercase();
+    let (dir, _) = norm.rsplit_once('/')?;
+    if dir.is_empty() {
+        return None;
+    }
+    // Avoid matching broad root or system directories if a binary sits directly in them.
+    let depth = dir.split('/').filter(|s| !s.is_empty()).count();
+    if depth < 2 {
+        return None;
+    }
+    Some(format!("{dir}/"))
+}
+
+fn path_is_within_dir(exe_path: &str, dir_path: &str) -> bool {
+    let mut norm_dir = dir_path
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    if norm_dir.is_empty() {
+        return false;
+    }
+    norm_dir.push('/');
+    path_is_within_normalized_dir(exe_path, &norm_dir)
+}
+
+fn path_is_within_normalized_dir(exe_path: &str, norm_dir_with_slash: &str) -> bool {
+    let norm_exe = exe_path.replace('\\', "/").to_ascii_lowercase();
+    norm_exe.starts_with(norm_dir_with_slash)
 }
 
 /// Thread-safe handle to `EngineState` with IPC request dispatch.
@@ -545,6 +662,120 @@ mod tests {
             sha256: "00".into(),
             filename_hint: "a.exe".into(),
         };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allows_firefox_edge_signal_proactive_paths_and_orphaned_install_dir_helpers() {
+        use curb_core::config::{ExecutableMatcher, Rule, SubprocessPolicy};
+        use curb_core::verify::SignatureInfo;
+
+        let dir = std::env::temp_dir().join(format!("curb_apps_{}", Uuid::new_v4()));
+        let mut state = EngineState::load(dir.clone()).unwrap();
+
+        let signal_path =
+            r"C:\Users\alice\AppData\Local\Programs\signal-desktop\Signal.exe".to_string();
+        let firefox_path = r"C:\Program Files\Mozilla Firefox\firefox.exe".to_string();
+        let edge_path =
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe".to_string();
+
+        state.config.rules = vec![
+            Rule {
+                id: Uuid::new_v4(),
+                name: "Signal".into(),
+                enabled: true,
+                matcher: ExecutableMatcher::Signature {
+                    subject_cn: "Signal Messenger, LLC".into(),
+                    issuer_cn: None,
+                    product_name: None,
+                    original_filename: Some("Signal.exe".into()),
+                },
+                network: NetworkPolicy::default(),
+                subprocesses: SubprocessPolicy::SameSignerOrDir,
+                exe_hint: "Signal.exe".into(),
+                exe_path: Some(signal_path.clone()),
+                created_at: Utc::now(),
+            },
+            Rule {
+                id: Uuid::new_v4(),
+                name: "Firefox".into(),
+                enabled: true,
+                matcher: ExecutableMatcher::Signature {
+                    subject_cn: "Mozilla Corporation".into(),
+                    issuer_cn: None,
+                    product_name: None,
+                    original_filename: Some("firefox.exe".into()),
+                },
+                network: NetworkPolicy::default(),
+                subprocesses: SubprocessPolicy::SameSignerOrDir,
+                exe_hint: "firefox.exe".into(),
+                exe_path: Some(firefox_path.clone()),
+                created_at: Utc::now(),
+            },
+            Rule {
+                id: Uuid::new_v4(),
+                name: "Microsoft Edge".into(),
+                enabled: true,
+                matcher: ExecutableMatcher::Signature {
+                    subject_cn: "Microsoft Corporation".into(),
+                    issuer_cn: None,
+                    product_name: None,
+                    original_filename: Some("msedge.exe".into()),
+                },
+                network: NetworkPolicy::default(),
+                subprocesses: SubprocessPolicy::SameSignerOrDir,
+                exe_hint: "msedge.exe".into(),
+                exe_path: Some(edge_path.clone()),
+                created_at: Utc::now(),
+            },
+        ];
+
+        // Candidate paths should include all three enabled rule paths for proactive 0ms WFP filters
+        let candidates = state.candidate_rule_paths();
+        assert!(candidates.contains(&signal_path));
+        assert!(candidates.contains(&firefox_path));
+        assert!(candidates.contains(&edge_path));
+
+        // Direct evaluation of Signal, Firefox, and Edge
+        let signal_id = BinaryIdentity {
+            path: signal_path,
+            filename: "Signal.exe".into(),
+            sha256: "111".into(),
+            signature: Some(SignatureInfo {
+                trusted: true,
+                subject_cn: "Signal Messenger, LLC".into(),
+                issuer_cn: "DigiCert".into(),
+            }),
+            product_name: None,
+            original_filename: None,
+            file_description: None,
+        };
+        assert!(state.evaluate_process(None, &signal_id).is_some());
+
+        // Helper executable in Firefox's install folder when initial launcher stub PID (9999) already exited
+        let firefox_helper = BinaryIdentity {
+            path: r"C:\Program Files\Mozilla Firefox\plugin-container.exe".into(),
+            filename: "plugin-container.exe".into(),
+            sha256: "222".into(),
+            signature: None,
+            product_name: None,
+            original_filename: None,
+            file_description: None,
+        };
+        assert!(state.evaluate_process(Some(9999), &firefox_helper).is_some());
+
+        // Unrelated app outside allowed install folders must remain blocked
+        let chrome = BinaryIdentity {
+            path: r"C:\Program Files\Google\Chrome\Application\chrome.exe".into(),
+            filename: "chrome.exe".into(),
+            sha256: "333".into(),
+            signature: None,
+            product_name: None,
+            original_filename: None,
+            file_description: None,
+        };
+        assert!(state.evaluate_process(Some(9999), &chrome).is_none());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

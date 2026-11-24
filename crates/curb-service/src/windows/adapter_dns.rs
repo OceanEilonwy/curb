@@ -27,31 +27,41 @@ pub fn enable_local_dns_redirect(
 
     let upstreams = extract_upstream_servers(&backups);
 
-    // Only modify active adapters that are not already pointed at Curb's local DNS
-    // so repeated baseline updates do not needlessly bounce Wi-Fi adapters.
+    // Set IPv4 and IPv6 DNS in separate calls because MSFT_DNSClientServerAddress
+    // has distinct per-family CIM instances and rejects mixed IPv4+IPv6 arrays.
     let ps = if include_ipv6 {
         r#"
+            $changed = $false
             Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
                 $idx = $_.ifIndex
-                $cur = @(Get-DnsClientServerAddress -InterfaceIndex $idx -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses })
-                $already = ($cur.Count -gt 0) -and ($cur -contains '127.0.0.1') -and (($cur | Where-Object { $_ -ne '127.0.0.1' -and $_ -ne '::1' }).Count -eq 0)
-                if (-not $already) {
-                    Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ('127.0.0.1','::1') -ErrorAction SilentlyContinue
-                    if (-not $?) {
-                        Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ('127.0.0.1') -ErrorAction SilentlyContinue
-                    }
+                $v4 = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses })
+                if (-not (($v4.Count -eq 1) -and ($v4[0] -eq '127.0.0.1'))) {
+                    Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ('127.0.0.1') -ErrorAction SilentlyContinue
+                    $changed = $true
                 }
+                $v6 = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv6 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses })
+                if (-not (($v6.Count -eq 1) -and ($v6[0] -eq '::1'))) {
+                    Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ('::1') -ErrorAction SilentlyContinue
+                    $changed = $true
+                }
+            }
+            if ($changed) {
+                Clear-DnsClientCache -ErrorAction SilentlyContinue
             }
         "#
     } else {
         r#"
+            $changed = $false
             Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
                 $idx = $_.ifIndex
-                $cur = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses })
-                $already = ($cur.Count -eq 1) -and ($cur[0] -eq '127.0.0.1')
-                if (-not $already) {
+                $v4 = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses })
+                if (-not (($v4.Count -eq 1) -and ($v4[0] -eq '127.0.0.1'))) {
                     Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ('127.0.0.1') -ErrorAction SilentlyContinue
+                    $changed = $true
                 }
+            }
+            if ($changed) {
+                Clear-DnsClientCache -ErrorAction SilentlyContinue
             }
         "#
     };
@@ -74,7 +84,8 @@ pub fn restore_original_adapter_dns(data_dir: &Path) -> Result<(), String> {
 }
 
 fn extract_upstream_servers(backups: &[AdapterDnsBackup]) -> Vec<SocketAddr> {
-    let mut out = Vec::new();
+    let mut v4_out = Vec::new();
+    let mut v6_out = Vec::new();
     for adapter in backups {
         for raw in &adapter.original_servers {
             let trimmed = raw.trim();
@@ -84,32 +95,45 @@ fn extract_upstream_servers(backups: &[AdapterDnsBackup]) -> Vec<SocketAddr> {
             if ip.is_loopback() || ip.is_unspecified() {
                 continue;
             }
-            // Skip IPv6 link-local addresses (fe80::/10) which require an interface scope ID.
-            if let IpAddr::V6(v6) = ip {
-                if (v6.segments()[0] & 0xffc0) == 0xfe80 {
-                    continue;
+            match ip {
+                IpAddr::V4(_) => {
+                    let addr = SocketAddr::new(ip, 53);
+                    if !v4_out.contains(&addr) {
+                        v4_out.push(addr);
+                    }
                 }
-            }
-            let addr = SocketAddr::new(ip, 53);
-            if !out.contains(&addr) {
-                out.push(addr);
+                IpAddr::V6(v6) => {
+                    // Skip IPv6 link-local (fe80::/10) and Windows site-local placeholder
+                    // addresses (fec0::/10, e.g. fec0:0:0:ffff::1..3) which are not routable.
+                    let prefix = v6.segments()[0] & 0xffc0;
+                    if prefix == 0xfe80 || prefix == 0xfec0 {
+                        continue;
+                    }
+                    let addr = SocketAddr::new(ip, 53);
+                    if !v6_out.contains(&addr) {
+                        v6_out.push(addr);
+                    }
+                }
             }
         }
     }
-    out
+    v4_out.extend(v6_out);
+    v4_out
 }
 
 fn capture_adapter_dns_snapshot() -> Result<Vec<AdapterDnsBackup>, String> {
     let ps = r#"
-        $items = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
+        $items = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
             $dns = Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ErrorAction SilentlyContinue
             [PSCustomObject]@{
                 interface_alias = $_.Name
                 interface_index = [int]$_.ifIndex
-                original_servers = @($dns | ForEach-Object { $_.ServerAddresses } | Where-Object { $_ -and $_ -ne '127.0.0.1' -and $_ -ne '::1' })
+                original_servers = @($dns | ForEach-Object { $_.ServerAddresses } | Where-Object {
+                    $_ -and $_ -ne '127.0.0.1' -and $_ -ne '::1' -and $_ -notlike 'fec0:*' -and $_ -notlike 'fe80:*'
+                })
             }
-        }
-        ConvertTo-Json -InputObject @($items) -Compress
+        })
+        ConvertTo-Json -InputObject $items -Depth 4 -Compress
     "#;
     let out = run_powershell(ps)?;
     if out.trim().is_empty() {
@@ -129,4 +153,36 @@ fn run_powershell(script: &str) -> Result<String, String> {
         return Err(stderr.trim().to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filters_out_fec0_fe80_and_loopback_and_prioritizes_ipv4_upstreams() {
+        let backups = vec![AdapterDnsBackup {
+            interface_alias: "Wi-Fi".into(),
+            interface_index: 12,
+            original_servers: vec![
+                "127.0.0.1".into(),
+                "::1".into(),
+                "fec0:0:0:ffff::1".into(),
+                "fec0:0:0:ffff::2".into(),
+                "fec0:0:0:ffff::3".into(),
+                "fe80::1".into(),
+                "2606:4700:4700::1111".into(),
+                "192.168.1.1".into(),
+            ],
+        }];
+
+        let upstreams = extract_upstream_servers(&backups);
+        assert_eq!(
+            upstreams,
+            vec![
+                "192.168.1.1:53".parse::<SocketAddr>().unwrap(),
+                "[2606:4700:4700::1111]:53".parse::<SocketAddr>().unwrap(),
+            ]
+        );
+    }
 }

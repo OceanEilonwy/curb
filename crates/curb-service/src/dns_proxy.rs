@@ -280,24 +280,55 @@ async fn forward_to_upstreams(
     upstreams: &[SocketAddr],
     prefer_tcp: bool,
 ) -> Option<Vec<u8>> {
-    for (idx, &upstream) in upstreams.iter().enumerate() {
-        let timeout = if idx + 1 < upstreams.len() {
-            Duration::from_millis(1500)
-        } else {
-            Duration::from_secs(3)
-        };
+    if upstreams.is_empty() {
+        return None;
+    }
+    if upstreams.len() == 1 {
+        return forward_one(packet, upstreams[0], Duration::from_millis(2500), prefer_tcp).await;
+    }
 
-        let result = if prefer_tcp {
-            forward_tcp(packet, upstream, timeout).await
-        } else {
-            forward_udp(packet, upstream, timeout).await
-        };
+    // Staggered parallel race: give the first upstream (typically the adapter's original
+    // router/ISP resolver) a 120ms head start, then fire fallback resolvers (1.1.1.1 / 8.8.8.8)
+    // concurrently so a dead or unreachable primary resolver never causes Windows Dnscache's
+    // 1-second loopback timeout to expire.
+    let mut set = tokio::task::JoinSet::new();
+    for (idx, &upstream) in upstreams.iter().take(4).enumerate() {
+        let pkt = packet.to_vec();
+        set.spawn(async move {
+            if idx > 0 {
+                tokio::time::sleep(Duration::from_millis(120 * idx as u64)).await;
+            }
+            forward_one(&pkt, upstream, Duration::from_millis(2500), prefer_tcp).await
+        });
+    }
 
-        if let Some(resp) = result {
+    while let Some(joined) = set.join_next().await {
+        if let Ok(Some(resp)) = joined {
+            set.abort_all();
             return Some(resp);
         }
     }
     None
+}
+
+async fn forward_one(
+    packet: &[u8],
+    upstream: SocketAddr,
+    timeout: Duration,
+    prefer_tcp: bool,
+) -> Option<Vec<u8>> {
+    if prefer_tcp {
+        return forward_tcp(packet, upstream, timeout).await;
+    }
+    let resp = forward_udp(packet, upstream, timeout).await?;
+    if let Ok(parsed) = Message::from_vec(&resp) {
+        if parsed.truncated() {
+            if let Some(tcp_resp) = forward_tcp(packet, upstream, timeout).await {
+                return Some(tcp_resp);
+            }
+        }
+    }
+    Some(resp)
 }
 
 async fn forward_udp(packet: &[u8], upstream: SocketAddr, timeout: Duration) -> Option<Vec<u8>> {
@@ -307,7 +338,8 @@ async fn forward_udp(packet: &[u8], upstream: SocketAddr, timeout: Duration) -> 
         "0.0.0.0:0"
     };
     let sock = UdpSocket::bind(bind_local).await.ok()?;
-    sock.send_to(packet, upstream).await.ok()?;
+    sock.connect(upstream).await.ok()?;
+    sock.send(packet).await.ok()?;
 
     let mut resp_buf = [0u8; 4096];
     let resp_len = tokio::time::timeout(timeout, sock.recv(&mut resp_buf))

@@ -70,6 +70,7 @@ export interface Rule {
   network: NetworkPolicy;
   subprocesses: SubprocessPolicy;
   exe_hint: string;
+  exe_path?: string | null;
   created_at: string;
 }
 
@@ -128,6 +129,7 @@ export interface ServiceSnapshot {
   blocked_events: BlockedEvent[];
   active_wfp_filters: number;
   protection_tier: ProtectionTier;
+  service_version?: string;
 }
 
 export interface BinaryIdentity {

@@ -48,8 +48,11 @@ pub struct WfpController {
 unsafe impl Send for WfpController {}
 
 impl WfpController {
-    /// Opens persistent + dynamic WFP sessions and registers Curb's provider & sublayer.
+    /// Opens persistent + dynamic WFP sessions, purges any stale persistent filters
+    /// from prior runs, and registers Curb's provider & sublayer.
     pub fn open() -> Result<Self, String> {
+        let _ = curb_core::cleanup::purge_all_curb_wfp_objects();
+
         let persistent_engine = open_engine(false)?;
         let dynamic_engine = open_engine(true)?;
 
@@ -101,19 +104,19 @@ impl WfpController {
         }
     }
 
-    /// Atomically installs persistent default-deny filters across IPv4 and IPv6 plus
-    /// the configured OS baseline rules (loopback, DHCP outbound + inbound replies,
-    /// NTP, and Curb's own upstream DNS service).
+    /// Atomically installs persistent outbound default-deny filters across IPv4 and IPv6
+    /// for TCP and UDP (leaving ICMPv4 PMTUD, ICMPv6 Neighbor Discovery, and inbound
+    /// replies on established/UDP sockets unimpeded), plus the configured OS baseline
+    /// rules (loopback, DHCP, NTP, and DNS resolution for `curb-service.exe` and
+    /// Windows `Dnscache` / `svchost.exe`).
     pub fn install_default_deny_and_baseline(
         &mut self,
         baseline: &BaselinePolicy,
         service_exe_path: Option<&Path>,
     ) -> Result<(), String> {
-        let layers = [
+        let outbound_layers = [
             FWPM_LAYER_ALE_AUTH_CONNECT_V4,
             FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
         ];
 
         let mut new_persistent = Vec::new();
@@ -126,18 +129,23 @@ impl WfpController {
                 }
             }
 
-            // 1. Default-deny catch-all (lowest weight = 1)
-            for layer in layers {
-                if let Ok(id) = self.add_filter(
-                    self.persistent_engine,
-                    layer,
-                    "Curb Default Deny",
-                    FWP_ACTION_BLOCK,
-                    1,
-                    FWPM_FILTER_FLAG_PERSISTENT,
-                    &[],
-                ) {
-                    new_persistent.push(id);
+            // 1. Default-deny outbound TCP and UDP (lowest weight = 1).
+            // Scoping to TCP and UDP ensures ICMPv4 (Path MTU Discovery) and ICMPv6
+            // (Neighbor Discovery / Router Solicitation / Router Advertisement) are never blocked.
+            for layer in outbound_layers {
+                for proto in [IPPROTO_TCP, IPPROTO_UDP] {
+                    let conds = [proto_condition(proto)];
+                    if let Ok(id) = self.add_filter(
+                        self.persistent_engine,
+                        layer,
+                        "Curb Default Deny",
+                        FWP_ACTION_BLOCK,
+                        1,
+                        FWPM_FILTER_FLAG_PERSISTENT,
+                        &conds,
+                    ) {
+                        new_persistent.push(id);
+                    }
                 }
             }
 
@@ -153,7 +161,7 @@ impl WfpController {
                         },
                     },
                 };
-                for layer in layers {
+                for layer in outbound_layers {
                     if let Ok(id) = self.add_filter(
                         self.persistent_engine,
                         layer,
@@ -168,7 +176,7 @@ impl WfpController {
                 }
             }
 
-            // 3. DHCP baseline (outbound requests + inbound DHCPOFFER/DHCPACK replies)
+            // 3. DHCP baseline (outbound requests)
             if baseline.dhcp {
                 for (layer, port) in [
                     (FWPM_LAYER_ALE_AUTH_CONNECT_V4, 67u16),
@@ -192,38 +200,12 @@ impl WfpController {
                         new_persistent.push(id);
                     }
                 }
-
-                // Permit inbound DHCPv4 (UDP local port 68) & DHCPv6 (UDP local port 546)
-                // responses so Wi-Fi/Ethernet lease acquisition and renewals are never dropped.
-                for (layer, local_port) in [
-                    (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, 68u16),
-                    (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, 546u16),
-                ] {
-                    let conds = [
-                        proto_condition(IPPROTO_UDP),
-                        local_port_condition(local_port),
-                    ];
-                    if let Ok(id) = self.add_filter(
-                        self.persistent_engine,
-                        layer,
-                        "Curb Baseline DHCP Inbound",
-                        FWP_ACTION_PERMIT,
-                        10,
-                        FWPM_FILTER_FLAG_PERSISTENT,
-                        &conds,
-                    ) {
-                        new_persistent.push(id);
-                    }
-                }
             }
 
             // 4. NTP baseline (UDP 123)
             if baseline.ntp {
                 let conds = [proto_condition(IPPROTO_UDP), remote_port_condition(123)];
-                for layer in [
-                    FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-                    FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-                ] {
+                for layer in outbound_layers {
                     if let Ok(id) = self.add_filter(
                         self.persistent_engine,
                         layer,
@@ -246,27 +228,37 @@ impl WfpController {
         }
         self.persistent_filter_ids = new_persistent;
 
-        // 5. Permit `curb-service.exe` itself to send upstream DNS (UDP/TCP 53),
-        // atomically replacing any prior service DNS filter IDs.
+        // 5. Permit `curb-service.exe` AND Windows DNS Client (`svchost.exe` / `Dnscache`)
+        // to send upstream DNS (UDP/TCP 53). On Windows, applications call `getaddrinfo()`,
+        // which executes inside `svchost.exe` (`Dnscache`). When adapter DNS is pointed to
+        // `127.0.0.1` / `::1`, `svchost.exe` queries `curb-service.exe` on loopback; if an
+        // adapter (e.g. IPv6 RDNSS or VPN) queries an upstream resolver directly, permitting
+        // `svchost.exe` on port 53 ensures OS DNS resolution for allowed apps never fails,
+        // while non-allowed apps remain blocked from connecting to any resolved IP.
         let old_svc_ids: Vec<u64> = self.service_dns_filter_ids.drain(..).collect();
+        self.remove_dynamic_filters(&old_svc_ids);
+
+        let dns_policy = NetworkPolicy {
+            allow_tcp: true,
+            allow_udp: true,
+            dns_whitelist: None,
+        };
+        let mut dns_filter_ids = Vec::new();
         if let Some(svc_path) = service_exe_path {
-            match self.replace_app_dynamic(
-                &old_svc_ids,
-                svc_path,
-                &NetworkPolicy {
-                    allow_tcp: true,
-                    allow_udp: true,
-                    dns_whitelist: None,
-                },
-                None,
-                Some(53),
-            ) {
-                Ok(ids) => self.service_dns_filter_ids = ids,
+            match self.replace_app_dynamic(&[], svc_path, &dns_policy, None, Some(53)) {
+                Ok(ids) => dns_filter_ids.extend(ids),
                 Err(e) => warn!("Failed to permit curb-service.exe upstream DNS in WFP: {e}"),
             }
-        } else if !old_svc_ids.is_empty() {
-            self.remove_dynamic_filters(&old_svc_ids);
         }
+        let svchost_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let svchost_path = Path::new(&svchost_root).join("System32").join("svchost.exe");
+        if svchost_path.exists() {
+            match self.replace_app_dynamic(&[], &svchost_path, &dns_policy, None, Some(53)) {
+                Ok(ids) => dns_filter_ids.extend(ids),
+                Err(e) => warn!("Failed to permit svchost.exe DNS in WFP: {e}"),
+            }
+        }
+        self.service_dns_filter_ids = dns_filter_ids;
 
         info!(
             "Installed {} persistent WFP default-deny & baseline filters (+ {} service DNS filters)",
@@ -338,7 +330,7 @@ impl WfpController {
                             FWPM_LAYER_ALE_AUTH_CONNECT_V4,
                             FWPM_LAYER_ALE_AUTH_CONNECT_V6,
                         ] {
-                            if let Ok(id) = self.add_filter(
+                            let id = self.add_filter(
                                 self.dynamic_engine,
                                 layer,
                                 "Curb Dynamic App Allow",
@@ -346,30 +338,8 @@ impl WfpController {
                                 20,
                                 Default::default(),
                                 &conds,
-                            ) {
-                                ids.push(id);
-                            }
-                        }
-
-                        // For allowed apps with unrestricted UDP (e.g. WebRTC / voice calls /
-                        // multiplayer games), also allow inbound UDP scoped strictly to this app.
-                        if proto == IPPROTO_UDP && fixed_remote_port.is_none() {
-                            for layer in [
-                                FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-                                FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
-                            ] {
-                                if let Ok(id) = self.add_filter(
-                                    self.dynamic_engine,
-                                    layer,
-                                    "Curb Dynamic App UDP Recv Allow",
-                                    FWP_ACTION_PERMIT,
-                                    20,
-                                    Default::default(),
-                                    &conds,
-                                ) {
-                                    ids.push(id);
-                                }
-                            }
+                            )?;
+                            ids.push(id);
                         }
                     }
                     Some(ips) => {
@@ -626,13 +596,44 @@ fn remote_port_condition(port: u16) -> FWPM_FILTER_CONDITION0 {
     }
 }
 
-fn local_port_condition(port: u16) -> FWPM_FILTER_CONDITION0 {
-    FWPM_FILTER_CONDITION0 {
-        fieldKey: FWPM_CONDITION_IP_LOCAL_PORT,
-        matchType: FWP_MATCH_EQUAL,
-        conditionValue: FWP_CONDITION_VALUE0 {
-            r#type: FWP_UINT16,
-            Anonymous: FWP_CONDITION_VALUE0_0 { uint16: port },
-        },
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::path::PathBuf;
+
+    #[test]
+    fn wfp_dynamic_permit_filters_install_replace_and_remove_cleanly() {
+        let ctrl = WfpController::open().expect("open WFP controller as Administrator");
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let target_exe = PathBuf::from(root).join("System32").join("notepad.exe");
+        assert!(target_exe.exists(), "notepad.exe must exist on Windows");
+
+        let policy = NetworkPolicy {
+            allow_tcp: true,
+            allow_udp: true,
+            dns_whitelist: None,
+        };
+
+        // 1. Unrestricted dynamic app permit (IPv4 + IPv6, TCP + UDP = 4 filters)
+        let ids = ctrl
+            .replace_app_dynamic(&[], &target_exe, &policy, None, None)
+            .expect("install unrestricted dynamic permit filters");
+        assert_eq!(ids.len(), 4);
+
+        // 2. Atomically replace with DNS-scoped IP filters (1 v4 + 1 v6, TCP + UDP = 4 filters)
+        let scoped_ips = [
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            IpAddr::V6(Ipv6Addr::new(0x2606, 0x2800, 0x220, 0x1, 0x248, 0x1893, 0x25c8, 0x1946)),
+        ];
+        let replaced_ids = ctrl
+            .replace_app_dynamic(&ids, &target_exe, &policy, Some(&scoped_ips), Some(443))
+            .expect("atomically replace with IP+port scoped dynamic permit filters");
+        assert_eq!(replaced_ids.len(), 4);
+
+        // 3. Clean removal
+        ctrl.remove_dynamic_filters(&replaced_ids);
+        drop(ctrl);
+        let _ = curb_core::cleanup::purge_all_curb_wfp_objects();
     }
 }

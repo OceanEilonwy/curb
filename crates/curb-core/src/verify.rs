@@ -254,10 +254,11 @@ mod windows_impl {
             ..Default::default()
         };
 
+        let no_ui_hwnd = HWND(-1isize as *mut _);
         let mut action: GUID = WINTRUST_ACTION_GENERIC_VERIFY_V2;
         let status = unsafe {
             WinVerifyTrust(
-                HWND::default(),
+                no_ui_hwnd,
                 &mut action,
                 &mut data as *mut _ as *mut _,
             )
@@ -266,7 +267,7 @@ mod windows_impl {
         data.dwStateAction = WTD_STATEACTION_CLOSE;
         unsafe {
             let _ = WinVerifyTrust(
-                HWND::default(),
+                no_ui_hwnd,
                 &mut action,
                 &mut data as *mut _ as *mut _,
             );

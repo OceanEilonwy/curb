@@ -16,6 +16,10 @@ use uuid::Uuid;
 
 use crate::local_mode::{is_standard_mode_configured, LocalStandardRuntime};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static AUTO_UPGRADE_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+
 /// Dispatches an IPC request to `CurbService` (Full Protection) when available,
 /// transparently falling back to the embedded `LocalStandardRuntime` (Standard Mode
 /// or Unconfigured first-run state).
@@ -24,6 +28,7 @@ async fn dispatch_request(
     local: &LocalStandardRuntime,
 ) -> Result<IpcResponse, String> {
     if let Ok(resp) = ipc_client::send_request(&req).await {
+        local.clear_standard_mode_for_full_service();
         return Ok(resp);
     }
     let rt = local.clone();
@@ -33,9 +38,31 @@ async fn dispatch_request(
 }
 
 #[tauri::command]
-async fn get_snapshot(local: State<'_, LocalStandardRuntime>) -> Result<ServiceSnapshot, String> {
+async fn get_snapshot(
+    app: AppHandle,
+    local: State<'_, LocalStandardRuntime>,
+) -> Result<ServiceSnapshot, String> {
     match dispatch_request(IpcRequest::GetSnapshot, &local).await? {
-        IpcResponse::Snapshot { data } => Ok(data),
+        IpcResponse::Snapshot { data } => {
+            if data.protection_tier == curb_core::ipc::ProtectionTier::FullService
+                && elevate::is_service_outdated(&data.service_version)
+                && !AUTO_UPGRADE_ATTEMPTED.swap(true, Ordering::SeqCst)
+            {
+                if elevate::launch_elevated_service_install(&app).is_ok() {
+                    for _ in 0..24 {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        if let Ok(IpcResponse::Snapshot { data: upgraded }) =
+                            ipc_client::send_request(&IpcRequest::GetSnapshot).await
+                        {
+                            if !elevate::is_service_outdated(&upgraded.service_version) {
+                                return Ok(upgraded);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(data)
+        }
         IpcResponse::Error { message } => Err(message),
         _ => Err("Unexpected response from Curb".into()),
     }
@@ -55,9 +82,11 @@ async fn setup_full_protection(
         if let Ok(IpcResponse::Snapshot { data }) =
             ipc_client::send_request(&IpcRequest::GetSnapshot).await
         {
-            // Cleanly turn off Standard Mode's HKCU proxy now that Full Protection is live.
-            local.deactivate_proxy();
-            return Ok(data);
+            if !elevate::is_service_outdated(&data.service_version) {
+                // Cleanly turn off Standard Mode's HKCU proxy now that Full Protection is live.
+                local.clear_standard_mode_for_full_service();
+                return Ok(data);
+            }
         }
     }
 

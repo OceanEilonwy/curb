@@ -117,6 +117,13 @@ impl LocalStandardRuntime {
         set_windows_user_proxy(false);
     }
 
+    /// Disables Standard Mode's HKCU proxy and removes `standard_mode.flag` once
+    /// Full Protection (`CurbService`) is active so the two modes never conflict.
+    pub fn clear_standard_mode_for_full_service(&self) {
+        set_windows_user_proxy(false);
+        let _ = std::fs::remove_file(standard_mode_marker(&user_data_dir()));
+    }
+
     fn spawn_proxy(&self) {
         let runtime = self.clone();
         tauri::async_runtime::spawn(async move {
@@ -141,8 +148,9 @@ impl LocalStandardRuntime {
         let mut allowed_domains = guard.config.presets.steam.webhelper_domains();
         for rule in &guard.config.rules {
             if rule.enabled {
-                if let Some(domains) = &rule.network.dns_whitelist {
-                    allowed_domains.extend(domains.iter().cloned());
+                match &rule.network.dns_whitelist {
+                    Some(domains) => allowed_domains.extend(domains.iter().cloned()),
+                    None => return true,
                 }
             }
         }
@@ -188,6 +196,7 @@ impl LocalStandardRuntime {
             } else {
                 ProtectionTier::Unconfigured
             },
+            service_version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
 
