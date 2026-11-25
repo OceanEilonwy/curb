@@ -131,13 +131,15 @@ impl WfpController {
         baseline: &BaselinePolicy,
         service_exe_path: Option<&Path>,
     ) -> Result<(), String> {
+        self.ensure_provider_and_sublayer();
+
         let outbound_layers = [
             FWPM_LAYER_ALE_AUTH_CONNECT_V4,
             FWPM_LAYER_ALE_AUTH_CONNECT_V6,
         ];
 
         let mut new_persistent = Vec::new();
-        let old_persistent: Vec<u64> = self.persistent_filter_ids.drain(..).collect();
+        let old_persistent: Vec<u64> = self.persistent_filter_ids.clone();
 
         let tx_ok = with_transaction(self.persistent_engine, || {
             for id in &old_persistent {
@@ -573,16 +575,44 @@ impl WfpController {
     }
 
     pub fn clear_persistent_filters(&mut self) {
-        let persistent_ids: Vec<u64> = self.persistent_filter_ids.drain(..).collect();
-        if !persistent_ids.is_empty() {
-            let _ = with_transaction(self.persistent_engine, || {
-                for id in persistent_ids {
-                    unsafe {
-                        let _ = FwpmFilterDeleteById0(self.persistent_engine, id);
+        const FWP_E_FILTER_NOT_FOUND: u32 = 0x8032_0003;
+
+        let mut needs_purge = false;
+        if !self.persistent_filter_ids.is_empty() {
+            let ids = self.persistent_filter_ids.clone();
+            let res = with_transaction(self.persistent_engine, || {
+                for id in ids {
+                    let code = unsafe { FwpmFilterDeleteById0(self.persistent_engine, id) };
+                    if code != 0 && code != FWP_E_FILTER_NOT_FOUND {
+                        return Err(format!(
+                            "FwpmFilterDeleteById0({id}) failed: 0x{code:08x}"
+                        ));
                     }
                 }
                 Ok::<(), String>(())
             });
+            match res {
+                Ok(()) => self.persistent_filter_ids.clear(),
+                Err(e) => {
+                    warn!(
+                        "Failed to clear persistent WFP filters cleanly ({e}); falling back to full Curb WFP purge"
+                    );
+                    needs_purge = true;
+                }
+            }
+        }
+
+        if needs_purge {
+            match curb_windows::purge_all_curb_wfp_objects() {
+                Ok(n) => {
+                    info!("Fallback WFP purge removed {n} Curb filter(s)");
+                    self.persistent_filter_ids.clear();
+                    self.ensure_provider_and_sublayer();
+                }
+                Err(e) => {
+                    warn!("Fallback Curb WFP purge also failed: {e}");
+                }
+            }
         }
 
         let svc_ids: Vec<u64> = self.service_dns_filter_ids.drain(..).collect();

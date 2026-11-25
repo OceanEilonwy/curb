@@ -266,15 +266,24 @@ mod runtime {
                 last_baseline = Some(baseline.clone());
             } else if !enforcing && was_enforcing {
                 engine.set_wfp_loop_active(false);
-                tokio::task::block_in_place(|| {
-                    release_everything(&engine, &mut wfp, &mut st);
+                let dns_restored = tokio::task::block_in_place(|| {
+                    // Remove persistent default-deny BLOCK filters FIRST so active TCP/UDP
+                    // connections are never hit by an ALE reauthorization wave against
+                    // default-deny when dynamic PERMIT filters are torn down.
                     wfp.clear_persistent_filters();
-                    if let Err(e) = restore_original_adapter_dns(&data_dir) {
-                        warn!("Failed to restore adapter DNS: {e}");
+                    release_everything(&engine, &mut wfp, &mut st);
+                    match restore_original_adapter_dns(&data_dir) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            warn!("Failed to restore adapter DNS: {e}");
+                            false
+                        }
                     }
                 });
-                engine.set_upstream_dns(Vec::new());
-                dns_redirected = false;
+                if dns_restored {
+                    engine.set_upstream_dns(Vec::new());
+                    dns_redirected = false;
+                }
                 last_dns_attempt = None;
                 last_ncsi_prewarm = None;
                 last_config_version = None;
@@ -361,8 +370,8 @@ mod runtime {
         if was_enforcing {
             info!("CurbService stopping — restoring adapter DNS and clearing WFP filters");
             tokio::task::block_in_place(|| {
-                release_everything(&engine, &mut wfp, &mut st);
                 wfp.clear_persistent_filters();
+                release_everything(&engine, &mut wfp, &mut st);
                 if let Err(e) = restore_original_adapter_dns(&data_dir) {
                     warn!("Failed to restore adapter DNS on service stop: {e}");
                 }

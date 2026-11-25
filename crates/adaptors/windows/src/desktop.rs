@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use curb_core::adaptors::{AppIcon, AppIconRequest, DesktopIntegration};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HWND};
+use windows::Win32::Networking::WinInet::{
+    InternetSetOptionW, INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED,
+};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
     HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD, REG_SZ, REG_VALUE_TYPE,
@@ -93,8 +96,11 @@ pub fn cleanup_user_desktop_config(remove_user_data: bool) -> Vec<String> {
                 );
                 let _ = RegDeleteValueW(hkey, PCWSTR(proxy_server_name.as_ptr()));
                 cleaned.push("Reset HKCU Standard Mode proxy settings".into());
+                let _ = RegCloseKey(hkey);
+                notify_wininet_proxy_changed();
+            } else {
+                let _ = RegCloseKey(hkey);
             }
-            let _ = RegCloseKey(hkey);
         }
     }
 
@@ -179,18 +185,21 @@ impl DesktopIntegration for WindowsDesktopIntegration {
         let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\0"
             .encode_utf16()
             .collect();
+        let expected_server = format!("127.0.0.1:{port}");
+        let mut updated = false;
         unsafe {
             let mut hkey = HKEY::default();
             if RegOpenKeyExW(
                 HKEY_CURRENT_USER,
                 PCWSTR(subkey.as_ptr()),
                 0,
-                KEY_SET_VALUE,
+                KEY_QUERY_VALUE | KEY_SET_VALUE,
                 &mut hkey,
             )
             .is_ok()
             {
                 let enable_name: Vec<u16> = "ProxyEnable\0".encode_utf16().collect();
+                let server_name: Vec<u16> = "ProxyServer\0".encode_utf16().collect();
                 let enable_val: u32 = if enable { 1 } else { 0 };
                 let _ = RegSetValueExW(
                     hkey,
@@ -201,9 +210,8 @@ impl DesktopIntegration for WindowsDesktopIntegration {
                 );
 
                 if enable {
-                    let server_name: Vec<u16> = "ProxyServer\0".encode_utf16().collect();
                     let server_val: Vec<u16> =
-                        format!("127.0.0.1:{port}\0").encode_utf16().collect();
+                        format!("{expected_server}\0").encode_utf16().collect();
                     let bytes = std::slice::from_raw_parts(
                         server_val.as_ptr() as *const u8,
                         server_val.len() * 2,
@@ -230,9 +238,40 @@ impl DesktopIntegration for WindowsDesktopIntegration {
                         REG_SZ,
                         Some(obytes),
                     );
+                } else {
+                    let mut val_type = REG_VALUE_TYPE::default();
+                    let mut buf = [0u16; 256];
+                    let mut byte_len = (buf.len() * 2) as u32;
+                    let matches_curb_proxy = RegQueryValueExW(
+                        hkey,
+                        PCWSTR(server_name.as_ptr()),
+                        None,
+                        Some(&mut val_type),
+                        Some(buf.as_mut_ptr() as *mut u8),
+                        Some(&mut byte_len),
+                    )
+                    .is_ok()
+                        && val_type == REG_SZ
+                        && {
+                            let u16_len = (byte_len as usize) / 2;
+                            let slice = &buf[..u16_len.min(buf.len())];
+                            let trimmed = slice
+                                .iter()
+                                .take_while(|&&c| c != 0)
+                                .copied()
+                                .collect::<Vec<_>>();
+                            String::from_utf16_lossy(&trimmed) == expected_server
+                        };
+                    if matches_curb_proxy {
+                        let _ = RegDeleteValueW(hkey, PCWSTR(server_name.as_ptr()));
+                    }
                 }
                 let _ = RegCloseKey(hkey);
+                updated = true;
             }
+        }
+        if updated {
+            notify_wininet_proxy_changed();
         }
     }
 
@@ -312,3 +351,14 @@ fn run_elevated_windows(exe: &Path, params: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Broadcasts `INTERNET_OPTION_SETTINGS_CHANGED` + `INTERNET_OPTION_REFRESH` to WinINet so
+/// browsers and Electron/Chromium apps (e.g. Discord, Edge, Chrome) immediately pick up
+/// `HKCU\...\Internet Settings` proxy changes without keeping stale proxy routes.
+fn notify_wininet_proxy_changed() {
+    unsafe {
+        let _ = InternetSetOptionW(None, INTERNET_OPTION_SETTINGS_CHANGED, None, 0);
+        let _ = InternetSetOptionW(None, INTERNET_OPTION_REFRESH, None, 0);
+    }
+}
+

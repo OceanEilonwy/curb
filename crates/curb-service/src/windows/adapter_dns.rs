@@ -152,23 +152,53 @@ fn extract_upstream_servers(backups: &[AdapterDnsBackup]) -> Vec<SocketAddr> {
 
 fn capture_adapter_dns_snapshot() -> Result<Vec<AdapterDnsBackup>, String> {
     let ps = r#"
-        $items = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
-            $guid = $_.InterfaceGuid
-            $v4Key = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$guid"
-            $v6Key = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$guid"
-            $v4Ns = (Get-ItemProperty -Path $v4Key -Name NameServer -ErrorAction SilentlyContinue).NameServer
-            $v6Ns = (Get-ItemProperty -Path $v6Key -Name NameServer -ErrorAction SilentlyContinue).NameServer
-            $v4Static = [bool]($v4Ns -and ($v4Ns.Trim() -ne '') -and ($v4Ns.Trim() -ne '127.0.0.1'))
-            $v6Static = [bool]($v6Ns -and ($v6Ns.Trim() -ne '') -and ($v6Ns.Trim() -ne '::1'))
-            $dns = Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ErrorAction SilentlyContinue
+        $ifaces = @(Get-NetIPInterface -ConnectionState Connected -ErrorAction SilentlyContinue | Select-Object -ExpandProperty InterfaceIndex -Unique)
+        $items = @(foreach ($idx in $ifaces) {
+            $adapter = Get-NetAdapter -InterfaceIndex $idx -ErrorAction SilentlyContinue | Select-Object -First 1
+            $ipIfV4 = Get-NetIPInterface -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
+            $ipIfV6 = Get-NetIPInterface -InterfaceIndex $idx -AddressFamily IPv6 -ErrorAction SilentlyContinue | Select-Object -First 1
+            $alias = if ($adapter -and $adapter.Name) {
+                $adapter.Name
+            } elseif ($ipIfV4 -and $ipIfV4.InterfaceAlias) {
+                $ipIfV4.InterfaceAlias
+            } elseif ($ipIfV6 -and $ipIfV6.InterfaceAlias) {
+                $ipIfV6.InterfaceAlias
+            } else {
+                "Interface-$idx"
+            }
+
+            $dnsV4 = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses } | Where-Object {
+                $_ -and $_ -ne '127.0.0.1' -and $_ -ne '::1'
+            })
+            $dnsV6 = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv6 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses } | Where-Object {
+                $_ -and $_ -ne '127.0.0.1' -and $_ -ne '::1' -and $_ -notlike 'fec0:*' -and $_ -notlike 'fe80:*'
+            })
+            $origServers = @($dnsV4 + $dnsV6)
+
+            $v4Static = $false
+            $v6Static = $false
+            if ($adapter -and $adapter.InterfaceGuid) {
+                $guid = $adapter.InterfaceGuid
+                $v4Key = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$guid"
+                $v6Key = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$guid"
+                $v4Ns = (Get-ItemProperty -Path $v4Key -Name NameServer -ErrorAction SilentlyContinue).NameServer
+                $v6Ns = (Get-ItemProperty -Path $v6Key -Name NameServer -ErrorAction SilentlyContinue).NameServer
+                $v4Static = [bool]($v4Ns -and ($v4Ns.Trim() -ne '') -and ($v4Ns.Trim() -ne '127.0.0.1'))
+                $v6Static = [bool]($v6Ns -and ($v6Ns.Trim() -ne '') -and ($v6Ns.Trim() -ne '::1'))
+            } else {
+                # Tunnel/VPN interfaces (Wintun, WireGuard, OpenVPN, PPP) are often omitted by
+                # Get-NetAdapter and configure static DNS without DHCP. Preserve their servers
+                # so disabling Curb never wipes VPN DNS to empty DHCP.
+                $v4Static = ($dnsV4.Count -gt 0) -and (-not $ipIfV4 -or $ipIfV4.Dhcp -eq 'Disabled')
+                $v6Static = ($dnsV6.Count -gt 0) -and (-not $ipIfV6 -or $ipIfV6.Dhcp -eq 'Disabled')
+            }
+
             [PSCustomObject]@{
-                interface_alias = $_.Name
-                interface_index = [int]$_.ifIndex
-                original_servers = @($dns | ForEach-Object { $_.ServerAddresses } | Where-Object {
-                    $_ -and $_ -ne '127.0.0.1' -and $_ -ne '::1' -and $_ -notlike 'fec0:*' -and $_ -notlike 'fe80:*'
-                })
-                v4_static = $v4Static
-                v6_static = $v6Static
+                interface_alias = [string]$alias
+                interface_index = [int]$idx
+                original_servers = @($origServers)
+                v4_static = [bool]$v4Static
+                v6_static = [bool]$v6Static
             }
         })
         ConvertTo-Json -InputObject $items -Depth 4 -Compress

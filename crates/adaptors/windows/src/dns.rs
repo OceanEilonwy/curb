@@ -79,7 +79,6 @@ pub fn restore_adapter_dns_clean(data_dir: &Path) -> Result<(), String> {
                 }
             }
         }
-        let _ = std::fs::remove_file(&backup_file);
     }
 
     script.push_str(
@@ -90,7 +89,10 @@ Get-DnsClientServerAddress -ErrorAction SilentlyContinue | Where-Object { $_.Ser
 Clear-DnsClientCache -ErrorAction SilentlyContinue
 "#,
     );
-    let _ = run_powershell(&script);
+    run_powershell(&script)?;
+    if backup_file.exists() {
+        let _ = std::fs::remove_file(&backup_file);
+    }
     Ok(())
 }
 
