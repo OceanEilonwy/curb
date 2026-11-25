@@ -195,8 +195,7 @@ fn main() {
                 let _ = tx.send(true);
             });
         }
-        let _keep_tx = shutdown_tx;
-        run_service_runtime(args, shutdown_rx, None).await;
+        run_service_runtime(args, shutdown_tx, shutdown_rx, None).await;
     });
 }
 
@@ -219,6 +218,7 @@ fn build_service_adaptors() -> curb_core::adaptors::ServiceAdaptors {
 
 async fn run_service_runtime(
     args: Args,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     power_resume_notify: Option<std::sync::Arc<tokio::sync::Notify>>,
 ) {
@@ -302,6 +302,7 @@ async fn run_service_runtime(
 
     if let Err(e) = ipc_server::run_ipc_server(engine, shutdown_rx).await {
         error!("IPC server failed: {e}");
+        let _ = shutdown_tx.send(true);
     }
 
     let _ = playtime_task.await;
@@ -335,6 +336,7 @@ fn run_as_windows_service() -> Result<(), windows_service::Error> {
 
     fn service_main(_args: Vec<OsString>) {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let shutdown_tx_handler = shutdown_tx.clone();
         let power_notify = Arc::new(tokio::sync::Notify::new());
         let power_handler = power_notify.clone();
         let handle_cell: Arc<OnceLock<ServiceStatusHandle>> = Arc::new(OnceLock::new());
@@ -354,7 +356,7 @@ fn run_as_windows_service() -> Result<(), windows_service::Error> {
                             process_id: None,
                         });
                     }
-                    let _ = shutdown_tx.send(true);
+                    let _ = shutdown_tx_handler.send(true);
                     ServiceControlHandlerResult::NoError
                 }
                 ServiceControl::PowerEvent(_) => {
@@ -389,6 +391,7 @@ fn run_as_windows_service() -> Result<(), windows_service::Error> {
                 dns_upstream: "1.1.1.1:53".parse().unwrap(),
                 no_dns: false,
             },
+            shutdown_tx,
             shutdown_rx,
             Some(power_notify),
         ));

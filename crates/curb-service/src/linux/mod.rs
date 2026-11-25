@@ -129,7 +129,7 @@ pub async fn run_linux_enforcement_loop(
                 if handle.is_finished() {
                     warn!("Curb NFQUEUE thread exited unexpectedly; purging nftables before respawn");
                     if currently_enforcing {
-                        let _ = firewall.purge_all();
+                        let _ = tokio::task::spawn_blocking(move || firewall.purge_all()).await;
                         currently_enforcing = false;
                         engine.state.lock().unwrap().active_wfp_filters = 0;
                     }
@@ -201,7 +201,10 @@ pub async fn run_linux_enforcement_loop(
                 && last_drift_check.elapsed() >= NFT_DRIFT_CHECK
                 && {
                     last_drift_check = Instant::now();
-                    !firewall.is_applied()
+                    let applied = tokio::task::spawn_blocking(move || firewall.is_applied())
+                        .await
+                        .unwrap_or(true);
+                    !applied
                 };
 
             if drift_detected {
@@ -215,25 +218,45 @@ pub async fn run_linux_enforcement_loop(
                 || drift_detected
             {
                 let entering_enforcing = !currently_enforcing;
-                if entering_enforcing || config_changed {
-                    policy_generation = policy_generation.wrapping_add(1);
-                    let next_mark = policy_mark_for_generation(policy_generation);
-                    current_policy_mark.store(next_mark, Ordering::Release);
-                    // Clear tracked_processes so disabled/deleted rules or expired playtime
-                    // limits cannot leave stale subprocess inheritance behind.
-                    engine.state.lock().unwrap().tracked_processes.clear();
-                }
+                let bump_generation = entering_enforcing || config_changed;
+                let candidate_gen = if bump_generation {
+                    policy_generation.wrapping_add(1)
+                } else {
+                    policy_generation
+                };
+                let candidate_mark = policy_mark_for_generation(candidate_gen);
 
                 let opts = RulesetOptions {
                     dns_proxy_port,
                     redirect_ipv6,
                     queue_num: CURB_NFQUEUE_NUM,
                     fw_mark: CURB_FW_MARK,
-                    policy_ct_mark: current_policy_mark.load(Ordering::Acquire),
+                    policy_ct_mark: candidate_mark,
                 };
 
-                match firewall.apply_enforcing_with_options(&baseline, opts) {
+                // Run `nft -f -` on a blocking thread and ONLY commit `current_policy_mark`
+                // after `nft` succeeds so NFQUEUE never sends `NF_REPEAT` with a mark that
+                // the active kernel chain does not recognize.
+                let baseline_for_apply = baseline.clone();
+                let apply_res = tokio::task::spawn_blocking(move || {
+                    firewall.apply_enforcing_with_options(&baseline_for_apply, opts)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("nft apply task failed: {e}")));
+
+                match commit_policy_mark_on_apply(
+                    apply_res,
+                    &mut policy_generation,
+                    &current_policy_mark,
+                    candidate_gen,
+                    candidate_mark,
+                ) {
                     Ok(()) => {
+                        if bump_generation {
+                            // Clear tracked_processes so disabled/deleted rules or expired playtime
+                            // limits cannot leave stale subprocess inheritance behind.
+                            engine.state.lock().unwrap().tracked_processes.clear();
+                        }
                         currently_enforcing = true;
                         last_baseline = Some(baseline.clone());
                         last_config_version = Some(config_version);
@@ -277,7 +300,7 @@ pub async fn run_linux_enforcement_loop(
                 last_connectivity_prewarm = Some(Instant::now());
             }
         } else if currently_enforcing {
-            if let Err(e) = firewall.purge_all() {
+            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || firewall.purge_all()).await {
                 warn!("Failed to remove Linux nftables ruleset: {e}");
             }
             currently_enforcing = false;
@@ -305,7 +328,7 @@ pub async fn run_linux_enforcement_loop(
         }
     }
 
-    let _ = firewall.purge_all();
+    let _ = tokio::task::spawn_blocking(move || firewall.purge_all()).await;
     if let Some(flag) = nfqueue_stop.take() {
         flag.store(true, Ordering::Relaxed);
     }
@@ -319,6 +342,57 @@ pub async fn run_linux_enforcement_loop(
 }
 
 #[cfg(target_os = "linux")]
+fn commit_policy_mark_on_apply(
+    apply_res: Result<(), String>,
+    policy_generation: &mut u64,
+    current_policy_mark: &std::sync::atomic::AtomicU32,
+    candidate_gen: u64,
+    candidate_mark: u32,
+) -> Result<(), String> {
+    apply_res?;
+    *policy_generation = candidate_gen;
+    current_policy_mark.store(candidate_mark, std::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+/// Inspects a Linux binary at `path`, falling back to `/proc/<pid>/exe` (which
+/// crosses Flatpak/Snap/pressure-vessel mount namespaces) and finally a path-only
+/// identity if the binary was unlinked during a live package upgrade.
+#[cfg(target_os = "linux")]
+fn inspect_linux_binary(
+    verifier: &dyn curb_core::adaptors::BinaryVerifier,
+    path: &std::path::Path,
+    pid: Option<u32>,
+) -> curb_core::verify::BinaryIdentity {
+    use curb_core::verify::BinaryIdentity;
+
+    if let Ok(id) = verifier.inspect_binary(path) {
+        return id;
+    }
+    let filename = path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if let Some(p) = pid {
+        let proc_exe = std::path::PathBuf::from(format!("/proc/{p}/exe"));
+        if let Ok(mut id) = verifier.inspect_binary(&proc_exe) {
+            id.path = path.to_string_lossy().to_string();
+            id.filename = filename;
+            return id;
+        }
+    }
+    BinaryIdentity {
+        path: path.to_string_lossy().to_string(),
+        filename,
+        sha256: String::new(),
+        signature: None,
+        product_name: None,
+        original_filename: None,
+        file_description: None,
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn evaluate_linux_packet(
     engine: &crate::engine::ServiceEngine,
     ctx: &curb_nftables::PacketContext,
@@ -326,7 +400,6 @@ fn evaluate_linux_packet(
 ) -> curb_nftables::NfqueueVerdict {
     use chrono::Utc;
     use curb_core::ipc::BlockedEvent;
-    use curb_core::verify::BinaryIdentity;
     use curb_nftables::{L4Proto, NfqueueVerdict};
     use tracing::debug;
     use uuid::Uuid;
@@ -349,46 +422,47 @@ fn evaluate_linux_packet(
         return NfqueueVerdict::Drop;
     };
 
-    let identity = match engine.adaptors.verifier.inspect_binary(path) {
-        Ok(id) => id,
-        Err(_) => {
-            // If an upgraded binary was unlinked on disk while still running,
-            // fall back to a path-only identity so path-based rules still match.
-            let filename = path
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_default();
-            BinaryIdentity {
-                path: path.to_string_lossy().to_string(),
-                filename,
-                sha256: String::new(),
-                signature: None,
-                product_name: None,
-                original_filename: None,
-                file_description: None,
-            }
+    let identity = inspect_linux_binary(engine.adaptors.verifier.as_ref(), path, ctx.pid);
+
+    // Phase 1: fast evaluation under lock (no disk I/O).
+    let (direct_match, proton_candidates) = {
+        let guard = engine.state.lock().unwrap();
+        if !guard.config.mode.is_actively_enforcing(Utc::now()) {
+            return NfqueueVerdict::Accept;
         }
+
+        // Permit Linux OS connectivity probes (NetworkManager / ConnMan / systemd-networkd)
+        // to resolved connectivity-check endpoints on HTTP/HTTPS when baseline NCSI is enabled.
+        if guard.config.baseline.ncsi
+            && ctx.tuple.proto == L4Proto::Tcp
+            && matches!(ctx.tuple.dst_port, 80 | 443)
+            && is_linux_connectivity_daemon(&identity.filename)
+            && guard.ncsi_allowed_ips().contains(&ctx.tuple.dst_ip)
+        {
+            return NfqueueVerdict::AcceptAndMark(policy_ct_mark);
+        }
+
+        let direct = guard.evaluate_process(ctx.ppid, &identity);
+        let proton = if direct.is_none() && is_proton_or_wine_loader(&identity) {
+            collect_proton_candidates(&guard)
+        } else {
+            Vec::new()
+        };
+        (direct, proton)
     };
+
+    // Phase 2: if Proton/Wine loader, inspect candidate game `.exe` WITHOUT holding `engine.state`.
+    let matched = direct_match.or_else(|| {
+        if proton_candidates.is_empty() {
+            return None;
+        }
+        evaluate_proton_candidates(engine.adaptors.verifier.as_ref(), ctx.pid, &proton_candidates)
+    });
 
     let mut guard = engine.state.lock().unwrap();
     if !guard.config.mode.is_actively_enforcing(Utc::now()) {
         return NfqueueVerdict::Accept;
     }
-
-    // Permit Linux OS connectivity probes (NetworkManager / ConnMan / systemd-networkd)
-    // to resolved connectivity-check endpoints on HTTP/HTTPS when baseline NCSI is enabled.
-    if guard.config.baseline.ncsi
-        && ctx.tuple.proto == L4Proto::Tcp
-        && matches!(ctx.tuple.dst_port, 80 | 443)
-        && is_linux_connectivity_daemon(&identity.filename)
-        && guard.ncsi_allowed_ips().contains(&ctx.tuple.dst_ip)
-    {
-        return NfqueueVerdict::AcceptAndMark(policy_ct_mark);
-    }
-
-    let matched = guard
-        .evaluate_process(ctx.ppid, &identity)
-        .or_else(|| evaluate_proton_wine_game(&guard, engine, ctx.pid, &identity));
 
     if let Some((rule_label, network, subprocesses)) = matched {
         let proto_ok = match ctx.tuple.proto {
@@ -472,16 +546,42 @@ fn is_proton_or_wine_loader(identity: &curb_core::verify::BinaryIdentity) -> boo
         || path_lower.starts_with("/usr/lib/wine")
 }
 
-/// Resolves Windows `.exe` games running under Proton/Wine on Linux where `/proc/<pid>/exe`
-/// points to `wine64-preloader` instead of the game binary. Only activates for genuine
-/// Wine/Proton loader binaries and still verifies the target `.exe` inside the allowed
-/// `SteamGame`'s `install_dir`.
 #[cfg(target_os = "linux")]
-fn evaluate_proton_wine_game(
-    guard: &crate::engine::EngineState,
-    engine: &crate::engine::ServiceEngine,
+struct ProtonRuleCandidate {
+    name: String,
+    install_dir: String,
+    matcher: curb_core::config::ExecutableMatcher,
+    network: curb_core::config::NetworkPolicy,
+    subprocesses: curb_core::config::SubprocessPolicy,
+}
+
+#[cfg(target_os = "linux")]
+fn collect_proton_candidates(guard: &crate::engine::EngineState) -> Vec<ProtonRuleCandidate> {
+    let mut out = Vec::new();
+    for rule in &guard.config.rules {
+        if !rule.enabled || guard.is_rule_playtime_expired(rule.id) {
+            continue;
+        }
+        if let curb_core::config::ExecutableMatcher::SteamGame { install_dir, .. } = &rule.matcher {
+            out.push(ProtonRuleCandidate {
+                name: rule.name.clone(),
+                install_dir: install_dir.clone(),
+                matcher: rule.matcher.clone(),
+                network: rule.network.clone(),
+                subprocesses: rule.subprocesses,
+            });
+        }
+    }
+    out
+}
+
+/// Resolves Windows `.exe` games running under Proton/Wine on Linux without holding
+/// the global `engine.state` lock while hashing the game binary on disk.
+#[cfg(target_os = "linux")]
+fn evaluate_proton_candidates(
+    verifier: &dyn curb_core::adaptors::BinaryVerifier,
     pid: Option<u32>,
-    loader_identity: &curb_core::verify::BinaryIdentity,
+    candidates: &[ProtonRuleCandidate],
 ) -> Option<(
     String,
     curb_core::config::NetworkPolicy,
@@ -489,32 +589,22 @@ fn evaluate_proton_wine_game(
 )> {
     use std::path::PathBuf;
 
-    if !is_proton_or_wine_loader(loader_identity) {
-        return None;
-    }
     let pid = pid?;
     let cmdline = curb_linux::proc_net::read_proc_cmdline(pid);
     if cmdline.is_empty() {
         return None;
     }
 
-    for rule in &guard.config.rules {
-        if !rule.enabled || guard.is_rule_playtime_expired(rule.id) {
-            continue;
-        }
-        let curb_core::config::ExecutableMatcher::SteamGame { install_dir, .. } = &rule.matcher
-        else {
-            continue;
-        };
-        if let Some(exe_path) = match_proton_cmdline_to_install_dir(&cmdline, install_dir) {
-            if let Ok(game_identity) = engine.adaptors.verifier.inspect_binary(&PathBuf::from(&exe_path)) {
-                if rule.matcher.matches(&game_identity)
-                    || rule.subprocesses != curb_core::config::SubprocessPolicy::Disabled
+    for cand in candidates {
+        if let Some(exe_path) = match_proton_cmdline_to_install_dir(&cmdline, &cand.install_dir) {
+            if let Ok(game_identity) = verifier.inspect_binary(&PathBuf::from(&exe_path)) {
+                if cand.matcher.matches(&game_identity)
+                    || cand.subprocesses != curb_core::config::SubprocessPolicy::Disabled
                 {
                     return Some((
-                        format!("{} (Proton)", rule.name),
-                        rule.network.clone(),
-                        rule.subprocesses,
+                        format!("{} (Proton)", cand.name),
+                        cand.network.clone(),
+                        cand.subprocesses,
                     ));
                 }
             }
@@ -660,5 +750,50 @@ mod tests {
         assert!(is_proton_or_wine_loader(&loader));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_nft_apply_does_not_mutate_policy_mark() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let mut gen = 1u64;
+        let initial_mark = curb_nftables::policy_mark_for_generation(gen);
+        let mark_atomic = AtomicU32::new(initial_mark);
+        let next_gen = 2u64;
+        let next_mark = curb_nftables::policy_mark_for_generation(next_gen);
+
+        let err = commit_policy_mark_on_apply(
+            Err("nft syntax error".into()),
+            &mut gen,
+            &mark_atomic,
+            next_gen,
+            next_mark,
+        );
+        assert!(err.is_err());
+        assert_eq!(gen, 1);
+        assert_eq!(mark_atomic.load(Ordering::Acquire), initial_mark);
+
+        let ok = commit_policy_mark_on_apply(
+            Ok(()),
+            &mut gen,
+            &mark_atomic,
+            next_gen,
+            next_mark,
+        );
+        assert!(ok.is_ok());
+        assert_eq!(gen, 2);
+        assert_eq!(mark_atomic.load(Ordering::Acquire), next_mark);
+    }
+
+    #[test]
+    fn inspect_linux_binary_falls_back_to_proc_exe_magic_symlink() {
+        let verifier = curb_core::adaptors::DefaultBinaryVerifier;
+        let container_path = PathBuf::from("/app/bin/nonexistent-flatpak-app");
+        let id = inspect_linux_binary(&verifier, &container_path, Some(std::process::id()));
+        assert_eq!(id.path, "/app/bin/nonexistent-flatpak-app");
+        assert_eq!(id.filename, "nonexistent-flatpak-app");
+        assert!(
+            !id.sha256.is_empty(),
+            "expected SHA-256 computed via /proc/<pid>/exe magic symlink"
+        );
     }
 }

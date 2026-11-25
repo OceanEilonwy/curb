@@ -8,6 +8,10 @@ use std::sync::Arc;
 use curb_linux::proc_net::{read_proc_exe, read_proc_ppid, resolve_pid_for_socket};
 use tracing::{debug, info, warn};
 
+use std::time::{Duration, Instant};
+
+use crate::ruleset::merge_policy_mark;
+
 const NETLINK_NETFILTER: libc::c_int = 12;
 const SOL_NETLINK: libc::c_int = 270;
 const NETLINK_NO_ENOBUFS: libc::c_int = 5;
@@ -23,10 +27,12 @@ const NFQNL_CFG_CMD_UNBIND: u8 = 2;
 
 const NFQNL_COPY_PACKET: u8 = 2;
 
+// `<linux/netfilter/nfnetlink_queue.h>` `enum nfqnl_attr_type`:
+// 1 = NFQA_PACKET_HDR, 2 = NFQA_VERDICT_HDR, 3 = NFQA_MARK, 9 = NFQA_HWADDR, 10 = NFQA_PAYLOAD
 const NFQA_PACKET_HDR: u16 = 1;
 const NFQA_VERDICT_HDR: u16 = 2;
 const NFQA_MARK: u16 = 3;
-const NFQA_PAYLOAD: u16 = 9;
+const NFQA_PAYLOAD: u16 = 10;
 
 const NFQA_CFG_CMD: u16 = 1;
 const NFQA_CFG_PARAMS: u16 = 2;
@@ -240,10 +246,26 @@ fn build_nfq_msg(
     msg
 }
 
-fn recv_ack(sock: &NetlinkSocket, expected_seq: u32) -> io::Result<()> {
-    let mut buf = [0u8; 4096];
-    for _ in 0..8 {
-        let n = sock.recv(&mut buf)?;
+fn recv_ack(
+    sock: &NetlinkSocket,
+    seq: &mut u32,
+    queue_num: u16,
+    expected_seq: u32,
+) -> io::Result<()> {
+    let mut buf = [0u8; 65536];
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let n = match sock.recv(&mut buf) {
+            Ok(n) => n,
+            Err(e)
+                if e.kind() == io::ErrorKind::Interrupted
+                    || e.kind() == io::ErrorKind::WouldBlock
+                    || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         let mut offset = 0usize;
         while offset + 16 <= n {
             let nlmsg_len = u32::from_ne_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
@@ -259,6 +281,14 @@ fn recv_ack(sock: &NetlinkSocket, expected_seq: u32) -> io::Result<()> {
                     return Ok(());
                 }
                 return Err(io::Error::from_raw_os_error(-err_code));
+            }
+            // If packets arrive on a pre-existing queue while awaiting config ACK,
+            // drop them immediately so they never leak in the kernel ring.
+            if nlmsg_type == ((NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_PACKET) && nlmsg_len >= 20 {
+                let attrs = &buf[offset + 20..offset + nlmsg_len];
+                if let Some((packet_id, _, _)) = parse_nfq_packet_attrs(attrs) {
+                    let _ = send_verdict(sock, seq, queue_num, packet_id, 0, NfqueueVerdict::Drop);
+                }
             }
             let step = align4(nlmsg_len);
             if step == 0 {
@@ -282,6 +312,7 @@ fn send_cfg_cmd(
     wait_ack: bool,
 ) -> io::Result<()> {
     *seq = seq.wrapping_add(1);
+    let expected_seq = *seq;
     let mut payload = [0u8; 4];
     payload[0] = cmd;
     payload[1] = 0;
@@ -296,20 +327,21 @@ fn send_cfg_cmd(
     let msg = build_nfq_msg(
         NFQNL_MSG_CONFIG,
         flags,
-        *seq,
+        expected_seq,
         libc::AF_UNSPEC as u8,
         queue_num,
         &attrs,
     );
     sock.send(&msg)?;
     if wait_ack {
-        recv_ack(sock, *seq)?;
+        recv_ack(sock, seq, queue_num, expected_seq)?;
     }
     Ok(())
 }
 
 fn send_cfg_params(sock: &NetlinkSocket, seq: &mut u32, queue_num: u16) -> io::Result<()> {
     *seq = seq.wrapping_add(1);
+    let expected_seq = *seq;
     let mut payload = [0u8; 5];
     payload[0..4].copy_from_slice(&NFQUEUE_COPY_RANGE.to_be_bytes());
     payload[4] = NFQNL_COPY_PACKET;
@@ -319,13 +351,13 @@ fn send_cfg_params(sock: &NetlinkSocket, seq: &mut u32, queue_num: u16) -> io::R
     let msg = build_nfq_msg(
         NFQNL_MSG_CONFIG,
         NLM_F_REQUEST | NLM_F_ACK,
-        *seq,
+        expected_seq,
         libc::AF_UNSPEC as u8,
         queue_num,
         &attrs,
     );
     sock.send(&msg)?;
-    recv_ack(sock, *seq)
+    recv_ack(sock, seq, queue_num, expected_seq)
 }
 
 fn send_verdict(
@@ -333,13 +365,14 @@ fn send_verdict(
     seq: &mut u32,
     queue_num: u16,
     packet_id: u32,
+    existing_mark: u32,
     verdict: NfqueueVerdict,
 ) -> io::Result<()> {
     *seq = seq.wrapping_add(1);
     let (nf_verdict, mark) = match verdict {
         NfqueueVerdict::Drop => (NF_DROP, None),
         NfqueueVerdict::Accept => (NF_ACCEPT, None),
-        NfqueueVerdict::AcceptAndMark(m) => (NF_REPEAT, Some(m)),
+        NfqueueVerdict::AcceptAndMark(m) => (NF_REPEAT, Some(merge_policy_mark(existing_mark, m))),
     };
     let mut payload = [0u8; 8];
     payload[0..4].copy_from_slice(&nf_verdict.to_be_bytes());
@@ -425,8 +458,9 @@ where
 
             if nlmsg_type == ((NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_PACKET) && nlmsg_len >= 20 {
                 let attrs = &buf[offset + 20..offset + nlmsg_len];
-                if let Some((packet_id, payload)) = parse_nfq_packet_attrs(attrs) {
-                    let verdict = match parse_ip_packet(payload) {
+                if let Some((packet_id, existing_mark, payload_opt)) = parse_nfq_packet_attrs(attrs)
+                {
+                    let verdict = match payload_opt.and_then(parse_ip_packet) {
                         Some(tuple) => {
                             let pid = resolve_pid_for_socket(
                                 tuple.proto == L4Proto::Tcp,
@@ -445,7 +479,14 @@ where
                         }
                         None => NfqueueVerdict::Drop,
                     };
-                    if let Err(e) = send_verdict(&sock, &mut seq, queue_num, packet_id, verdict) {
+                    if let Err(e) = send_verdict(
+                        &sock,
+                        &mut seq,
+                        queue_num,
+                        packet_id,
+                        existing_mark,
+                        verdict,
+                    ) {
                         debug!("Failed to send NFQUEUE verdict for packet {packet_id}: {e}");
                     }
                 }
@@ -465,8 +506,12 @@ where
     Ok(())
 }
 
-fn parse_nfq_packet_attrs(mut data: &[u8]) -> Option<(u32, &[u8])> {
+/// Parses `NFQNL_MSG_PACKET` attributes, returning `(packet_id, existing_mark, payload)`.
+/// Always returns `Some` whenever `NFQA_PACKET_HDR` is present so the caller never leaks
+/// a queued packet in the kernel ring even if `NFQA_PAYLOAD` is missing.
+fn parse_nfq_packet_attrs(mut data: &[u8]) -> Option<(u32, u32, Option<&[u8]>)> {
     let mut packet_id: Option<u32> = None;
+    let mut existing_mark: u32 = 0;
     let mut payload: Option<&[u8]> = None;
 
     while data.len() >= 4 {
@@ -480,6 +525,9 @@ fn parse_nfq_packet_attrs(mut data: &[u8]) -> Option<(u32, &[u8])> {
             NFQA_PACKET_HDR if val.len() >= 4 => {
                 packet_id = Some(u32::from_be_bytes([val[0], val[1], val[2], val[3]]));
             }
+            NFQA_MARK if val.len() >= 4 => {
+                existing_mark = u32::from_be_bytes([val[0], val[1], val[2], val[3]]);
+            }
             NFQA_PAYLOAD => {
                 payload = Some(val);
             }
@@ -492,7 +540,7 @@ fn parse_nfq_packet_attrs(mut data: &[u8]) -> Option<(u32, &[u8])> {
         data = &data[step..];
     }
 
-    Some((packet_id?, payload?))
+    Some((packet_id?, existing_mark, payload))
 }
 
 /// Parses an IPv4 or IPv6 packet header (including IPv6 extension headers) and
@@ -586,6 +634,15 @@ pub fn parse_ip_packet(pkt: &[u8]) -> Option<PacketTuple> {
                         next_hdr = pkt[offset];
                         offset = offset.checked_add(8)?;
                     }
+                    // Authentication Header (51, RFC 4302): (payload_len + 2) * 4 bytes
+                    51 => {
+                        if pkt.len() < offset + 2 {
+                            return None;
+                        }
+                        next_hdr = pkt[offset];
+                        let hdr_len = (pkt[offset + 1] as usize + 2) * 4;
+                        offset = offset.checked_add(hdr_len)?;
+                    }
                     _ => return None,
                 }
             }
@@ -598,6 +655,42 @@ pub fn parse_ip_packet(pkt: &[u8]) -> Option<PacketTuple> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_nfqa_payload_attr_10_and_existing_mark_ignoring_hwaddr_9() {
+        let mut attrs = Vec::new();
+        // NFQA_PACKET_HDR (1): packet_id = 0x11223344, hw_protocol = 0x0800, hook = 3
+        let mut hdr = [0u8; 7];
+        hdr[0..4].copy_from_slice(&0x1122_3344u32.to_be_bytes());
+        push_nlattr(&mut attrs, NFQA_PACKET_HDR, &hdr);
+        // NFQA_MARK (3): existing VPN mark 0x0008_ca6c
+        push_nlattr(&mut attrs, NFQA_MARK, &0x0008_CA6Cu32.to_be_bytes());
+        // NFQA_HWADDR (9): must NOT be confused with NFQA_PAYLOAD (10)
+        push_nlattr(&mut attrs, 9, &[0xAA, 0xBB, 0xCC, 0xDD]);
+        // NFQA_PAYLOAD (10): actual IP packet bytes
+        let fake_ip = [0x45u8, 0x00, 0x00, 0x18];
+        push_nlattr(&mut attrs, 10, &fake_ip);
+
+        let (pkt_id, mark, payload) =
+            parse_nfq_packet_attrs(&attrs).expect("parsed NFQ packet attrs");
+        assert_eq!(pkt_id, 0x1122_3344);
+        assert_eq!(mark, 0x0008_CA6C);
+        assert_eq!(payload, Some(&fake_ip[..]));
+    }
+
+    #[test]
+    fn returns_packet_id_even_when_payload_is_missing() {
+        let mut attrs = Vec::new();
+        let mut hdr = [0u8; 7];
+        hdr[0..4].copy_from_slice(&42u32.to_be_bytes());
+        push_nlattr(&mut attrs, NFQA_PACKET_HDR, &hdr);
+
+        let (pkt_id, mark, payload) =
+            parse_nfq_packet_attrs(&attrs).expect("packet_id returned without payload");
+        assert_eq!(pkt_id, 42);
+        assert_eq!(mark, 0);
+        assert_eq!(payload, None);
+    }
 
     #[test]
     fn parses_ipv4_tcp_packet() {
@@ -636,8 +729,8 @@ mod tests {
 
     #[test]
     fn parses_ipv6_tcp_packet_with_extension_headers() {
-        // 40B IPv6 base + 8B Hop-by-Hop (0) + 8B Fragment (44) + 4B TCP ports
-        let mut pkt = vec![0u8; 60];
+        // 40B IPv6 base + 8B Hop-by-Hop (0) + 8B Fragment (44) + 16B AH (51) + 4B TCP ports
+        let mut pkt = vec![0u8; 76];
         pkt[0] = 0x60;
         pkt[6] = 0; // Hop-by-Hop
         pkt[23] = 1;
@@ -646,13 +739,16 @@ mod tests {
         // Hop-by-Hop at offset 40: next=44 (Fragment), hdr_ext_len=0 (8 bytes)
         pkt[40] = 44;
         pkt[41] = 0;
-        // Fragment at offset 48: next=6 (TCP)
-        pkt[48] = 6;
-        // TCP ports at offset 56
-        pkt[56..58].copy_from_slice(&51234u16.to_be_bytes());
-        pkt[58..60].copy_from_slice(&443u16.to_be_bytes());
+        // Fragment at offset 48: next=51 (AH)
+        pkt[48] = 51;
+        // AH at offset 56: next=6 (TCP), payload_len=2 => (2 + 2) * 4 = 16 bytes
+        pkt[56] = 6;
+        pkt[57] = 2;
+        // TCP ports at offset 72
+        pkt[72..74].copy_from_slice(&51234u16.to_be_bytes());
+        pkt[74..76].copy_from_slice(&443u16.to_be_bytes());
 
-        let tuple = parse_ip_packet(&pkt).expect("parsed IPv6 TCP with extension headers");
+        let tuple = parse_ip_packet(&pkt).expect("parsed IPv6 TCP with extension headers + AH");
         assert_eq!(tuple.proto, L4Proto::Tcp);
         assert_eq!(tuple.src_port, 51234);
         assert_eq!(tuple.dst_port, 443);

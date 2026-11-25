@@ -6,17 +6,78 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const INODE_CACHE_TTL: Duration = Duration::from_secs(15);
+const NEGATIVE_INODE_TTL: Duration = Duration::from_secs(2);
 const MAX_INODE_CACHE_ENTRIES: usize = 4096;
 
-fn inode_pid_cache() -> &'static Mutex<HashMap<u64, (u32, Instant)>> {
-    static CACHE: OnceLock<Mutex<HashMap<u64, (u32, Instant)>>> = OnceLock::new();
+#[derive(Clone)]
+enum CachedInodeEntry {
+    Owned {
+        pid: u32,
+        fd_name: String,
+        cached_at: Instant,
+    },
+    Unattributed {
+        cached_at: Instant,
+    },
+}
+
+fn inode_pid_cache() -> &'static Mutex<HashMap<u64, CachedInodeEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<u64, CachedInodeEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lookup_cached_inode(inode: u64, target: &str, now: Instant) -> Option<Option<u32>> {
+    let entry = inode_pid_cache().lock().ok()?.get(&inode).cloned()?;
+    match entry {
+        CachedInodeEntry::Owned {
+            pid,
+            fd_name,
+            cached_at,
+        } => {
+            if now.duration_since(cached_at) < INODE_CACHE_TTL {
+                // Verify the cached FD still points to this exact socket inode so
+                // inode reuse by another process can never misattribute packets.
+                if let Ok(link) = fs::read_link(format!("/proc/{pid}/fd/{fd_name}")) {
+                    if link.to_string_lossy() == target {
+                        return Some(Some(pid));
+                    }
+                }
+            }
+            None
+        }
+        CachedInodeEntry::Unattributed { cached_at } => {
+            if now.duration_since(cached_at) < NEGATIVE_INODE_TTL {
+                Some(None)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn store_cached_inode(inode: u64, entry: CachedInodeEntry, now: Instant) {
+    if let Ok(mut cache) = inode_pid_cache().lock() {
+        if cache.len() >= MAX_INODE_CACHE_ENTRIES {
+            cache.retain(|_, v| match v {
+                CachedInodeEntry::Owned { cached_at, .. } => {
+                    now.duration_since(*cached_at) < INODE_CACHE_TTL
+                }
+                CachedInodeEntry::Unattributed { cached_at } => {
+                    now.duration_since(*cached_at) < NEGATIVE_INODE_TTL
+                }
+            });
+            if cache.len() >= MAX_INODE_CACHE_ENTRIES {
+                cache.clear();
+            }
+        }
+        cache.insert(inode, entry);
+    }
 }
 
 /// Resolves the owning PID for an outbound TCP/UDP 4-tuple by scanning
 /// `/proc/net/{tcp,tcp6,udp,udp6}` for the socket inode and mapping it via
-/// `/proc/<pid>/fd/*` (with a short-TTL inode->PID cache to prevent `/proc`
-/// scan storms under UDP/QUIC bursts).
+/// `/proc/<pid>/fd/*` (with an FD-verified inode->PID cache and brief negative
+/// caching for kernel-owned sockets to prevent `/proc` scan storms).
 ///
 /// For IPv4 packets, falls back to `/proc/net/{tcp6,udp6}` using IPv4-mapped
 /// IPv6 addresses (`::ffff:a.b.c.d`) so dual-stack `AF_INET6` sockets
@@ -131,15 +192,11 @@ fn parse_proc_net_addr(token: &str) -> Option<(IpAddr, u16)> {
 
 fn find_pid_by_socket_inode(inode: u64) -> Option<u32> {
     let now = Instant::now();
-    if let Ok(cache) = inode_pid_cache().lock() {
-        if let Some(&(pid, cached_at)) = cache.get(&inode) {
-            if now.duration_since(cached_at) < INODE_CACHE_TTL && pid_exists(pid) {
-                return Some(pid);
-            }
-        }
+    let target = format!("socket:[{inode}]");
+    if let Some(cached) = lookup_cached_inode(inode, &target, now) {
+        return cached;
     }
 
-    let target = format!("socket:[{inode}]");
     let entries = fs::read_dir("/proc").ok()?;
     for entry in entries.flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
@@ -151,20 +208,23 @@ fn find_pid_by_socket_inode(inode: u64) -> Option<u32> {
         for fd in fds.flatten() {
             if let Ok(link) = fs::read_link(fd.path()) {
                 if link.to_string_lossy() == target {
-                    if let Ok(mut cache) = inode_pid_cache().lock() {
-                        if cache.len() >= MAX_INODE_CACHE_ENTRIES {
-                            cache.retain(|_, (_, ts)| now.duration_since(*ts) < INODE_CACHE_TTL);
-                            if cache.len() >= MAX_INODE_CACHE_ENTRIES {
-                                cache.clear();
-                            }
-                        }
-                        cache.insert(inode, (pid, now));
-                    }
+                    let fd_name = fd.file_name().to_string_lossy().into_owned();
+                    store_cached_inode(
+                        inode,
+                        CachedInodeEntry::Owned {
+                            pid,
+                            fd_name,
+                            cached_at: now,
+                        },
+                        now,
+                    );
                     return Some(pid);
                 }
             }
         }
     }
+
+    store_cached_inode(inode, CachedInodeEntry::Unattributed { cached_at: now }, now);
     None
 }
 
@@ -312,6 +372,39 @@ mod tests {
         assert_eq!(
             clean_deleted_exe_path(PathBuf::from("/usr/bin/firefox")),
             PathBuf::from("/usr/bin/firefox")
+        );
+    }
+
+    #[test]
+    fn inode_cache_rejects_stale_fd_and_serves_negative_entries() {
+        let now = Instant::now();
+        let fake_inode = 9_999_999_123u64;
+        // Cached Owned entry pointing to an FD that does NOT match `socket:[fake_inode]`
+        // must be rejected (returns None = cache miss) even while the PID is alive.
+        store_cached_inode(
+            fake_inode,
+            CachedInodeEntry::Owned {
+                pid: std::process::id(),
+                fd_name: "99999".into(),
+                cached_at: now,
+            },
+            now,
+        );
+        assert_eq!(
+            lookup_cached_inode(fake_inode, &format!("socket:[{fake_inode}]"), now),
+            None
+        );
+
+        // Negative-cached (kernel-owned) inode returns Some(None) without rescanning /proc.
+        let neg_inode = 9_999_999_124u64;
+        store_cached_inode(
+            neg_inode,
+            CachedInodeEntry::Unattributed { cached_at: now },
+            now,
+        );
+        assert_eq!(
+            lookup_cached_inode(neg_inode, &format!("socket:[{neg_inode}]"), now),
+            Some(None)
         );
     }
 }

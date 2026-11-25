@@ -44,20 +44,21 @@ pub fn set_curb_fw_mark<F: AsRawFd>(fd: &F) -> std::io::Result<()> {
 }
 
 pub fn discover_linux_upstream_dns() -> Vec<SocketAddr> {
+    // Check `/etc/resolv.conf` first so Tailscale MagicDNS (`100.100.100.100`),
+    // `wg-quick`, and static configs take precedence over stale systemd-resolved
+    // files. When `/etc/resolv.conf` points at a loopback stub (`127.0.0.53`),
+    // `parse_resolv_conf` returns empty and we fall through to the real upstream file.
     discover_from_paths(&[
+        "/etc/resolv.conf",
         "/run/systemd/resolve/resolv.conf",
         "/run/NetworkManager/no-stub-resolv.conf",
         "/run/NetworkManager/resolv.conf",
         "/run/resolvconf/resolv.conf",
         "/var/run/connman/resolv.conf",
-        "/etc/resolv.conf",
     ])
 }
 
 fn discover_from_paths(paths: &[&str]) -> Vec<SocketAddr> {
-    // Prefer the first active resolver configuration that yields usable non-loopback
-    // upstream servers so stale files from inactive network managers do not pollute
-    // the upstream race list.
     for path in paths {
         if let Ok(content) = fs::read_to_string(path) {
             let found = parse_resolv_conf(&content);
@@ -145,19 +146,29 @@ nameserver 192.168.1.1
     }
 
     #[test]
-    fn discover_prefers_first_active_resolv_conf() {
+    fn discover_prefers_etc_resolv_for_vpn_and_falls_back_when_stub() {
         let dir = std::env::temp_dir().join(format!("curb_dns_disc_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let p1 = dir.join("resolved.conf");
-        let p2 = dir.join("stale_nm.conf");
-        fs::write(&p1, "nameserver 10.0.0.1\n").unwrap();
-        fs::write(&p2, "nameserver 192.168.99.1\n").unwrap();
+        let etc_resolv = dir.join("etc_resolv.conf");
+        let systemd_resolv = dir.join("systemd_resolv.conf");
 
-        let p1_s = p1.to_string_lossy().to_string();
-        let p2_s = p2.to_string_lossy().to_string();
-        let found = discover_from_paths(&[p1_s.as_str(), p2_s.as_str()]);
-        assert_eq!(found, vec!["10.0.0.1:53".parse().unwrap()]);
+        // Case 1: Tailscale/WireGuard wrote a non-loopback nameserver into /etc/resolv.conf.
+        fs::write(&etc_resolv, "nameserver 100.100.100.100\n").unwrap();
+        fs::write(&systemd_resolv, "nameserver 192.168.1.1\n").unwrap();
+        let p_etc = etc_resolv.to_string_lossy().to_string();
+        let p_sys = systemd_resolv.to_string_lossy().to_string();
+        assert_eq!(
+            discover_from_paths(&[p_etc.as_str(), p_sys.as_str()]),
+            vec!["100.100.100.100:53".parse().unwrap()]
+        );
+
+        // Case 2: /etc/resolv.conf is a systemd-resolved loopback stub -> falls back.
+        fs::write(&etc_resolv, "nameserver 127.0.0.53\n").unwrap();
+        assert_eq!(
+            discover_from_paths(&[p_etc.as_str(), p_sys.as_str()]),
+            vec!["192.168.1.1:53".parse().unwrap()]
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

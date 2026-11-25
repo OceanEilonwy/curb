@@ -7,14 +7,27 @@ use curb_linux::CURB_FW_MARK;
 
 use crate::CURB_NFQUEUE_NUM;
 
-/// Base `ct mark` prefix (`0x4356_0000`, distinct from `CURB_FW_MARK = 0x4355_5242`)
-/// used to stamp conntrack entries approved under the current policy generation.
-pub const CURB_POLICY_MARK_BASE: u32 = 0x4356_0000;
+/// Bitmask reserving the top 8 bits of `skb->mark` / `ct->mark` for Curb's policy
+/// generation counter while preserving the lower 24 bits used by VPNs and policy
+/// routing (`wg-quick`, Tailscale, Mullvad, etc.).
+pub const CURB_POLICY_MARK_MASK: u32 = 0xFF00_0000;
+/// Inverse mask used to clear only Curb's policy bits from `meta mark` / `ct mark`.
+pub const CURB_POLICY_MARK_CLEAR: u32 = !CURB_POLICY_MARK_MASK;
 
-/// Computes the non-zero `ct mark` value for a 16-bit policy generation counter.
+/// Computes a non-zero masked `ct mark` value in the top 8 bits (`0x0100_0000..=0xFE00_0000`),
+/// skipping `0x43` so it can never overlap with `CURB_FW_MARK` (`0x4355_5242`).
 pub fn policy_mark_for_generation(generation: u64) -> u32 {
-    let low = ((generation % 0xFFFE) as u32) + 1;
-    CURB_POLICY_MARK_BASE | low
+    let mut slot = ((generation % 253) as u32) + 1;
+    if slot >= 0x43 {
+        slot += 1;
+    }
+    slot << 24
+}
+
+/// Merges Curb's top-8-bit `policy_mark` into an existing packet `skb->mark`
+/// without clobbering lower 24-bit VPN/routing marks.
+pub fn merge_policy_mark(existing_mark: u32, policy_mark: u32) -> u32 {
+    (existing_mark & CURB_POLICY_MARK_CLEAR) | (policy_mark & CURB_POLICY_MARK_MASK)
 }
 
 /// Parameters controlling Curb's generated `table inet curb` nftables ruleset.
@@ -154,6 +167,7 @@ pub fn build_ruleset_with_options(baseline: &BaselinePolicy, opts: RulesetOption
         fw_mark,
         policy_ct_mark,
     } = opts;
+    let masked_policy = policy_ct_mark & CURB_POLICY_MARK_MASK;
 
     let mut rules = String::new();
     rules.push_str("table inet curb\n");
@@ -162,34 +176,43 @@ pub fn build_ruleset_with_options(baseline: &BaselinePolicy, opts: RulesetOption
 
     rules.push_str("    chain output {\n");
     rules.push_str("        type filter hook output priority 0; policy accept;\n");
-    // Packets approved by NFQUEUE are re-injected with `NF_REPEAT` + `NFQA_MARK = policy_ct_mark`.
-    // Stamp `ct mark` for the current policy generation and clear `meta mark` so downstream
-    // policy-routing / VPN `fwmark` rules are never affected.
+    // Curb's own upstream DNS sockets bypass filtering first.
+    rules.push_str(&format!("        meta mark 0x{fw_mark:08x} accept\n"));
+    // Packets approved by NFQUEUE are re-injected with `NF_REPEAT` + `NFQA_MARK`
+    // carrying Curb's policy generation in the top 8 bits. Stamp only the top 8 bits
+    // of `ct mark` and clear only Curb's top 8 bits from `meta mark` so lower 24-bit
+    // VPN / policy-routing marks (Tailscale, wg-quick, Mullvad) are preserved intact.
     rules.push_str(&format!(
-        "        meta mark 0x{policy_ct_mark:08x} ct mark set 0x{policy_ct_mark:08x} meta mark set 0 accept\n"
+        "        meta mark & 0x{CURB_POLICY_MARK_MASK:08x} == 0x{masked_policy:08x} ct mark set ct mark & 0x{CURB_POLICY_MARK_CLEAR:08x} | 0x{masked_policy:08x} meta mark set meta mark & 0x{CURB_POLICY_MARK_CLEAR:08x} accept\n"
     ));
     if baseline.loopback {
         rules.push_str("        oifname \"lo\" accept\n");
+    } else {
+        // Even when general loopback is disabled, redirected DNS traffic to/from
+        // Curb's local DNS proxy port on `lo` must always be allowed.
+        rules.push_str(&format!(
+            "        oifname \"lo\" meta l4proto {{ tcp, udp }} th dport {dns_proxy_port} accept\n"
+        ));
+        rules.push_str(&format!(
+            "        oifname \"lo\" meta l4proto {{ tcp, udp }} th sport {dns_proxy_port} accept\n"
+        ));
     }
-    rules.push_str(&format!("        meta mark 0x{fw_mark:08x} accept\n"));
     if baseline.dhcp {
         rules.push_str("        udp dport { 67, 68, 546, 547 } accept\n");
     }
     if baseline.ntp {
         rules.push_str("        udp dport 123 accept\n");
     }
-    rules.push_str(
-        "        icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query, mld-listener-report, mld2-listener-report } accept\n",
-    );
-    // Use `reject` (not `drop`) on DoT port 853 so `systemd-resolved` in opportunistic DoT mode
-    // falls back to port 53 (redirected to Curb's DNS proxy) immediately instead of stalling.
+    // Use `reject` (not `drop`) on DoT port 853 and fallback port 53 so `systemd-resolved`
+    // (opportunistic DoT) and IPv6 DNS (when IPv6 proxy is unavailable) fail over immediately.
     rules.push_str("        meta l4proto { tcp, udp } th dport 853 reject\n");
-    rules.push_str("        meta l4proto { tcp, udp } th dport 53 drop\n");
+    rules.push_str("        meta l4proto { tcp, udp } th dport 53 reject\n");
     rules.push_str("        meta l4proto { tcp, udp } ct state invalid drop\n");
-    // Fast-path only flows approved under the current policy generation; pre-existing flows
-    // or flows from a previous rule/playtime generation fall through to NFQUEUE for re-check.
+    // Fast-path all valid packets (including subsequent `ct state new` packets in a
+    // QUIC/UDP burst before the first reply) whose conntrack entry was stamped under
+    // the current policy generation.
     rules.push_str(&format!(
-        "        ct state established,related ct mark 0x{policy_ct_mark:08x} accept\n"
+        "        ct mark & 0x{CURB_POLICY_MARK_MASK:08x} == 0x{masked_policy:08x} accept\n"
     ));
     rules.push_str(&format!(
         "        meta l4proto {{ tcp, udp }} queue num {queue_num}\n"
@@ -226,6 +249,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn policy_mark_stays_in_top_byte_and_skips_zero_and_fw_mark_prefix() {
+        for gen in 0..600u64 {
+            let m = policy_mark_for_generation(gen);
+            assert_ne!(m, 0);
+            assert_eq!(m & CURB_POLICY_MARK_CLEAR, 0);
+            assert_ne!(m >> 24, 0x43, "must not collide with CURB_FW_MARK prefix");
+            assert_ne!(m >> 24, 0x00);
+            assert_ne!(m >> 24, 0xFF);
+        }
+    }
+
+    #[test]
+    fn merge_policy_mark_preserves_lower_24_bit_vpn_marks() {
+        let vpn_mark = 0x0008_CA6C;
+        let policy = policy_mark_for_generation(4);
+        let merged = merge_policy_mark(vpn_mark, policy);
+        assert_eq!(merged & CURB_POLICY_MARK_CLEAR, vpn_mark);
+        assert_eq!(merged & CURB_POLICY_MARK_MASK, policy);
+    }
+
+    #[test]
     fn builds_complete_default_deny_and_dns_redirect_ruleset() {
         let baseline = BaselinePolicy::default();
         let script = build_ruleset(&baseline, 15353, 42, 0x4355_5242);
@@ -234,11 +278,14 @@ mod tests {
         assert!(script.contains("delete table inet curb"));
         assert!(script.contains("oifname \"lo\" accept"));
         assert!(script.contains("meta mark 0x43555242 accept"));
+        assert!(script.contains("meta mark & 0xff000000 == 0x01000000 ct mark set ct mark & 0x00ffffff | 0x01000000 meta mark set meta mark & 0x00ffffff accept"));
         assert!(script.contains("udp dport { 67, 68, 546, 547 } accept"));
         assert!(script.contains("udp dport 123 accept"));
         assert!(script.contains("th dport 853 reject"));
+        assert!(script.contains("th dport 53 reject"));
         assert!(script.contains("ct state invalid drop"));
-        assert!(script.contains("ct state established,related ct mark 0x43560001 accept"));
+        assert!(script.contains("ct mark & 0xff000000 == 0x01000000 accept"));
+        assert!(!script.contains("ct state established,related ct mark"));
         assert!(script.contains("meta l4proto { tcp, udp } queue num 42"));
         assert!(script.contains("tcp dport 53 redirect to :15353"));
         assert!(script.contains("udp dport 53 redirect to :15353"));
@@ -260,11 +307,11 @@ mod tests {
         );
         assert!(script.contains("meta nfproto ipv4 tcp dport 53 redirect to :15353"));
         assert!(script.contains("meta nfproto ipv4 udp dport 53 redirect to :15353"));
-        assert!(script.contains("ct mark 0x43560008 accept"));
+        assert!(script.contains("ct mark & 0xff000000 == 0x08000000 accept"));
     }
 
     #[test]
-    fn omits_disabled_baseline_rules() {
+    fn preserves_loopback_dns_proxy_rules_even_when_loopback_baseline_disabled() {
         let baseline = BaselinePolicy {
             dhcp: false,
             loopback: false,
@@ -272,7 +319,9 @@ mod tests {
             ncsi: false,
         };
         let script = build_ruleset(&baseline, 15353, 42, 0x4355_5242);
-        assert!(!script.contains("oifname \"lo\" accept"));
+        assert!(!script.contains("oifname \"lo\" accept\n"));
+        assert!(script.contains("oifname \"lo\" meta l4proto { tcp, udp } th dport 15353 accept"));
+        assert!(script.contains("oifname \"lo\" meta l4proto { tcp, udp } th sport 15353 accept"));
         assert!(!script.contains("67, 68"));
         assert!(!script.contains("udp dport 123 accept"));
     }

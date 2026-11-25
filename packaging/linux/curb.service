@@ -7,6 +7,7 @@ Wants=network-pre.target
 [Service]
 Type=simple
 ExecStart=/usr/libexec/curb/curb-service --data-dir /var/lib/curb
+ExecStopPost=-/bin/sh -c 'nft delete table inet curb 2>/dev/null || true'
 Restart=on-failure
 RestartSec=2
 RuntimeDirectory=curb

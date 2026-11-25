@@ -13,6 +13,6 @@ pub use nfqueue::{
 };
 #[cfg(target_os = "linux")]
 pub use ruleset::{
-    build_ruleset, build_ruleset_with_options, policy_mark_for_generation, NftablesFirewall,
-    RulesetOptions, CURB_POLICY_MARK_BASE,
+    build_ruleset, build_ruleset_with_options, merge_policy_mark, policy_mark_for_generation,
+    NftablesFirewall, RulesetOptions, CURB_POLICY_MARK_CLEAR, CURB_POLICY_MARK_MASK,
 };

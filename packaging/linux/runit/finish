@@ -1,0 +1,3 @@
+#!/bin/sh
+# Ensure stale nftables rules never strand the host offline if curb-service is killed.
+nft delete table inet curb 2>/dev/null || true

@@ -31,6 +31,7 @@ mod imp {
              [Service]\n\
              Type=simple\n\
              ExecStart={} --data-dir {}\n\
+             ExecStopPost=-/bin/sh -c 'nft delete table inet curb 2>/dev/null || true'\n\
              Restart=on-failure\n\
              RestartSec=2\n\
              RuntimeDirectory=curb\n\
@@ -216,8 +217,9 @@ mod imp {
                 Path::new("/var/lib/curb"),
             );
             assert!(unit.contains("ExecStart=/usr/libexec/curb/curb-service --data-dir /var/lib/curb"));
+            assert!(unit.contains("ExecStopPost=-/bin/sh -c 'nft delete table inet curb 2>/dev/null || true'"));
             assert!(unit.contains("RuntimeDirectory=curb"));
-            assert!(unit.contains("After=network-pre.target nftables.service"));
+            assert!(unit.contains("After=network-pre.target nftables.service firewalld.service ufw.service"));
         }
     }
 }

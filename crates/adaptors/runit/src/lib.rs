@@ -51,6 +51,14 @@ mod imp {
         )
     }
 
+    /// Generates the executable `/etc/sv/curb/finish` script so crash/SIGKILL never
+    /// leaves stale `table inet curb` rules stranding the host offline.
+    pub fn build_finish_script() -> String {
+        "#!/bin/sh\n\
+         nft delete table inet curb 2>/dev/null || true\n"
+            .to_string()
+    }
+
     /// Generates the executable `/etc/sv/curb/log/run` script using `svlogd` when available.
     pub fn build_log_run_script(log_dir: &Path) -> String {
         format!(
@@ -271,6 +279,13 @@ mod imp {
         }
 
         #[test]
+        fn renders_runit_finish_script() {
+            let script = build_finish_script();
+            assert!(script.starts_with("#!/bin/sh\n"));
+            assert!(script.contains("nft delete table inet curb"));
+        }
+
+        #[test]
         fn renders_runit_log_script() {
             let script = build_log_run_script(Path::new("/var/log/curb"));
             assert!(script.starts_with("#!/bin/sh\n"));
@@ -299,4 +314,7 @@ mod imp {
 }
 
 #[cfg(target_os = "linux")]
-pub use imp::{build_log_run_script, build_run_script, is_runit_system, RunitServiceManager};
+pub use imp::{
+    build_finish_script, build_log_run_script, build_run_script, is_runit_system,
+    RunitServiceManager,
+};

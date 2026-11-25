@@ -169,31 +169,34 @@ async fn handle_tcp_client(
     engine: ServiceEngine,
     fallback_upstream: SocketAddr,
 ) -> std::io::Result<()> {
-    let mut len_buf = [0u8; 2];
-    if tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut len_buf))
-        .await
-        .is_err()
-    {
-        return Ok(());
-    }
-    let msg_len = u16::from_be_bytes(len_buf) as usize;
-    if msg_len == 0 || msg_len > 65535 {
-        return Ok(());
-    }
+    // Support RFC 7766 persistent TCP DNS connections (multiple queries per stream).
+    for _ in 0..64 {
+        let mut len_buf = [0u8; 2];
+        match tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut len_buf)).await {
+            Ok(Ok(_)) => {}
+            _ => return Ok(()),
+        }
+        let msg_len = u16::from_be_bytes(len_buf) as usize;
+        if msg_len == 0 || msg_len > 65535 {
+            return Ok(());
+        }
 
-    let mut packet = vec![0u8; msg_len];
-    if tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut packet))
-        .await
-        .is_err()
-    {
-        return Ok(());
-    }
+        let mut packet = vec![0u8; msg_len];
+        match tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut packet)).await {
+            Ok(Ok(_)) => {}
+            _ => return Ok(()),
+        }
 
-    if let Some(resp_bytes) = handle_dns_packet(&engine, &packet, fallback_upstream, true).await {
-        if resp_bytes.len() <= u16::MAX as usize {
-            let out_len = (resp_bytes.len() as u16).to_be_bytes();
-            let _ = stream.write_all(&out_len).await;
-            let _ = stream.write_all(&resp_bytes).await;
+        if let Some(resp_bytes) = handle_dns_packet(&engine, &packet, fallback_upstream, true).await
+        {
+            if resp_bytes.len() <= u16::MAX as usize {
+                let out_len = (resp_bytes.len() as u16).to_be_bytes();
+                if stream.write_all(&out_len).await.is_err()
+                    || stream.write_all(&resp_bytes).await.is_err()
+                {
+                    return Ok(());
+                }
+            }
         }
     }
     Ok(())
@@ -391,9 +394,9 @@ async fn forward_to_upstreams(
     }
 
     // Staggered parallel race: give the first upstream (typically the adapter's original
-    // router/ISP resolver) a 120ms head start, then fire fallback resolvers (1.1.1.1 / 8.8.8.8)
-    // concurrently so a dead or unreachable primary resolver never causes Windows Dnscache's
-    // 1-second loopback timeout to expire.
+    // router/ISP/VPN resolver) a 120ms head start, then fire fallback resolvers concurrently.
+    // Never let a fallback NXDOMAIN/SERVFAIL/Refused preempt an in-flight primary upstream
+    // (preserves split-horizon LAN/VPN DNS such as Tailscale MagicDNS).
     let mut set = tokio::task::JoinSet::new();
     for (idx, &upstream) in upstreams.iter().take(4).enumerate() {
         let pkt = packet.to_vec();
@@ -401,17 +404,40 @@ async fn forward_to_upstreams(
             if idx > 0 {
                 tokio::time::sleep(Duration::from_millis(120 * idx as u64)).await;
             }
-            forward_one(&pkt, upstream, Duration::from_millis(2500), prefer_tcp).await
+            let resp = forward_one(&pkt, upstream, Duration::from_millis(2500), prefer_tcp).await;
+            (idx, resp)
         });
     }
 
+    let mut primary_done = false;
+    let mut fallback_err: Option<Vec<u8>> = None;
+
     while let Some(joined) = set.join_next().await {
-        if let Ok(Some(resp)) = joined {
-            set.abort_all();
-            return Some(resp);
+        let Ok((idx, resp_opt)) = joined else {
+            continue;
+        };
+        if idx == 0 {
+            primary_done = true;
+            if let Some(resp) = resp_opt {
+                set.abort_all();
+                return Some(resp);
+            }
+            if let Some(err_resp) = fallback_err.take() {
+                set.abort_all();
+                return Some(err_resp);
+            }
+        } else if let Some(resp) = resp_opt {
+            let is_positive = Message::from_vec(&resp)
+                .map(|m| m.response_code() == ResponseCode::NoError)
+                .unwrap_or(false);
+            if is_positive || primary_done {
+                set.abort_all();
+                return Some(resp);
+            }
+            fallback_err.get_or_insert(resp);
         }
     }
-    None
+    fallback_err
 }
 
 async fn forward_one(
@@ -442,8 +468,11 @@ async fn forward_udp(packet: &[u8], upstream: SocketAddr, timeout: Duration) -> 
     };
     let sock = UdpSocket::bind(bind_local).await.ok()?;
     #[cfg(target_os = "linux")]
-    {
-        let _ = curb_linux::dns::set_curb_fw_mark(&sock);
+    if let Err(e) = curb_linux::dns::set_curb_fw_mark(&sock) {
+        if unsafe { libc::geteuid() == 0 } {
+            warn!("Failed to set SO_MARK on upstream UDP DNS socket to {upstream}: {e}");
+            return None;
+        }
     }
     sock.connect(upstream).await.ok()?;
     sock.send(packet).await.ok()?;
@@ -467,7 +496,12 @@ async fn forward_tcp(packet: &[u8], upstream: SocketAddr, timeout: Duration) -> 
         } else {
             tokio::net::TcpSocket::new_v4().ok()?
         };
-        let _ = curb_linux::dns::set_curb_fw_mark(&tcp_sock);
+        if let Err(e) = curb_linux::dns::set_curb_fw_mark(&tcp_sock) {
+            if unsafe { libc::geteuid() == 0 } {
+                warn!("Failed to set SO_MARK on upstream TCP DNS socket to {upstream}: {e}");
+                return None;
+            }
+        }
         tokio::time::timeout(timeout, tcp_sock.connect(upstream))
             .await
             .ok()?
@@ -738,6 +772,151 @@ mod tests {
 
         loop_task.abort();
         mock_task.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn fallback_nxdomain_does_not_preempt_slower_primary_upstream() {
+        // Primary (LAN/VPN) takes 200ms and returns NoError with 100.64.0.42.
+        let primary_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let primary_addr = primary_sock.local_addr().unwrap();
+        let primary_task = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            if let Ok((len, peer)) = primary_sock.recv_from(&mut buf).await {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if let Ok(req) = Message::from_vec(&buf[..len]) {
+                    let mut resp = Message::new();
+                    resp.set_id(req.id());
+                    resp.set_message_type(MessageType::Response);
+                    resp.set_response_code(ResponseCode::NoError);
+                    for q in req.queries() {
+                        resp.add_query(q.clone());
+                        resp.add_answer(Record::from_rdata(
+                            q.name().clone(),
+                            60,
+                            RData::A(A(Ipv4Addr::new(100, 64, 0, 42))),
+                        ));
+                    }
+                    if let Ok(bytes) = resp.to_vec() {
+                        let _ = primary_sock.send_to(&bytes, peer).await;
+                    }
+                }
+            }
+        });
+
+        // Fallback (public DNS) fires at 120ms and immediately returns NXDOMAIN.
+        let fallback_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let fallback_addr = fallback_sock.local_addr().unwrap();
+        let fallback_task = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            if let Ok((len, peer)) = fallback_sock.recv_from(&mut buf).await {
+                if let Ok(req) = Message::from_vec(&buf[..len]) {
+                    let mut resp = Message::new();
+                    resp.set_id(req.id());
+                    resp.set_message_type(MessageType::Response);
+                    resp.set_response_code(ResponseCode::NXDomain);
+                    for q in req.queries() {
+                        resp.add_query(q.clone());
+                    }
+                    if let Ok(bytes) = resp.to_vec() {
+                        let _ = fallback_sock.send_to(&bytes, peer).await;
+                    }
+                }
+            }
+        });
+
+        let mut q = Message::new();
+        q.set_id(0x7777);
+        q.set_message_type(MessageType::Query);
+        q.add_query(Query::query(
+            Name::from_utf8("mybox.tailnet.ts.net.").unwrap(),
+            RecordType::A,
+        ));
+
+        let resp = forward_to_upstreams(&q.to_vec().unwrap(), &[primary_addr, fallback_addr], false)
+            .await
+            .expect("primary upstream response");
+        let parsed = Message::from_vec(&resp).unwrap();
+        assert_eq!(parsed.response_code(), ResponseCode::NoError);
+        assert_eq!(parsed.answers().len(), 1);
+
+        primary_task.abort();
+        fallback_task.abort();
+    }
+
+    #[tokio::test]
+    async fn tcp_proxy_handles_multiple_queries_on_single_connection() {
+        let dir = std::env::temp_dir().join(format!("curb_dns_tcp_multi_{}", Uuid::new_v4()));
+        let engine = ServiceEngine::new(dir.clone()).unwrap();
+
+        let mock_tcp_upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = mock_tcp_upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            while let Ok((mut s, _)) = mock_tcp_upstream.accept().await {
+                tokio::spawn(async move {
+                    let mut lb = [0u8; 2];
+                    if s.read_exact(&mut lb).await.is_ok() {
+                        let len = u16::from_be_bytes(lb) as usize;
+                        let mut p = vec![0u8; len];
+                        if s.read_exact(&mut p).await.is_ok() {
+                            if let Ok(req) = Message::from_vec(&p) {
+                                let mut resp = Message::new();
+                                resp.set_id(req.id());
+                                resp.set_message_type(MessageType::Response);
+                                for q in req.queries() {
+                                    resp.add_query(q.clone());
+                                    resp.add_answer(Record::from_rdata(
+                                        q.name().clone(),
+                                        60,
+                                        RData::A(A(Ipv4Addr::new(203, 0, 113, 88))),
+                                    ));
+                                }
+                                if let Ok(bytes) = resp.to_vec() {
+                                    let _ = s.write_all(&(bytes.len() as u16).to_be_bytes()).await;
+                                    let _ = s.write_all(&bytes).await;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let permits = Arc::new(tokio::sync::Semaphore::new(4));
+        let tcp_task = tokio::spawn(run_tcp_loop(
+            proxy_listener,
+            engine.clone(),
+            upstream_addr,
+            permits,
+        ));
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        for id in [0x1111u16, 0x2222u16] {
+            let mut q = Message::new();
+            q.set_id(id);
+            q.set_message_type(MessageType::Query);
+            q.add_query(Query::query(
+                Name::from_utf8("store.steampowered.com.").unwrap(),
+                RecordType::A,
+            ));
+            let pkt = q.to_vec().unwrap();
+            client.write_all(&(pkt.len() as u16).to_be_bytes()).await.unwrap();
+            client.write_all(&pkt).await.unwrap();
+
+            let mut lb = [0u8; 2];
+            client.read_exact(&mut lb).await.unwrap();
+            let rlen = u16::from_be_bytes(lb) as usize;
+            let mut rbuf = vec![0u8; rlen];
+            client.read_exact(&mut rbuf).await.unwrap();
+            let parsed = Message::from_vec(&rbuf).unwrap();
+            assert_eq!(parsed.id(), id);
+            assert_eq!(parsed.response_code(), ResponseCode::NoError);
+        }
+
+        tcp_task.abort();
+        upstream_task.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
