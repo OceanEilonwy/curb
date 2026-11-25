@@ -7,22 +7,20 @@ Curb runs natively on both **`systemd`** and **`runit`** Linux systems using `nf
 ## Distributions
 
 ### CachyOS (and Arch Linux)
-- **Install via `PKGBUILD`:**
+- **Install native `.pkg.tar.zst` package from GitHub Releases:**
   ```bash
-  cd packaging/linux && makepkg -si
+  sudo pacman -U ./curb-*-x86_64.pkg.tar.zst
   ```
-  The `PKGBUILD` respects CachyOS `makepkg.conf` `RUSTFLAGS` (such as `-C target-cpu=x86-64-v3`/`v4`) and installs `curb.service` + `curb.install` hooks automatically.
+  *(Or build from source with `cd packaging/linux && makepkg -si` to compile with your CachyOS `makepkg.conf` `RUSTFLAGS`.)*
 - **UFW / firewalld coexistence:** Curb uses its own isolated `table inet curb` (`output` priority `0`, `nat_output` priority `-100`), which coexists cleanly with CachyOS's default `ufw` setup.
 - **Service management:** `sudo curb-cli install` enables `curb.service` via `systemd`.
 
 ### Void Linux (`runit`, glibc & musl)
-- **Dependencies:**
+- **Install native `.xbps` package from GitHub Releases:**
   ```bash
-  sudo xbps-install -S nftables polkit fontconfig
+  xbps-rindex -a ./curb-*.x86_64.xbps && sudo xbps-install -R . curb
   ```
-- **Install from tarball or `xbps-src`:**
-  - Universal tarball: `sudo ./install.sh` detects `runit` and installs `/etc/sv/curb/run` and `/etc/sv/curb/log/run`.
-  - Native XBPS package: copy `packaging/linux/void/template` into `void-packages/srcpkgs/curb/template` and build with `./xbps-src pkg curb`.
+  *(Or build for musl/custom targets from source via `packaging/linux/void/template` with `xbps-src`, or install via the universal `.tar.gz` + `sudo ./install.sh`.)*
 - **Service management:** `sudo curb-cli install` (or `doas curb-cli install`) automatically detects `runit`, writes `/etc/sv/curb`, symlinks `/var/service/curb`, and starts the service via `sv up curb`. Logs are written to `/var/log/curb` when `svlogd` is installed.
 - **DNS resolvers:** Curb discovers upstream resolvers from `/run/resolvconf/resolv.conf` (`openresolv`), `/run/NetworkManager/no-stub-resolv.conf`, `/run/NetworkManager/resolv.conf`, `/var/run/connman/resolv.conf`, and `/etc/resolv.conf`.
 

@@ -55,16 +55,13 @@ Supported on all major `systemd` + `nftables` distributions (Ubuntu 22.04+, Debi
   ```bash
   sudo dnf install ./curb-*.x86_64.rpm   # or: sudo zypper install ./curb-*.x86_64.rpm
   ```
-- **Arch Linux / CachyOS / Manjaro / EndeavourOS (`PKGBUILD`):**
+- **Arch Linux / CachyOS / Manjaro / EndeavourOS (`.pkg.tar.zst`):**
   ```bash
-  cd packaging/linux && makepkg -si
+  sudo pacman -U ./curb-*-x86_64.pkg.tar.zst
   ```
-- **Void Linux (`runit`, glibc & musl):**
+- **Void Linux (`runit`, `.xbps`):**
   ```bash
-  # Using the universal tarball (auto-installs /etc/sv/curb):
-  tar -xzf curb-*-linux-x86_64.tar.gz && cd curb-*-linux-x86_64 && sudo ./install.sh
-  sudo curb-cli install   # symlinks /etc/sv/curb -> /var/service/curb and starts it
-  # Or build an xbps package from packaging/linux/void/template with xbps-src
+  xbps-rindex -a ./curb-*.x86_64.xbps && sudo xbps-install -R . curb
   ```
 - **Any other systemd or runit Linux distro (`.tar.gz`):**
   ```bash

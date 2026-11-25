@@ -24,16 +24,23 @@ jobs:
           cache-on-failure: true
 
       - name: Install Linux build & packaging dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev pkg-config rpm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfontconfig1-dev pkg-config rpm libarchive-tools zstd
+          curl -fsSL https://repo-default.voidlinux.org/static/xbps-static-latest.x86_64-musl.tar.xz \
+            | sudo tar -xJ -C /usr/local/bin --strip-components=2 ./usr/bin/xbps-create.static
+          sudo ln -sf /usr/local/bin/xbps-create.static /usr/local/bin/xbps-create
 
       - name: Run Rust workspace tests (core, service, cli, Slint UI)
         run: cargo test --workspace
 
-      - name: Build Linux release binaries & verify .deb / .rpm packaging
+      - name: Build Linux release binaries & verify .deb, .rpm, .pkg.tar.zst, and .xbps packaging
         run: |
           cargo build --release --workspace
           ./packaging/linux/build-deb.sh
           ./packaging/linux/build-rpm.sh
+          ./packaging/linux/build-arch.sh
+          ./packaging/linux/build-xbps.sh
           ls -lh dist-release/
 
   windows-e2e:
