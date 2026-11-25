@@ -1,5 +1,5 @@
 Name:           curb
-Version:        %{?_version}%{!?_version:0.4.3}
+Version:        %{?_version}%{!?_version:0.4.4}
 Release:        1%{?dist}
 Summary:        Default-deny application internet limiter
 License:        AGPL-3.0-or-later
