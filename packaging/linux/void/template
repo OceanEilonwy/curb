@@ -1,6 +1,6 @@
 # Template file for 'curb' (Void Linux xbps-src — glibc & musl)
 pkgname=curb
-version=0.4.1
+version=0.4.2
 revision=1
 build_style=cargo
 hostmakedepends="pkg-config"
@@ -26,6 +26,7 @@ do_install() {
 	vinstall packaging/linux/org.curb.policy 644 usr/share/polkit-1/actions
 	vinstall apps/curb-app/icons/128x128.png 644 usr/share/icons/hicolor/128x128/apps curb.png
 	vinstall apps/curb-app/icons/32x32.png 644 usr/share/icons/hicolor/32x32/apps curb.png
+	vinstall apps/curb-app/icons/icon.svg 644 usr/share/icons/hicolor/scalable/apps curb.svg
 	vinstall packaging/linux/runit/run 755 etc/sv/curb
 	vinstall packaging/linux/runit/log-run 755 etc/sv/curb/log run
 	vlicense LICENSE
