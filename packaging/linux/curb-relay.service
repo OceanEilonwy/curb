@@ -1,0 +1,26 @@
+[Unit]
+Description=Curb Relay — Zero-Knowledge P2P Proxy & Encrypted Backup Server
+Documentation=https://github.com/OceanEilonwy/curb
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=curb-relay
+Environment=CURB_RELAY_LISTEN=0.0.0.0:8443
+Environment=CURB_RELAY_BACKUP_DIR=/var/lib/curb-relay
+EnvironmentFile=-/etc/curb-relay.env
+ExecStart=/usr/bin/curb-relay
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

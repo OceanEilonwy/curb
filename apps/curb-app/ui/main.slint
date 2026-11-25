@@ -5,7 +5,14 @@ import "../fonts/Inter-Bold.ttf";
 import "../fonts/JetBrainsMono-Regular.ttf";
 
 import { Theme } from "theme.slint";
-import { BlockedEventItem, RuleItem, RunningAppItem, SteamGameItem } from "types.slint";
+import {
+    BlockedEventItem,
+    RemoteAdminItem,
+    RemoteDeviceItem,
+    RuleItem,
+    RunningAppItem,
+    SteamGameItem,
+} from "types.slint";
 import {
     CloseIcon,
     LoadingDots,
@@ -21,7 +28,7 @@ import { SettingsView } from "settings_view.slint";
 import { AllowAppSheet } from "allow_app_sheet.slint";
 import { PromptModal, ToastBanner, UnlockModal } from "modals.slint";
 
-export { Theme, RuleItem, BlockedEventItem, RunningAppItem, SteamGameItem }
+export { Theme, RuleItem, BlockedEventItem, RunningAppItem, SteamGameItem, RemoteDeviceItem, RemoteAdminItem }
 
 export component CurbTray inherits SystemTrayIcon {
     icon: @image-url("../icons/32x32.png");
@@ -174,6 +181,14 @@ export component MainWindow inherits Window {
     in property <string> prompt-error: "";
     in property <bool> prompt-busy: false;
 
+    // Remote admin & sync properties
+    in property <string> active-device-name: "Curb";
+    in property <[RemoteDeviceItem]> remote-devices: [];
+    in-out property <bool> device-menu-open: false;
+    in property <[RemoteAdminItem]> remote-admins: [];
+    in-out property <string> relay-url: "";
+    in property <bool> encrypted-backup-enabled: true;
+
     // Toast
     in property <string> toast-message: "";
 
@@ -187,6 +202,12 @@ export component MainWindow inherits Window {
     callback submit-prompt(string);
     callback tab-selected(int);
     callback open-allow-sheet();
+    callback select-device(string);
+    callback connect-friend-clicked();
+    callback rename-device-clicked();
+    callback add-friend-admin-clicked();
+    callback remove-friend-admin(string);
+    callback save-relay-config(string, bool);
 
     // Setup callbacks
     callback setup-full();
@@ -374,12 +395,45 @@ export component MainWindow inherits Window {
                                         image-fit: contain;
                                     }
 
-                                    Text {
-                                        text: "Curb";
-                                        color: Theme.text;
-                                        font-size: 14px;
-                                        font-weight: 700;
-                                        vertical-alignment: center;
+                                    Rectangle {
+                                        horizontal-stretch: 0;
+                                        height: 26px;
+                                        border-radius: 6px;
+                                        background: dev-title-ta.has-hover ? Theme.card : transparent;
+
+                                        HorizontalLayout {
+                                            padding-left: 4px;
+                                            padding-right: 5px;
+                                            spacing: 4px;
+                                            cross-axis-alignment: center;
+
+                                            Text {
+                                                text: root.active-device-name;
+                                                color: Theme.text;
+                                                font-size: 14px;
+                                                font-weight: 700;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+
+                                            if root.remote-devices.length > 1: Text {
+                                                text: "▾";
+                                                color: Theme.text-muted;
+                                                font-size: 11px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        dev-title-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                if root.remote-devices.length > 0 {
+                                                    root.device-menu-open = !root.device-menu-open;
+                                                } else {
+                                                    root.connect-friend-clicked();
+                                                }
+                                            }
+                                        }
                                     }
 
                                     Rectangle {
@@ -916,6 +970,10 @@ export component MainWindow inherits Window {
                     show-pw <=> root.pw-show;
                     pw-busy: root.pw-busy;
                     pw-error: root.pw-error;
+                    device-name: root.active-device-name;
+                    remote-admins: root.remote-admins;
+                    relay-url <=> root.relay-url;
+                    encrypted-backup-enabled: root.encrypted-backup-enabled;
 
                     require-unlock => { root.open-unlock(); }
                     upgrade-to-full => { root.upgrade-to-full(); }
@@ -928,6 +986,11 @@ export component MainWindow inherits Window {
                     toggle-baseline-ncsi => { root.toggle-baseline-ncsi(); }
                     toggle-pw-form => { root.toggle-pw-form(); }
                     submit-password-change(c, n, cf) => { root.submit-password-change(c, n, cf); }
+                    rename-device-clicked => { root.rename-device-clicked(); }
+                    add-friend-admin-clicked => { root.add-friend-admin-clicked(); }
+                    connect-friend-clicked => { root.connect-friend-clicked(); }
+                    remove-friend-admin(id) => { root.remove-friend-admin(id); }
+                    save-relay-config(url, b) => { root.save-relay-config(url, b); }
                 }
 
                 // Sticky Footer on Allowed Tab
@@ -1047,6 +1110,114 @@ export component MainWindow inherits Window {
                 retry-inspect => { root.picker-retry-inspect(); }
                 open-browse => { root.picker-open-browse(); }
                 confirm => { root.picker-confirm(); }
+            }
+
+            // Clean Device Switcher Dropdown
+            if root.device-menu-open: Rectangle {
+                width: 100%;
+                height: 100%;
+                background: transparent;
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => { root.device-menu-open = false; }
+                }
+
+                Rectangle {
+                    x: 48px;
+                    y: 44px;
+                    width: 220px;
+                    border-radius: 12px;
+                    background: Theme.card;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+                    drop-shadow-blur: 16px;
+                    drop-shadow-color: rgba(0, 0, 0, 0.35);
+
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 2px;
+
+                        for dev in root.remote-devices: Rectangle {
+                            height: 36px;
+                            border-radius: 8px;
+                            background: dev.selected ? Theme.sub : (dev-row-ta.has-hover ? Theme.card-hover : transparent);
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 8px;
+                                cross-axis-alignment: center;
+
+                                Rectangle {
+                                    width: 7px;
+                                    height: 7px;
+                                    border-radius: 3.5px;
+                                    background: Theme.green-switch;
+                                }
+
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: dev.name;
+                                    color: Theme.text;
+                                    font-size: 12.5px;
+                                    font-weight: dev.selected ? 600 : 500;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+
+                                if dev.selected: Text {
+                                    text: "✓";
+                                    color: Theme.accent-text;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            dev-row-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.device-menu-open = false;
+                                    root.select-device(dev.id);
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.border;
+                        }
+
+                        Rectangle {
+                            height: 34px;
+                            border-radius: 8px;
+                            background: add-dev-ta.has-hover ? Theme.card-hover : transparent;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                cross-axis-alignment: center;
+                                Text {
+                                    text: "+ Connect to a friend…";
+                                    color: Theme.accent-text;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            add-dev-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.device-menu-open = false;
+                                    root.connect-friend-clicked();
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Live Toast Banner

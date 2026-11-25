@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use chrono::{Local, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use curb_core::auth::{hash_password, verify_password, AuthRecord, SessionManager};
 use curb_core::config::{Config, ExecutableMatcher, NetworkPolicy};
 use curb_core::dns::{domain_matches_any, DnsCache};
@@ -14,8 +14,16 @@ use curb_core::ipc::{
 };
 use curb_core::playtime::{PlaytimeChipState, PlaytimeRuleStatus, UsageLedger};
 use curb_core::presets::{DefaultPresetHost, EffectiveRule, PresetHost, PresetRegistry};
-use curb_core::store::{load_auth, load_config, load_usage, save_auth, save_config, save_usage};
+use curb_core::store::{
+    load_auth, load_config, load_sync_config, load_usage, peer_identity_path, save_auth,
+    save_config, save_sync_config, save_usage,
+};
+use curb_core::sync::{
+    generate_invite_code, InviteKind, InviteToken, RemoteStatus, RemoteSyncConfig,
+    DEFAULT_RELAY_URL,
+};
 use curb_core::verify::BinaryIdentity;
+use curb_p2p::PeerIdentity;
 use curb_preset_steam::SteamPresetPlugin;
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -57,6 +65,13 @@ pub struct TrackedProcess {
     pub dynamic_filter_ids: Vec<u64>,
 }
 
+/// In-memory single-use invite issued by an unlocked admin (10-minute TTL).
+#[derive(Debug, Clone)]
+pub struct PendingInvite {
+    pub kind: InviteKind,
+    pub expires_at: DateTime<Utc>,
+}
+
 /// Central mutable state shared across IPC, DNS proxy, and enforcement loops.
 pub struct EngineState {
     pub data_dir: PathBuf,
@@ -73,6 +88,9 @@ pub struct EngineState {
     pub preset_host: Arc<dyn PresetHost>,
     pub usage_ledger: UsageLedger,
     pub playtime_statuses: HashMap<Uuid, PlaytimeRuleStatus>,
+    pub sync_config: RemoteSyncConfig,
+    pub peer_identity: PeerIdentity,
+    pub pending_invites: HashMap<String, PendingInvite>,
 }
 
 impl EngineState {
@@ -93,6 +111,10 @@ impl EngineState {
         let config = load_config(&data_dir)?;
         let auth = load_auth(&data_dir)?;
         let usage_ledger = load_usage(&data_dir).unwrap_or_default();
+        let sync_config = load_sync_config(&data_dir)
+            .unwrap_or_else(|_| RemoteSyncConfig::new_default("This PC"));
+        let peer_identity = PeerIdentity::load_or_create(&peer_identity_path(&data_dir))
+            .unwrap_or_else(|_| PeerIdentity::generate());
         let mut st = Self {
             data_dir,
             config,
@@ -108,6 +130,9 @@ impl EngineState {
             preset_host,
             usage_ledger,
             playtime_statuses: HashMap::new(),
+            sync_config,
+            peer_identity,
+            pending_invites: HashMap::new(),
         };
         st.refresh_playtime_statuses();
         Ok(st)
@@ -430,6 +455,20 @@ impl EngineState {
                 playtime_statuses.push(st.clone());
             }
         }
+        let remote_status = RemoteStatus {
+            device_name: self.sync_config.device_name.clone(),
+            peer_id: self.peer_identity.peer_id(),
+            relay_url: self.sync_config.relay_url.clone(),
+            relay_connected: !self.sync_config.relay_url.trim().is_empty(),
+            encrypted_backup_enabled: self.sync_config.encrypted_backup_enabled,
+            revision: self.sync_config.revision,
+            admins: self
+                .auth
+                .as_ref()
+                .map(|a| a.admin_summaries())
+                .unwrap_or_default(),
+            synced_devices: self.sync_config.synced_devices.clone(),
+        };
         ServiceSnapshot {
             config: self.config.clone(),
             password_configured: self.auth.is_some(),
@@ -438,6 +477,7 @@ impl EngineState {
             protection_tier: curb_core::ipc::ProtectionTier::FullService,
             service_version: env!("CARGO_PKG_VERSION").to_string(),
             playtime_statuses,
+            remote_status,
         }
     }
 }
@@ -806,15 +846,19 @@ impl ServiceEngine {
                         message: "Admin session expired. Please unlock again.".into(),
                     };
                 }
-                if let Some(record) = &guard.auth {
+                let existing_admins = if let Some(record) = &guard.auth {
                     if !verify_password(&current_password, record) {
                         return IpcResponse::Error {
                             message: "Current password is incorrect.".into(),
                         };
                     }
-                }
+                    record.admins.clone()
+                } else {
+                    Vec::new()
+                };
                 match hash_password(&new_password) {
-                    Ok(new_record) => {
+                    Ok(mut new_record) => {
+                        new_record.admins = existing_admins;
                         if let Err(e) = save_auth(&guard.data_dir, &new_record) {
                             return IpcResponse::Error {
                                 message: format!("Failed to save password: {e}"),
@@ -827,6 +871,215 @@ impl ServiceEngine {
                     Err(e) => IpcResponse::Error {
                         message: e.to_string(),
                     },
+                }
+            }
+
+            IpcRequest::UnlockAsPeer { peer_id, password } => {
+                let mut guard = self.state.lock().unwrap();
+                let Some(record) = guard.auth.clone() else {
+                    return IpcResponse::Error {
+                        message: "No admin password is configured on this device.".into(),
+                    };
+                };
+                match guard.sessions.unlock_as_peer(&peer_id, &password, &record) {
+                    Ok((token, admin_id)) => {
+                        let data_dir = guard.data_dir.clone();
+                        if let Some(auth) = guard.auth.as_mut() {
+                            if let Some(adm) = auth.admins.iter_mut().find(|a| a.id == admin_id) {
+                                adm.last_unlock_at = Some(Utc::now());
+                            }
+                            let _ = save_auth(&data_dir, auth);
+                        }
+                        IpcResponse::Unlocked { token }
+                    }
+                    Err(e) => IpcResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            IpcRequest::RenameDevice { token, name } => {
+                let mut guard = self.state.lock().unwrap();
+                if !guard.sessions.validate_and_refresh(&token) {
+                    return IpcResponse::Error {
+                        message: "Admin session locked or expired. Please unlock again.".into(),
+                    };
+                }
+                let trimmed = name.trim().to_string();
+                if trimmed.is_empty() {
+                    return IpcResponse::Error {
+                        message: "Device name cannot be empty.".into(),
+                    };
+                }
+                guard.sync_config.device_name = trimmed;
+                guard.sync_config.revision = guard.sync_config.revision.saturating_add(1);
+                if let Err(e) = save_sync_config(&guard.data_dir, &guard.sync_config) {
+                    return IpcResponse::Error {
+                        message: format!("Failed to save device name: {e}"),
+                    };
+                }
+                IpcResponse::Snapshot {
+                    data: guard.snapshot(),
+                }
+            }
+
+            IpcRequest::CreateInvite { token, kind } => {
+                let mut guard = self.state.lock().unwrap();
+                if !guard.sessions.validate_and_refresh(&token) {
+                    return IpcResponse::Error {
+                        message: "Admin session locked or expired. Please unlock again.".into(),
+                    };
+                }
+                // Auto-enable default relay if none configured yet so invites work out of the box.
+                if guard.sync_config.relay_url.trim().is_empty() {
+                    guard.sync_config.relay_url = DEFAULT_RELAY_URL.to_string();
+                    let _ = save_sync_config(&guard.data_dir, &guard.sync_config);
+                }
+                let now = Utc::now();
+                guard.pending_invites.retain(|_, inv| inv.expires_at > now);
+
+                let code = generate_invite_code();
+                let expires_in_secs = 600u64;
+                guard.pending_invites.insert(
+                    code.clone(),
+                    PendingInvite {
+                        kind,
+                        expires_at: now + ChronoDuration::seconds(expires_in_secs as i64),
+                    },
+                );
+                let invite = InviteToken {
+                    kind,
+                    target_peer_id: guard.peer_identity.peer_id(),
+                    relay_url: guard.sync_config.relay_url.clone(),
+                    code: code.clone(),
+                    device_name: guard.sync_config.device_name.clone(),
+                    direct_addr: None,
+                };
+                IpcResponse::InviteCreated {
+                    uri: invite.to_uri(),
+                    code,
+                    expires_in_secs,
+                }
+            }
+
+            IpcRequest::RedeemInvite {
+                code,
+                peer_id,
+                name,
+                password,
+            } => {
+                let mut guard = self.state.lock().unwrap();
+                let now = Utc::now();
+                guard.pending_invites.retain(|_, inv| inv.expires_at > now);
+
+                let Some(invite) = guard.pending_invites.remove(code.trim()) else {
+                    return IpcResponse::Error {
+                        message: "Invite code is invalid or expired.".into(),
+                    };
+                };
+
+                let data_dir = guard.data_dir.clone();
+                let mut group_key_hex = None;
+                match invite.kind {
+                    InviteKind::FriendAdmin => {
+                        let Some(auth) = guard.auth.as_mut() else {
+                            return IpcResponse::Error {
+                                message: "This device has not completed initial setup yet.".into(),
+                            };
+                        };
+                        if let Err(e) = auth.add_admin(name, Some(peer_id), &password) {
+                            return IpcResponse::Error {
+                                message: e.to_string(),
+                            };
+                        }
+                        if let Err(e) = save_auth(&data_dir, auth) {
+                            return IpcResponse::Error {
+                                message: format!("Failed to save friend admin: {e}"),
+                            };
+                        }
+                    }
+                    InviteKind::SyncDevice => {
+                        let applied_rev = guard.sync_config.revision;
+                        group_key_hex = Some(guard.sync_config.group_key_hex.clone());
+                        guard.sync_config.synced_devices.retain(|d| d.peer_id != peer_id);
+                        guard.sync_config.synced_devices.push(
+                            curb_core::sync::SyncedDeviceInfo {
+                                peer_id,
+                                name: if name.trim().is_empty() {
+                                    "Linked Device".into()
+                                } else {
+                                    name.trim().to_string()
+                                },
+                                os: "Synced".into(),
+                                online: true,
+                                last_seen_at: now,
+                                applied_revision: applied_rev,
+                            },
+                        );
+                    }
+                }
+                guard.sync_config.revision = guard.sync_config.revision.saturating_add(1);
+                let _ = save_sync_config(&data_dir, &guard.sync_config);
+
+                IpcResponse::InviteRedeemed {
+                    device_name: guard.sync_config.device_name.clone(),
+                    peer_id: guard.peer_identity.peer_id(),
+                    group_key_hex,
+                }
+            }
+
+            IpcRequest::RemoveAdmin { token, admin_id } => {
+                let mut guard = self.state.lock().unwrap();
+                if !guard.sessions.validate_and_refresh(&token) {
+                    return IpcResponse::Error {
+                        message: "Admin session locked or expired. Please unlock again.".into(),
+                    };
+                }
+                let data_dir = guard.data_dir.clone();
+                let removed = if let Some(auth) = guard.auth.as_mut() {
+                    if auth.remove_admin(admin_id) {
+                        if let Err(e) = save_auth(&data_dir, auth) {
+                            return IpcResponse::Error {
+                                message: format!("Failed to save admin list: {e}"),
+                            };
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if removed {
+                    guard.sessions.lock_all_except(&token);
+                    guard.sync_config.revision = guard.sync_config.revision.saturating_add(1);
+                    let _ = save_sync_config(&data_dir, &guard.sync_config);
+                }
+                IpcResponse::Snapshot {
+                    data: guard.snapshot(),
+                }
+            }
+
+            IpcRequest::SetRelayConfig {
+                token,
+                relay_url,
+                encrypted_backup_enabled,
+            } => {
+                let mut guard = self.state.lock().unwrap();
+                if !guard.sessions.validate_and_refresh(&token) {
+                    return IpcResponse::Error {
+                        message: "Admin session locked or expired. Please unlock again.".into(),
+                    };
+                }
+                guard.sync_config.relay_url = relay_url.trim().to_string();
+                guard.sync_config.encrypted_backup_enabled = encrypted_backup_enabled;
+                if let Err(e) = save_sync_config(&guard.data_dir, &guard.sync_config) {
+                    return IpcResponse::Error {
+                        message: format!("Failed to save sync settings: {e}"),
+                    };
+                }
+                IpcResponse::Snapshot {
+                    data: guard.snapshot(),
                 }
             }
         }
@@ -844,12 +1097,14 @@ impl ServiceEngine {
         }
         update(&mut guard.config);
         guard.config_version = guard.config_version.wrapping_add(1);
+        guard.sync_config.revision = guard.sync_config.revision.saturating_add(1);
         guard.refresh_playtime_statuses();
         if let Err(e) = save_config(&guard.data_dir, &guard.config) {
             return IpcResponse::Error {
                 message: format!("Failed to persist config: {e}"),
             };
         }
+        let _ = save_sync_config(&guard.data_dir, &guard.sync_config);
         let snapshot = guard.snapshot();
         drop(guard);
         self.notify_reconcile();
@@ -1322,6 +1577,98 @@ mod tests {
             .unwrap()
             .evaluate_process(None, &halo_bin)
             .is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remote_admin_invite_rename_and_revocation_lifecycle() {
+        let dir = std::env::temp_dir().join(format!("curb_remote_{}", Uuid::new_v4()));
+        let auth = hash_password("owner-local-secret").unwrap();
+        save_auth(&dir, &auth).unwrap();
+
+        let engine = ServiceEngine::new(dir.clone()).unwrap();
+        let local_token = match engine.handle_request(IpcRequest::Unlock {
+            password: "owner-local-secret".into(),
+        }) {
+            IpcResponse::Unlocked { token } => token,
+            other => panic!("Expected unlock, got {other:?}"),
+        };
+
+        // Rename device
+        let renamed = engine.handle_request(IpcRequest::RenameDevice {
+            token: local_token.clone(),
+            name: "Jordan's PC".into(),
+        });
+        match renamed {
+            IpcResponse::Snapshot { data } => {
+                assert_eq!(data.remote_status.device_name, "Jordan's PC");
+            }
+            other => panic!("Expected snapshot after rename, got {other:?}"),
+        }
+
+        // Create single-use friend invite
+        let (uri, code) = match engine.handle_request(IpcRequest::CreateInvite {
+            token: local_token.clone(),
+            kind: InviteKind::FriendAdmin,
+        }) {
+            IpcResponse::InviteCreated { uri, code, .. } => (uri, code),
+            other => panic!("Expected InviteCreated, got {other:?}"),
+        };
+        let parsed = InviteToken::parse_uri(&uri).expect("valid invite URI");
+        assert_eq!(parsed.device_name, "Jordan's PC");
+        assert_eq!(parsed.code, code);
+
+        // Friend redeems invite and sets their own personal password
+        let friend_peer = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+        let redeemed = engine.handle_request(IpcRequest::RedeemInvite {
+            code: code.clone(),
+            peer_id: friend_peer.into(),
+            name: "Alex".into(),
+            password: "alex-own-password".into(),
+        });
+        assert!(matches!(
+            redeemed,
+            IpcResponse::InviteRedeemed { device_name, .. } if device_name == "Jordan's PC"
+        ));
+
+        // Reusing the burned one-time invite code fails
+        let replay = engine.handle_request(IpcRequest::RedeemInvite {
+            code,
+            peer_id: friend_peer.into(),
+            name: "Eve".into(),
+            password: "evil-password".into(),
+        });
+        assert!(matches!(replay, IpcResponse::Error { .. }));
+
+        // Friend unlocks with their own password
+        let friend_token = match engine.handle_request(IpcRequest::UnlockAsPeer {
+            peer_id: friend_peer.into(),
+            password: "alex-own-password".into(),
+        }) {
+            IpcResponse::Unlocked { token } => token,
+            other => panic!("Expected friend unlock, got {other:?}"),
+        };
+        assert!(!friend_token.is_empty());
+
+        // Revoke friend admin -> friend can no longer unlock
+        let admin_id = match engine.handle_request(IpcRequest::GetSnapshot) {
+            IpcResponse::Snapshot { data } => {
+                assert_eq!(data.remote_status.admins.len(), 1);
+                assert_eq!(data.remote_status.admins[0].name, "Alex");
+                data.remote_status.admins[0].id
+            }
+            other => panic!("Expected snapshot, got {other:?}"),
+        };
+        let _ = engine.handle_request(IpcRequest::RemoveAdmin {
+            token: local_token,
+            admin_id,
+        });
+        let revoked_unlock = engine.handle_request(IpcRequest::UnlockAsPeer {
+            peer_id: friend_peer.into(),
+            password: "alex-own-password".into(),
+        });
+        assert!(matches!(revoked_unlock, IpcResponse::Error { .. }));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

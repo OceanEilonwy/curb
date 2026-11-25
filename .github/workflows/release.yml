@@ -58,13 +58,15 @@ jobs:
       - name: Build curb-service, curb-cli & Slint curb-app (release)
         run: cargo build --release --workspace
 
-      - name: Package .deb, .rpm, .pkg.tar.zst, .xbps, and universal .tar.gz
+      - name: Package .deb, .rpm, .pkg.tar.zst, .xbps, and universal .tar.gz (curb & curb-relay)
         run: |
           VERSION="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
           ./packaging/linux/build-deb.sh "$VERSION" amd64 dist-release
           ./packaging/linux/build-rpm.sh "$VERSION" x86_64 dist-release
           ./packaging/linux/build-arch.sh "$VERSION" x86_64 dist-release
           ./packaging/linux/build-xbps.sh "$VERSION" x86_64 dist-release
+          ./packaging/linux/build-relay-deb.sh "$VERSION" amd64 dist-release
+          ./packaging/linux/build-relay-rpm.sh "$VERSION" x86_64 dist-release
 
           TAR_DIR="dist-release/curb-${VERSION}-linux-x86_64"
           mkdir -p "$TAR_DIR/runit"
@@ -77,6 +79,15 @@ jobs:
           cp apps/curb-app/icons/icon.svg "$TAR_DIR/icon.svg"
           cp README.md LICENSE "$TAR_DIR/"
           tar -C dist-release -czf "dist-release/curb-${VERSION}-linux-x86_64.tar.gz" "curb-${VERSION}-linux-x86_64"
+
+          RELAY_TAR_DIR="dist-release/curb-relay-${VERSION}-linux-x86_64"
+          mkdir -p "$RELAY_TAR_DIR"
+          cp target/release/curb-relay "$RELAY_TAR_DIR/"
+          cp packaging/linux/curb-relay.service packaging/linux/curb-relay.env.example "$RELAY_TAR_DIR/"
+          cp packaging/linux/install-relay.sh packaging/linux/uninstall-relay.sh "$RELAY_TAR_DIR/"
+          cp README.md LICENSE "$RELAY_TAR_DIR/"
+          tar -C dist-release -czf "dist-release/curb-relay-${VERSION}-linux-x86_64.tar.gz" "curb-relay-${VERSION}-linux-x86_64"
+          cp packaging/linux/PKGBUILD-relay dist-release/PKGBUILD-relay
           ls -lh dist-release/
 
       - name: Publish Linux Artifacts to GitHub Release
@@ -90,6 +101,7 @@ jobs:
             dist-release/*.pkg.tar.zst
             dist-release/*.xbps
             dist-release/*.tar.gz
+            dist-release/PKGBUILD-relay
 
   release-windows:
     name: Build Windows Release
@@ -110,7 +122,7 @@ jobs:
       - name: Run Rust workspace tests (Windows)
         run: cargo test --workspace
 
-      - name: Build curb-service, curb-cli & Slint curb-app (release)
+      - name: Build curb-service, curb-cli, curb-relay & Slint curb-app (release)
         run: cargo build --release --workspace
 
       - name: Build Curb Per-User NSIS Installer (zero UAC to install)
@@ -127,7 +139,7 @@ jobs:
           & $makensis apps/curb-app/windows/installer.nsi
           if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
 
-      - name: Package Windows Release Bundle
+      - name: Package Windows Release Bundles (curb & curb-relay)
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist-release/curb-windows-x64 | Out-Null
@@ -139,6 +151,14 @@ jobs:
           Copy-Item target/release/curb-windows-x64-setup.exe dist-release/curb-windows-x64-setup.exe
 
           Compress-Archive -Path dist-release/curb-windows-x64/* -DestinationPath dist-release/curb-windows-x64-portable.zip -Force
+
+          New-Item -ItemType Directory -Force -Path dist-release/curb-relay-windows-x64 | Out-Null
+          Copy-Item target/release/curb-relay.exe dist-release/curb-relay-windows-x64/
+          Copy-Item packaging/linux/curb-relay.env.example dist-release/curb-relay-windows-x64/
+          Copy-Item README.md dist-release/curb-relay-windows-x64/
+          Copy-Item LICENSE dist-release/curb-relay-windows-x64/
+          Copy-Item target/release/curb-relay.exe dist-release/curb-relay-windows-x64.exe
+          Compress-Archive -Path dist-release/curb-relay-windows-x64/* -DestinationPath dist-release/curb-relay-windows-x64-portable.zip -Force
           Get-ChildItem dist-release
 
       - name: Run Windows E2E gate before publishing release
@@ -157,3 +177,5 @@ jobs:
           files: |
             dist-release/curb-windows-x64-setup.exe
             dist-release/curb-windows-x64-portable.zip
+            dist-release/curb-relay-windows-x64.exe
+            dist-release/curb-relay-windows-x64-portable.zip

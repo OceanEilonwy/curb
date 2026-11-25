@@ -238,6 +238,7 @@ impl LocalStandardRuntime {
             },
             service_version: env!("CARGO_PKG_VERSION").to_string(),
             playtime_statuses,
+            remote_status: Default::default(),
         }
     }
 
@@ -395,6 +396,15 @@ impl LocalStandardRuntime {
                     },
                 }
             }
+            IpcRequest::UnlockAsPeer { .. }
+            | IpcRequest::RenameDevice { .. }
+            | IpcRequest::CreateInvite { .. }
+            | IpcRequest::RedeemInvite { .. }
+            | IpcRequest::RemoveAdmin { .. }
+            | IpcRequest::SetRelayConfig { .. } => IpcResponse::Error {
+                message: "Remote admin & sync hosting requires Full Protection (Curb service)."
+                    .into(),
+            },
         }
     }
 

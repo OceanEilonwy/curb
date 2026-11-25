@@ -140,6 +140,11 @@ enum PromptPurpose {
     None,
     AddDomain(Uuid),
     BrowseExe,
+    RenameDevice,
+    ConnectInviteUri,
+    ConnectInviteName { uri: String },
+    ConnectInvitePassword { uri: String, name: String },
+    ShowInviteUri,
 }
 
 #[derive(Clone)]
@@ -538,6 +543,24 @@ fn wire_callbacks(win: &MainWindow, gen_id: u64) {
             c.handle_change_password(cur.into(), next.into(), conf.into())
         })
     });
+    win.on_select_device(move |id| {
+        with_controller(gen_id, |c| c.handle_select_device(&id))
+    });
+    win.on_connect_friend_clicked(move || {
+        with_controller(gen_id, |c| c.handle_connect_friend_clicked())
+    });
+    win.on_rename_device_clicked(move || {
+        with_controller(gen_id, |c| c.handle_rename_device_clicked())
+    });
+    win.on_add_friend_admin_clicked(move || {
+        with_controller(gen_id, |c| c.handle_add_friend_admin_clicked())
+    });
+    win.on_remove_friend_admin(move |id| {
+        with_controller(gen_id, |c| c.handle_remove_friend_admin(&id))
+    });
+    win.on_save_relay_config(move |url, backup| {
+        with_controller(gen_id, |c| c.handle_save_relay_config(url.into(), backup))
+    });
 
     // AllowAppSheet picker
     win.on_picker_cancel(move || with_controller(gen_id, |c| c.close_allow_sheet()));
@@ -706,6 +729,55 @@ impl AppController {
         win.set_baseline_loopback(snap.config.baseline.loopback);
         win.set_baseline_ntp(snap.config.baseline.ntp);
         win.set_baseline_ncsi(snap.config.baseline.ncsi);
+
+        // Remote devices, friendly device name, admins, and relay status
+        let active_remote = self.backend.active_remote_peer();
+        let saved_peers = self.backend.saved_remote_peers();
+        let local_name = if snap.remote_status.device_name.trim().is_empty() {
+            "This PC".to_string()
+        } else {
+            snap.remote_status.device_name.clone()
+        };
+        let active_label = match &active_remote {
+            Some(peer) => peer.name.clone(),
+            None if !saved_peers.is_empty() => local_name.clone(),
+            None => "Curb".to_string(),
+        };
+        win.set_active_device_name(active_label.into());
+
+        let mut dev_items = Vec::new();
+        if !saved_peers.is_empty() {
+            dev_items.push(RemoteDeviceItem {
+                id: "local".into(),
+                name: local_name.into(),
+                is_remote: false,
+                selected: active_remote.is_none(),
+            });
+            for p in &saved_peers {
+                dev_items.push(RemoteDeviceItem {
+                    id: p.id.to_string().into(),
+                    name: p.name.clone().into(),
+                    is_remote: true,
+                    selected: active_remote.as_ref().is_some_and(|a| a.id == p.id),
+                });
+            }
+        }
+        win.set_remote_devices(ModelRc::new(VecModel::from(dev_items)));
+
+        let admin_items: Vec<RemoteAdminItem> = snap
+            .remote_status
+            .admins
+            .iter()
+            .map(|a| RemoteAdminItem {
+                id: a.id.to_string().into(),
+                name: a.name.clone().into(),
+            })
+            .collect();
+        win.set_remote_admins(ModelRc::new(VecModel::from(admin_items)));
+        if win.get_relay_url().is_empty() && !snap.remote_status.relay_url.is_empty() {
+            win.set_relay_url(snap.remote_status.relay_url.clone().into());
+        }
+        win.set_encrypted_backup_enabled(snap.remote_status.encrypted_backup_enabled);
 
         let status_by_id: HashMap<Uuid, &curb_core::playtime::PlaytimeRuleStatus> = snap
             .playtime_statuses
@@ -2203,7 +2275,262 @@ impl AppController {
                     });
                 });
             }
+            PromptPurpose::RenameDevice => {
+                let cleaned = raw.trim().to_string();
+                if cleaned.is_empty() {
+                    win.set_prompt_error("Please enter a device name.".into());
+                    return;
+                }
+                win.set_prompt_error(SharedString::default());
+                win.set_prompt_busy(true);
+                let token = self.token.clone();
+                let gen_id = self.gen_id;
+                let backend = self.backend.clone();
+                self.backend.spawn(async move {
+                    let res = backend.rename_active_device(token, cleaned).await;
+                    let _ = slint::invoke_from_event_loop(move || {
+                        with_controller(gen_id, |c| {
+                            if let Some(w) = c.window() {
+                                w.set_prompt_busy(false);
+                            }
+                            match res {
+                                Ok(name) => {
+                                    c.close_prompt_modal();
+                                    c.show_toast(format!("Renamed device to {name}"));
+                                    c.refresh_snapshot();
+                                }
+                                Err(e) => {
+                                    if let Some(w) = c.window() {
+                                        w.set_prompt_error(e.into());
+                                    }
+                                }
+                            }
+                        });
+                    });
+                });
+            }
+            PromptPurpose::ConnectInviteUri => {
+                let uri = raw.trim().to_string();
+                if let Err(e) = curb_core::sync::InviteToken::parse_uri(&uri) {
+                    win.set_prompt_error(e.to_string().into());
+                    return;
+                }
+                self.open_prompt_modal(
+                    PromptPurpose::ConnectInviteName { uri },
+                    "Your Name",
+                    "Shown in your friend's Curb admin list.",
+                    "e.g. Alex",
+                    "Next",
+                    "Next…",
+                    false,
+                    "",
+                );
+            }
+            PromptPurpose::ConnectInviteName { uri } => {
+                let name = raw.trim().to_string();
+                if name.is_empty() {
+                    win.set_prompt_error("Please enter your name.".into());
+                    return;
+                }
+                self.open_prompt_modal(
+                    PromptPurpose::ConnectInvitePassword { uri, name },
+                    "Set Your Admin Password",
+                    "Choose a password you'll use to unlock your friend's Curb settings.",
+                    "At least 4 characters",
+                    "Connect",
+                    "Connecting…",
+                    false,
+                    "",
+                );
+            }
+            PromptPurpose::ConnectInvitePassword { uri, name } => {
+                let password = raw.trim().to_string();
+                if password.len() < 4 {
+                    win.set_prompt_error("Password must be at least 4 characters.".into());
+                    return;
+                }
+                win.set_prompt_error(SharedString::default());
+                win.set_prompt_busy(true);
+                let gen_id = self.gen_id;
+                let backend = self.backend.clone();
+                self.backend.spawn(async move {
+                    let res = backend.connect_with_invite(uri, name, password).await;
+                    let _ = slint::invoke_from_event_loop(move || {
+                        with_controller(gen_id, |c| {
+                            if let Some(w) = c.window() {
+                                w.set_prompt_busy(false);
+                            }
+                            match res {
+                                Ok(peer) => {
+                                    c.token = None;
+                                    c.close_prompt_modal();
+                                    c.show_toast(format!("Connected to {}", peer.name));
+                                    c.refresh_snapshot();
+                                }
+                                Err(e) => {
+                                    if let Some(w) = c.window() {
+                                        w.set_prompt_error(e.into());
+                                    }
+                                }
+                            }
+                        });
+                    });
+                });
+            }
+            PromptPurpose::ShowInviteUri => {
+                self.close_prompt_modal();
+            }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_prompt_modal(
+        &mut self,
+        purpose: PromptPurpose,
+        title: &str,
+        description: &str,
+        placeholder: &str,
+        submit_label: &str,
+        busy_label: &str,
+        mono: bool,
+        initial_value: &str,
+    ) {
+        let Some(win) = self.window() else { return };
+        self.prompt_purpose = purpose;
+        win.set_prompt_title(title.into());
+        win.set_prompt_description(description.into());
+        win.set_prompt_placeholder(placeholder.into());
+        win.set_prompt_submit_label(submit_label.into());
+        win.set_prompt_busy_label(busy_label.into());
+        win.set_prompt_mono(mono);
+        win.set_prompt_value(initial_value.into());
+        win.set_prompt_error(SharedString::default());
+        win.set_prompt_busy(false);
+        win.set_prompt_open(true);
+        win.invoke_focus_prompt();
+    }
+
+    fn handle_select_device(&mut self, id: &str) {
+        if id == "local" {
+            self.backend.set_active_remote_peer(None);
+        } else if let Ok(uuid) = Uuid::parse_str(id) {
+            self.backend.set_active_remote_peer(Some(uuid));
+        }
+        // Each device has its own independent lock session.
+        self.token = None;
+        self.refresh_snapshot();
+    }
+
+    fn handle_connect_friend_clicked(&mut self) {
+        self.open_prompt_modal(
+            PromptPurpose::ConnectInviteUri,
+            "Connect to a Friend",
+            "Paste the one-time invite link from your friend's Curb app.",
+            "curb://invite?...",
+            "Next",
+            "Next…",
+            true,
+            "",
+        );
+    }
+
+    fn handle_rename_device_clicked(&mut self) {
+        let is_remote = self.backend.active_remote_peer().is_some();
+        if !is_remote && self.token.is_none() {
+            self.open_unlock_modal();
+            return;
+        }
+        let current = self
+            .window()
+            .map(|w| w.get_active_device_name().to_string())
+            .unwrap_or_else(|| "This PC".into());
+        self.open_prompt_modal(
+            PromptPurpose::RenameDevice,
+            "Rename Device",
+            if is_remote {
+                "Choose a friendly name for your friend's device."
+            } else {
+                "Choose a name shown on synced devices and in friends' Curb apps."
+            },
+            "e.g. Jordan's PC",
+            "Save",
+            "Saving…",
+            false,
+            &current,
+        );
+    }
+
+    fn handle_add_friend_admin_clicked(&mut self) {
+        let Some(tok) = self.require_token() else {
+            return;
+        };
+        let gen_id = self.gen_id;
+        let backend = self.backend.clone();
+        self.backend.spawn(async move {
+            let res = backend.create_friend_invite(tok).await;
+            let _ = slint::invoke_from_event_loop(move || {
+                with_controller(gen_id, |c| match res {
+                    Ok(uri) => {
+                        c.open_prompt_modal(
+                            PromptPurpose::ShowInviteUri,
+                            "One-Time Friend Invite",
+                            "Send this single-use link to your friend (expires in 10 min). They'll set their own password.",
+                            "",
+                            "Done",
+                            "Done",
+                            true,
+                            &uri,
+                        );
+                    }
+                    Err(e) => c.show_toast(e),
+                });
+            });
+        });
+    }
+
+    fn handle_remove_friend_admin(&mut self, id: &str) {
+        let Some(tok) = self.require_token() else {
+            return;
+        };
+        let Ok(admin_id) = Uuid::parse_str(id) else {
+            return;
+        };
+        let gen_id = self.gen_id;
+        let backend = self.backend.clone();
+        self.backend.spawn(async move {
+            let res = backend.remove_admin(tok, admin_id).await;
+            let _ = slint::invoke_from_event_loop(move || {
+                with_controller(gen_id, |c| match res {
+                    Ok(_) => {
+                        c.show_toast("Removed friend admin");
+                        c.refresh_snapshot();
+                    }
+                    Err(e) => c.show_toast(e),
+                });
+            });
+        });
+    }
+
+    fn handle_save_relay_config(&mut self, relay_url: String, encrypted_backup: bool) {
+        let Some(tok) = self.require_token() else {
+            return;
+        };
+        let gen_id = self.gen_id;
+        let backend = self.backend.clone();
+        self.backend.spawn(async move {
+            let res = backend
+                .set_relay_config(tok, relay_url, encrypted_backup)
+                .await;
+            let _ = slint::invoke_from_event_loop(move || {
+                with_controller(gen_id, |c| match res {
+                    Ok(_) => {
+                        c.show_toast("Saved sync settings");
+                        c.refresh_snapshot();
+                    }
+                    Err(e) => c.show_toast(e),
+                });
+            });
+        });
     }
 
     fn handle_confirm_allow(&mut self) {

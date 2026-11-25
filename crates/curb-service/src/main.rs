@@ -2,6 +2,7 @@ mod dns_proxy;
 mod engine;
 mod ipc_server;
 mod linux;
+mod p2p_host;
 mod playtime_loop;
 mod windows;
 
@@ -300,12 +301,21 @@ async fn run_service_runtime(
         })
     };
 
+    let p2p_task = {
+        let p2p_engine = engine.clone();
+        let p2p_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            p2p_host::run_p2p_supervisor(p2p_engine, p2p_shutdown).await;
+        })
+    };
+
     if let Err(e) = ipc_server::run_ipc_server(engine, shutdown_rx).await {
         error!("IPC server failed: {e}");
         let _ = shutdown_tx.send(true);
     }
 
     let _ = playtime_task.await;
+    let _ = p2p_task.await;
 
     #[cfg(windows)]
     {

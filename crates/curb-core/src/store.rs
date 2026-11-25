@@ -31,6 +31,14 @@ pub fn usage_path(data_dir: &Path) -> PathBuf {
     data_dir.join("usage.json")
 }
 
+pub fn sync_config_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("sync.json")
+}
+
+pub fn peer_identity_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("peer_identity.json")
+}
+
 pub fn load_config(data_dir: &Path) -> Result<Config> {
     let path = config_path(data_dir);
     if !path.exists() {
@@ -83,6 +91,36 @@ pub fn save_auth(data_dir: &Path, record: &AuthRecord) -> Result<()> {
         let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
     }
     Ok(())
+}
+
+pub fn load_sync_config(data_dir: &Path) -> Result<crate::sync::RemoteSyncConfig> {
+    let path = sync_config_path(data_dir);
+    if !path.exists() {
+        let default_name = default_hostname();
+        let cfg = crate::sync::RemoteSyncConfig::new_default(default_name);
+        let _ = save_sync_config(data_dir, &cfg);
+        return Ok(cfg);
+    }
+    read_json(&path)
+}
+
+pub fn save_sync_config(data_dir: &Path, cfg: &crate::sync::RemoteSyncConfig) -> Result<()> {
+    let path = sync_config_path(data_dir);
+    write_json_atomic(&path, cfg)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn default_hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "This PC".into())
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {

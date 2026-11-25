@@ -5,6 +5,7 @@ mod backend;
 mod elevate;
 mod ipc_client;
 mod local_mode;
+mod remote;
 mod single_instance;
 mod window_placement;
 

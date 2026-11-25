@@ -123,6 +123,8 @@ pub struct ServiceSnapshot {
     pub service_version: String,
     #[serde(default)]
     pub playtime_statuses: Vec<crate::playtime::PlaytimeRuleStatus>,
+    #[serde(default)]
+    pub remote_status: crate::sync::RemoteStatus,
 }
 
 /// Requests sent from `curb-app` (or `curb-cli`) to `curb-service`.
@@ -145,6 +147,11 @@ pub enum IpcRequest {
 
     // --- Authentication ---
     Unlock {
+        password: String,
+    },
+    /// Authenticates a paired remote friend by their Ed25519 peer ID + personal password.
+    UnlockAsPeer {
+        peer_id: String,
         password: String,
     },
     Lock {
@@ -200,6 +207,37 @@ pub enum IpcRequest {
         current_password: String,
         new_password: String,
     },
+
+    // --- Remote Admin & P2P Sync ---
+    /// Renames this device (e.g. "Jordan's PC") for display in synced devices & friend apps.
+    RenameDevice {
+        token: String,
+        name: String,
+    },
+    /// Generates a single-use, 10-minute `curb://invite?...` link for a friend admin or sync device.
+    CreateInvite {
+        token: String,
+        kind: crate::sync::InviteKind,
+    },
+    /// Redeems a single-use invite over P2P: registers the friend's peer ID + personal password
+    /// (or returns the Sync Group Key for a synced device) and immediately burns the invite code.
+    RedeemInvite {
+        code: String,
+        peer_id: String,
+        name: String,
+        password: String,
+    },
+    /// Removes a remote friend admin by ID (immediately invalidates their credentials).
+    RemoveAdmin {
+        token: String,
+        admin_id: Uuid,
+    },
+    /// Configures the optional P2P relay proxy URL and E2E-encrypted offline backup toggle.
+    SetRelayConfig {
+        token: String,
+        relay_url: String,
+        encrypted_backup_enabled: bool,
+    },
 }
 
 /// Responses returned by `curb-service`.
@@ -226,6 +264,18 @@ pub enum IpcResponse {
     },
     Unlocked {
         token: String,
+    },
+    InviteCreated {
+        uri: String,
+        code: String,
+        expires_in_secs: u64,
+    },
+    InviteRedeemed {
+        device_name: String,
+        peer_id: String,
+        /// Populated only for `InviteKind::SyncDevice` so the new device joins the sync group.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_key_hex: Option<String>,
     },
     Ok,
     Error {

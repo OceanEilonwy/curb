@@ -41,6 +41,8 @@ jobs:
           ./packaging/linux/build-rpm.sh
           ./packaging/linux/build-arch.sh
           ./packaging/linux/build-xbps.sh
+          ./packaging/linux/build-relay-deb.sh
+          ./packaging/linux/build-relay-rpm.sh
           ls -lh dist-release/
 
   windows-e2e:

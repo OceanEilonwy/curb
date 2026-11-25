@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::elevate;
 use crate::ipc_client;
 use crate::local_mode::{is_standard_mode_configured, LocalStandardRuntime};
+use crate::remote::{RemotePeerStore, SavedRemotePeer};
 
 static AUTO_UPGRADE_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
@@ -40,6 +41,12 @@ impl DemoState {
                 protection_tier: ProtectionTier::FullService,
                 service_version: env!("CARGO_PKG_VERSION").to_string(),
                 playtime_statuses: Vec::new(),
+                remote_status: curb_core::sync::RemoteStatus {
+                    device_name: "This PC".into(),
+                    relay_url: curb_core::sync::DEFAULT_RELAY_URL.into(),
+                    encrypted_backup_enabled: true,
+                    ..Default::default()
+                },
                 config: Config {
                     schema_version: CURRENT_SCHEMA_VERSION,
                     mode: EnforcementMode::Enforcing,
@@ -268,6 +275,8 @@ pub struct CurbBackend {
     rt: Arc<Runtime>,
     local: LocalStandardRuntime,
     demo: Option<Arc<Mutex<DemoState>>>,
+    remote_store: Arc<Mutex<RemotePeerStore>>,
+    active_remote: Arc<Mutex<Option<SavedRemotePeer>>>,
 }
 
 impl CurbBackend {
@@ -287,7 +296,27 @@ impl CurbBackend {
         } else {
             None
         };
-        Self { rt, local, demo }
+        let remote_store = Arc::new(Mutex::new(RemotePeerStore::load_default()));
+        Self {
+            rt,
+            local,
+            demo,
+            remote_store,
+            active_remote: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn saved_remote_peers(&self) -> Vec<SavedRemotePeer> {
+        self.remote_store.lock().unwrap().peers().to_vec()
+    }
+
+    pub fn active_remote_peer(&self) -> Option<SavedRemotePeer> {
+        self.active_remote.lock().unwrap().clone()
+    }
+
+    pub fn set_active_remote_peer(&self, peer_id: Option<Uuid>) {
+        let target = peer_id.and_then(|id| self.remote_store.lock().unwrap().find_by_id(id));
+        *self.active_remote.lock().unwrap() = target;
     }
 
     pub fn spawn<F>(&self, fut: F)
@@ -319,9 +348,16 @@ impl CurbBackend {
         }
     }
 
-    /// Dispatches an IPC request to `CurbService` (Full Protection) when available,
-    /// transparently falling back to `LocalStandardRuntime`.
+    /// Dispatches an IPC request to the currently selected target:
+    /// - If a remote friend's device is active, sends over E2E-encrypted P2P via `curb-p2p`.
+    /// - Otherwise sends to local `CurbService`, falling back to `LocalStandardRuntime`.
     async fn dispatch_request(&self, req: IpcRequest) -> Result<IpcResponse, String> {
+        if let Some(peer) = self.active_remote_peer() {
+            let identity = self.remote_store.lock().unwrap().identity().clone();
+            return curb_p2p::send_remote_request(&identity, &peer.relay_url, &peer.peer_id, &req)
+                .await
+                .map_err(|e| e.to_string());
+        }
         if let Ok(resp) = ipc_client::send_request(&req).await {
             self.local.clear_standard_mode_for_full_service();
             return Ok(resp);
@@ -507,10 +543,16 @@ impl CurbBackend {
             }
             return Ok("demo-session-token".into());
         }
-        match self
-            .dispatch_request(IpcRequest::Unlock { password })
-            .await?
-        {
+        let req = if self.active_remote_peer().is_some() {
+            let my_peer_id = self.remote_store.lock().unwrap().identity().peer_id();
+            IpcRequest::UnlockAsPeer {
+                peer_id: my_peer_id,
+                password,
+            }
+        } else {
+            IpcRequest::Unlock { password }
+        };
+        match self.dispatch_request(req).await? {
             IpcResponse::Unlocked { token } => Ok(token),
             IpcResponse::Error { message } => Err(message),
             _ => Err("Unexpected response from Curb".into()),
@@ -523,6 +565,148 @@ impl CurbBackend {
         }
         match self.dispatch_request(IpcRequest::Lock { token }).await? {
             IpcResponse::Ok => Ok(()),
+            IpcResponse::Error { message } => Err(message),
+            _ => Err("Unexpected response from Curb".into()),
+        }
+    }
+
+    /// Renames the currently active device.
+    /// - For a remote friend's device, updates the local display name immediately (no unlock required).
+    /// - For the local PC, calls `IpcRequest::RenameDevice` on `curb-service`.
+    pub async fn rename_active_device(
+        &self,
+        token: Option<String>,
+        new_name: String,
+    ) -> Result<String, String> {
+        let trimmed = new_name.trim().to_string();
+        if trimmed.is_empty() {
+            return Err("Device name cannot be empty.".into());
+        }
+        if let Some(peer) = self.active_remote_peer() {
+            let mut store = self.remote_store.lock().unwrap();
+            store.rename_peer(peer.id, &trimmed);
+            if let Some(updated) = store.find_by_id(peer.id) {
+                *self.active_remote.lock().unwrap() = Some(updated);
+            }
+            return Ok(trimmed);
+        }
+        if let Some(demo) = &self.demo {
+            demo.lock().unwrap().snapshot.remote_status.device_name = trimmed.clone();
+            return Ok(trimmed);
+        }
+        let token = token.ok_or_else(|| "Unlock Curb first to rename this PC.".to_string())?;
+        match self
+            .dispatch_request(IpcRequest::RenameDevice {
+                token,
+                name: trimmed.clone(),
+            })
+            .await?
+        {
+            IpcResponse::Snapshot { data } => Ok(data.remote_status.device_name),
+            IpcResponse::Error { message } => Err(message),
+            _ => Err("Unexpected response from Curb".into()),
+        }
+    }
+
+    /// Generates a single-use `curb://invite?...` link for adding a friend admin.
+    pub async fn create_friend_invite(&self, token: String) -> Result<String, String> {
+        if self.demo.is_some() {
+            return Ok("curb://invite?kind=friend&peer=demo&relay=https%3A%2F%2Frelay.curb.app&code=DEMO-1234&name=This%20PC".into());
+        }
+        match self
+            .dispatch_request(IpcRequest::CreateInvite {
+                token,
+                kind: curb_core::sync::InviteKind::FriendAdmin,
+            })
+            .await?
+        {
+            IpcResponse::InviteCreated { uri, .. } => Ok(uri),
+            IpcResponse::Error { message } => Err(message),
+            _ => Err("Unexpected response from Curb".into()),
+        }
+    }
+
+    /// Redeems a one-time `curb://invite?...` link over E2E-encrypted P2P, sets the friend's
+    /// personal password on the remote PC, saves the peer locally, and switches to it.
+    pub async fn connect_with_invite(
+        &self,
+        invite_uri: String,
+        my_name: String,
+        my_password: String,
+    ) -> Result<SavedRemotePeer, String> {
+        let invite = curb_core::sync::InviteToken::parse_uri(&invite_uri)
+            .map_err(|e| e.to_string())?;
+        let identity = self.remote_store.lock().unwrap().identity().clone();
+        let req = IpcRequest::RedeemInvite {
+            code: invite.code,
+            peer_id: identity.peer_id(),
+            name: my_name,
+            password: my_password,
+        };
+        let resp = curb_p2p::send_remote_request(
+            &identity,
+            &invite.relay_url,
+            &invite.target_peer_id,
+            &req,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        match resp {
+            IpcResponse::InviteRedeemed {
+                device_name,
+                peer_id,
+                ..
+            } => {
+                let saved = self.remote_store.lock().unwrap().upsert_peer(
+                    device_name,
+                    peer_id,
+                    invite.relay_url,
+                );
+                *self.active_remote.lock().unwrap() = Some(saved.clone());
+                Ok(saved)
+            }
+            IpcResponse::Error { message } => Err(message),
+            _ => Err("Unexpected response while redeeming invite".into()),
+        }
+    }
+
+    pub async fn remove_admin(
+        &self,
+        token: String,
+        admin_id: Uuid,
+    ) -> Result<ServiceSnapshot, String> {
+        match self
+            .dispatch_request(IpcRequest::RemoveAdmin { token, admin_id })
+            .await?
+        {
+            IpcResponse::Snapshot { data } => Ok(data),
+            IpcResponse::Error { message } => Err(message),
+            _ => Err("Unexpected response from Curb".into()),
+        }
+    }
+
+    pub async fn set_relay_config(
+        &self,
+        token: String,
+        relay_url: String,
+        encrypted_backup_enabled: bool,
+    ) -> Result<ServiceSnapshot, String> {
+        if let Some(demo) = &self.demo {
+            let mut g = demo.lock().unwrap();
+            g.snapshot.remote_status.relay_url = relay_url;
+            g.snapshot.remote_status.encrypted_backup_enabled = encrypted_backup_enabled;
+            return Ok(g.snapshot.clone());
+        }
+        match self
+            .dispatch_request(IpcRequest::SetRelayConfig {
+                token,
+                relay_url,
+                encrypted_backup_enabled,
+            })
+            .await?
+        {
+            IpcResponse::Snapshot { data } => Ok(data),
             IpcResponse::Error { message } => Err(message),
             _ => Err("Unexpected response from Curb".into()),
         }

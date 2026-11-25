@@ -13,6 +13,7 @@ winresource = "0.1"
 [dependencies]
 chrono.workspace = true
 curb-core = { path = "../../crates/curb-core" }
+curb-p2p = { path = "../../crates/curb-p2p" }
 curb-preset-steam = { path = "../../crates/presets/steam" }
 curb-games = { path = "../../crates/curb-games" }
 serde.workspace = true

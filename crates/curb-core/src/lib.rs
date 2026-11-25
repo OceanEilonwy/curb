@@ -8,6 +8,7 @@ pub mod playtime;
 pub mod presets;
 pub mod steam;
 pub mod store;
+pub mod sync;
 pub mod verify;
 
 use thiserror::Error;

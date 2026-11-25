@@ -1,0 +1,25 @@
+# Maintainer: Curb Maintainers <https://github.com/OceanEilonwy/curb>
+pkgname=curb-relay
+pkgver=0.3.5
+pkgrel=1
+pkgdesc="Zero-knowledge P2P relay and optional E2E-encrypted backup server for Curb"
+arch=('x86_64' 'aarch64')
+url="https://github.com/OceanEilonwy/curb"
+license=('AGPL-3.0-or-later')
+makedepends=('cargo')
+source=("curb-${pkgver}.tar.gz::https://github.com/OceanEilonwy/curb/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "${srcdir}/curb-${pkgver}"
+  export CARGO_TARGET_DIR=target
+  cargo build --release -p curb-relay
+}
+
+package() {
+  cd "${srcdir}/curb-${pkgver}"
+  install -Dm755 target/release/curb-relay "${pkgdir}/usr/bin/curb-relay"
+  install -Dm644 packaging/linux/curb-relay.service "${pkgdir}/usr/lib/systemd/system/curb-relay.service"
+  install -Dm644 packaging/linux/curb-relay.env.example "${pkgdir}/usr/share/doc/${pkgname}/curb-relay.env.example"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

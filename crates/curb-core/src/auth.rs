@@ -8,42 +8,142 @@ use chrono::{DateTime, Utc};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
+use uuid::Uuid;
+
+use crate::sync::RemoteAdminSummary;
 use crate::{CurbError, Result};
+
+/// A named admin credential (e.g. a remote friend who connected via a one-time
+/// invite link and chose their own Argon2id password).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdminCredential {
+    pub id: Uuid,
+    pub name: String,
+    /// Ed25519 peer ID (hex) of the remote friend's `curb-app` device.
+    #[serde(default)]
+    pub peer_id: Option<String>,
+    pub password_hash: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_unlock_at: Option<DateTime<Utc>>,
+}
+
+impl AdminCredential {
+    pub fn to_summary(&self) -> RemoteAdminSummary {
+        RemoteAdminSummary {
+            id: self.id,
+            name: self.name.clone(),
+            is_remote: self.peer_id.is_some(),
+            created_at: self.created_at,
+            last_unlock_at: self.last_unlock_at,
+        }
+    }
+}
 
 /// Stored in `C:\ProgramData\Curb\auth.json` (writable only by SYSTEM / Administrators).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthRecord {
     pub password_hash: String,
     pub updated_at: DateTime<Utc>,
+    /// Additional named admins (e.g. remote friends), each with their own Argon2id password.
+    #[serde(default)]
+    pub admins: Vec<AdminCredential>,
 }
 
-/// Hashes a plain-text Curb admin password using Argon2id with a fresh random salt.
-pub fn hash_password(password: &str) -> Result<AuthRecord> {
+/// Hashes a raw password string using Argon2id with a fresh random salt.
+pub fn hash_password_raw(password: &str) -> Result<String> {
     if password.len() < 4 {
         return Err(CurbError::Auth(
             "Password must be at least 4 characters long.".into(),
         ));
     }
     let salt = SaltString::generate(&mut OsRng);
-    let hash = Argon2::default()
+    Argon2::default()
         .hash_password(password.as_bytes(), &salt)
-        .map_err(|e| CurbError::Auth(format!("Failed to hash password: {e}")))?
-        .to_string();
-
-    Ok(AuthRecord {
-        password_hash: hash,
-        updated_at: Utc::now(),
-    })
+        .map_err(|e| CurbError::Auth(format!("Failed to hash password: {e}")))
+        .map(|h| h.to_string())
 }
 
-/// Verifies a plain-text password against a stored `AuthRecord`.
-pub fn verify_password(password: &str, record: &AuthRecord) -> bool {
-    let Ok(parsed) = PasswordHash::new(&record.password_hash) else {
+/// Verifies a plain-text password against an Argon2id hash string.
+pub fn verify_hash(password: &str, hash: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(hash) else {
         return false;
     };
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok()
+}
+
+/// Hashes a plain-text Curb admin password using Argon2id with a fresh random salt.
+pub fn hash_password(password: &str) -> Result<AuthRecord> {
+    let hash = hash_password_raw(password)?;
+    Ok(AuthRecord {
+        password_hash: hash,
+        updated_at: Utc::now(),
+        admins: Vec::new(),
+    })
+}
+
+/// Verifies a plain-text password against a stored `AuthRecord` (primary password).
+pub fn verify_password(password: &str, record: &AuthRecord) -> bool {
+    verify_hash(password, &record.password_hash)
+}
+
+impl AuthRecord {
+    /// Adds a new named admin (e.g. a remote friend who redeemed a one-time invite)
+    /// with their own Argon2id password.
+    pub fn add_admin(
+        &mut self,
+        name: impl Into<String>,
+        peer_id: Option<String>,
+        password: &str,
+    ) -> Result<AdminCredential> {
+        let name = name.into().trim().to_string();
+        if name.is_empty() {
+            return Err(CurbError::Auth("Admin name cannot be empty.".into()));
+        }
+        let password_hash = hash_password_raw(password)?;
+        // Replace any previous entry for the same peer_id so re-pairing stays clean.
+        if let Some(pid) = &peer_id {
+            self.admins
+                .retain(|a| a.peer_id.as_deref() != Some(pid.as_str()));
+        }
+        let cred = AdminCredential {
+            id: Uuid::new_v4(),
+            name,
+            peer_id,
+            password_hash,
+            created_at: Utc::now(),
+            last_unlock_at: None,
+        };
+        self.admins.push(cred.clone());
+        self.updated_at = Utc::now();
+        Ok(cred)
+    }
+
+    /// Removes a named admin by ID. Returns `true` if an entry was removed.
+    pub fn remove_admin(&mut self, admin_id: Uuid) -> bool {
+        let before = self.admins.len();
+        self.admins.retain(|a| a.id != admin_id);
+        let removed = self.admins.len() != before;
+        if removed {
+            self.updated_at = Utc::now();
+        }
+        removed
+    }
+
+    /// Verifies a remote friend's `peer_id` + personal password, returning the matching admin's ID.
+    pub fn verify_peer(&self, peer_id: &str, password: &str) -> Option<Uuid> {
+        self.admins
+            .iter()
+            .find(|a| a.peer_id.as_deref() == Some(peer_id) && verify_hash(password, &a.password_hash))
+            .map(|a| a.id)
+    }
+
+    /// Lists all configured remote/named admins (without password hashes).
+    pub fn admin_summaries(&self) -> Vec<RemoteAdminSummary> {
+        self.admins.iter().map(AdminCredential::to_summary).collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +214,49 @@ impl SessionManager {
             },
         );
         Ok(token)
+    }
+
+    /// Attempts to unlock as a paired remote friend identified by `peer_id` using their
+    /// personal Argon2id password, returning `(session_token, admin_id)`.
+    pub fn unlock_as_peer(
+        &mut self,
+        peer_id: &str,
+        password: &str,
+        record: &AuthRecord,
+    ) -> Result<(String, Uuid)> {
+        let now = Instant::now();
+        if let Some(until) = self.locked_until {
+            if now < until {
+                let secs = (until - now).as_secs().max(1);
+                return Err(CurbError::Auth(format!(
+                    "Too many failed attempts. Try again in {secs}s."
+                )));
+            }
+        }
+
+        let Some(admin_id) = record.verify_peer(peer_id, password) else {
+            self.failed_attempts = self.failed_attempts.saturating_add(1);
+            if self.failed_attempts >= 3 {
+                let shift = (self.failed_attempts - 3).min(6);
+                let backoff = Duration::from_secs(2u64 << shift);
+                self.locked_until = Some(now + backoff);
+            }
+            return Err(CurbError::Auth("Incorrect Curb password.".into()));
+        };
+
+        self.failed_attempts = 0;
+        self.locked_until = None;
+        self.prune_expired();
+
+        let token = generate_token();
+        self.sessions.insert(
+            token.clone(),
+            ActiveSession {
+                expires_at: now + self.idle_timeout,
+                idle_timeout: self.idle_timeout,
+            },
+        );
+        Ok((token, admin_id))
     }
 
     /// Validates `token` and refreshes its sliding idle expiration window.

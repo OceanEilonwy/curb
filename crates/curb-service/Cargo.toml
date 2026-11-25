@@ -8,6 +8,7 @@ license.workspace = true
 chrono.workspace = true
 clap.workspace = true
 curb-core = { path = "../curb-core" }
+curb-p2p = { path = "../curb-p2p" }
 curb-preset-steam = { path = "../presets/steam" }
 curb-games = { path = "../curb-games" }
 hickory-proto.workspace = true

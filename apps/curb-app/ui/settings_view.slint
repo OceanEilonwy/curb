@@ -1,4 +1,5 @@
 import { Theme } from "theme.slint";
+import { RemoteAdminItem } from "types.slint";
 import { LoadingDots, LockIcon } from "icons.slint";
 import { CurbCheckbox, CurbInput, CurbScrollView, CurbSwitch, ReadOnlyStatusPill } from "components.slint";
 
@@ -28,6 +29,11 @@ export component SettingsView inherits CurbScrollView {
     in property <bool> pw-busy: false;
     in property <string> pw-error: "";
 
+    in property <string> device-name: "This PC";
+    in property <[RemoteAdminItem]> remote-admins: [];
+    in-out property <string> relay-url: "";
+    in property <bool> encrypted-backup-enabled: true;
+
     in-out property <bool> adv-open: false;
 
     callback require-unlock();
@@ -41,6 +47,11 @@ export component SettingsView inherits CurbScrollView {
     callback toggle-baseline-ncsi();
     callback toggle-pw-form();
     callback submit-password-change(string, string, string);
+    callback rename-device-clicked();
+    callback add-friend-admin-clicked();
+    callback connect-friend-clicked();
+    callback remove-friend-admin(string);
+    callback save-relay-config(string, bool);
 
     content-padding: 16px;
     content-spacing: 12px;
@@ -567,6 +578,220 @@ export component SettingsView inherits CurbScrollView {
         }
     }
 
+    // Device Name (shown in header switcher & synced devices)
+    Rectangle {
+        border-radius: 12px;
+        background: Theme.card;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        HorizontalLayout {
+            padding: 14px;
+            spacing: 10px;
+            cross-axis-alignment: center;
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 2px;
+
+                Text {
+                    text: "Device name";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: root.device-name;
+                    color: Theme.text-sec;
+                    font-size: 12px;
+                    overflow: elide;
+                }
+            }
+
+            Rectangle {
+                horizontal-stretch: 0;
+                height: 30px;
+                border-radius: 8px;
+                background: rename-ta.has-hover ? Theme.card-hover : Theme.sub;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    cross-axis-alignment: center;
+                    Text {
+                        text: "Rename";
+                        color: Theme.text;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+
+                rename-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.rename-device-clicked(); }
+                }
+            }
+        }
+    }
+
+    // Remote Admins & Friends
+    Rectangle {
+        border-radius: 12px;
+        background: Theme.card;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        VerticalLayout {
+            padding: 14px;
+            spacing: 10px;
+
+            HorizontalLayout {
+                spacing: 8px;
+                cross-axis-alignment: center;
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    Text {
+                        text: "Friend Admins";
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: "Share a one-time link so a friend can set their own password";
+                        color: Theme.text-sec;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 0;
+                    height: 30px;
+                    border-radius: 8px;
+                    background: add-adm-ta.has-hover ? Theme.accent-hover : Theme.accent;
+                    opacity: root.unlocked ? 1.0 : 0.65;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        cross-axis-alignment: center;
+                        Text {
+                            text: "+ Add friend";
+                            color: #ffffff;
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    add-adm-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            if root.unlocked {
+                                root.add-friend-admin-clicked();
+                            } else {
+                                root.require-unlock();
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.remote-admins.length > 0: VerticalLayout {
+                spacing: 6px;
+
+                for adm in root.remote-admins: HorizontalLayout {
+                    spacing: 8px;
+                    cross-axis-alignment: center;
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: adm.name;
+                        color: Theme.text;
+                        font-size: 12.5px;
+                        font-weight: 500;
+                        overflow: elide;
+                    }
+
+                    if root.unlocked: Rectangle {
+                        horizontal-stretch: 0;
+                        height: 24px;
+                        border-radius: 6px;
+                        background: Theme.red-soft;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            cross-axis-alignment: center;
+                            Text {
+                                text: "Remove";
+                                color: Theme.red-text;
+                                font-size: 11px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.remove-friend-admin(adm.id); }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: Theme.border;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                cross-axis-alignment: center;
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: "Have an invite link from a friend?";
+                    color: Theme.text-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 0;
+                    height: 28px;
+                    border-radius: 8px;
+                    background: conn-fr-ta.has-hover ? Theme.card-hover : Theme.sub;
+                    border-width: 1px;
+                    border-color: Theme.border;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        cross-axis-alignment: center;
+                        Text {
+                            text: "Connect";
+                            color: Theme.text;
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    conn-fr-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.connect-friend-clicked(); }
+                    }
+                }
+            }
+        }
+    }
+
     // Collapsible Advanced Settings
     Rectangle {
         border-radius: 12px;
@@ -730,6 +955,86 @@ export component SettingsView inherits CurbScrollView {
                             color: Theme.text-muted;
                             font-size: 11px;
                             font-family: "JetBrains Mono";
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: Theme.border; }
+
+                    VerticalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: "Sync Relay (P2P Proxy)";
+                            color: Theme.text;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            cross-axis-alignment: center;
+
+                            CurbInput {
+                                horizontal-stretch: 1;
+                                text <=> root.relay-url;
+                                placeholder: "https://relay.curb.app (blank = off)";
+                                enabled: root.unlocked;
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 0;
+                                height: 32px;
+                                border-radius: 8px;
+                                background: save-relay-ta.has-hover && root.unlocked ? Theme.accent-hover : Theme.accent;
+                                opacity: root.unlocked ? 1.0 : 0.55;
+
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: "Save";
+                                        color: #ffffff;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                save-relay-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        if root.unlocked {
+                                            root.save-relay-config(root.relay-url, root.encrypted-backup-enabled);
+                                        } else {
+                                            root.require-unlock();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            cross-axis-alignment: center;
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: "Encrypted offline backup";
+                                color: Theme.text-sec;
+                                font-size: 12px;
+                            }
+
+                            if root.unlocked: CurbSwitch {
+                                checked: root.encrypted-backup-enabled;
+                                toggled => {
+                                    root.save-relay-config(root.relay-url, !root.encrypted-backup-enabled);
+                                }
+                            }
+                            if !root.unlocked: ReadOnlyStatusPill {
+                                active: root.encrypted-backup-enabled;
+                                clicked => { root.require-unlock(); }
+                            }
                         }
                     }
 
