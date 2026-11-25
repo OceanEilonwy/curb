@@ -11,7 +11,6 @@ import {
     LoadingDots,
     LockIcon,
     PlusIcon,
-    ShieldIcon,
     UnlockIcon,
     WarnIcon,
 } from "icons.slint";
@@ -368,19 +367,11 @@ export component MainWindow inherits Window {
                                     alignment: start;
                                     cross-axis-alignment: center;
 
-                                    Rectangle {
+                                    Image {
+                                        source: @image-url("../icons/128x128.png");
                                         width: 28px;
                                         height: 28px;
-                                        border-radius: 8px;
-                                        background: root.mode-bg;
-
-                                        ShieldIcon {
-                                            mode: root.mode-kind;
-                                            color: root.mode-fg;
-                                            size: 15px;
-                                            x: (parent.width - self.width) / 2;
-                                            y: (parent.height - self.height) / 2;
-                                        }
+                                        image-fit: contain;
                                     }
 
                                     Text {

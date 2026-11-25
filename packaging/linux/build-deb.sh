@@ -30,6 +30,7 @@ mkdir -p \
   "$STAGE/usr/share/applications" \
   "$STAGE/usr/share/icons/hicolor/128x128/apps" \
   "$STAGE/usr/share/icons/hicolor/32x32/apps" \
+  "$STAGE/usr/share/icons/hicolor/scalable/apps" \
   "$STAGE/usr/share/polkit-1/actions" \
   "$STAGE/usr/share/doc/curb"
 
@@ -41,6 +42,7 @@ install -m 0644 "$SCRIPT_DIR/curb.desktop" "$STAGE/usr/share/applications/curb.d
 install -m 0644 "$SCRIPT_DIR/org.curb.policy" "$STAGE/usr/share/polkit-1/actions/org.curb.policy"
 install -m 0644 "$REPO_ROOT/apps/curb-app/icons/128x128.png" "$STAGE/usr/share/icons/hicolor/128x128/apps/curb.png"
 install -m 0644 "$REPO_ROOT/apps/curb-app/icons/32x32.png" "$STAGE/usr/share/icons/hicolor/32x32/apps/curb.png"
+install -m 0644 "$REPO_ROOT/apps/curb-app/icons/icon.svg" "$STAGE/usr/share/icons/hicolor/scalable/apps/curb.svg"
 install -m 0644 "$REPO_ROOT/LICENSE" "$STAGE/usr/share/doc/curb/LICENSE"
 install -m 0644 "$REPO_ROOT/README.md" "$STAGE/usr/share/doc/curb/README.md"
 

@@ -74,6 +74,7 @@ jobs:
           cp packaging/linux/install.sh "$TAR_DIR/"
           cp apps/curb-app/icons/128x128.png "$TAR_DIR/icon-128.png"
           cp apps/curb-app/icons/32x32.png "$TAR_DIR/icon-32.png"
+          cp apps/curb-app/icons/icon.svg "$TAR_DIR/icon.svg"
           cp README.md LICENSE "$TAR_DIR/"
           tar -C dist-release -czf "dist-release/curb-${VERSION}-linux-x86_64.tar.gz" "curb-${VERSION}-linux-x86_64"
           ls -lh dist-release/

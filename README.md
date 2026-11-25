@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="apps/curb-app/icons/icon.svg" alt="Curb" width="96" height="96" />
+
 # Curb
 
 **Block everything. Allow only what matters.**
