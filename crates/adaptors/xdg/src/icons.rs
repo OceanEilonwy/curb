@@ -50,8 +50,8 @@ const CONTEXT_FIRST_DIRS: &[&str] = &[
 
 #[derive(Debug, Default)]
 struct DesktopIconIndex {
-    by_exec_path: HashMap<String, String>,
-    by_exec_name: HashMap<String, String>,
+    by_exec_path: HashMap<String, (String, bool)>,
+    by_exec_name: HashMap<String, (String, bool)>,
     by_app_name: HashMap<String, String>,
     by_stem: HashMap<String, String>,
 }
@@ -140,18 +140,18 @@ fn collect_icon_candidates(req: &AppIconRequest<'_>, index: &DesktopIconIndex) -
     // 2. Match `.desktop` entries by full executable path (and canonical path if symlink)
     if let Some(exe_path) = req.exe_path {
         let path_str = exe_path.to_string_lossy();
-        if let Some(icon) = index.by_exec_path.get(path_str.as_ref()) {
+        if let Some((icon, _)) = index.by_exec_path.get(path_str.as_ref()) {
             push(icon);
         }
         if let Ok(canon) = fs::canonicalize(exe_path) {
             let canon_str = canon.to_string_lossy();
-            if let Some(icon) = index.by_exec_path.get(canon_str.as_ref()) {
+            if let Some((icon, _)) = index.by_exec_path.get(canon_str.as_ref()) {
                 push(icon);
             }
         }
         // Snap paths: `/snap/<snap-name>/<rev>/...`
         if let Some(snap_name) = extract_snap_name(exe_path) {
-            if let Some(icon) = index.by_exec_name.get(&snap_name) {
+            if let Some((icon, _)) = index.by_exec_name.get(&snap_name) {
                 push(icon);
             }
             if let Some(icon) = index.by_stem.get(&snap_name) {
@@ -174,7 +174,7 @@ fn collect_icon_candidates(req: &AppIconRequest<'_>, index: &DesktopIconIndex) -
     }
 
     for v in &exe_variants {
-        if let Some(icon) = index.by_exec_name.get(v) {
+        if let Some((icon, _)) = index.by_exec_name.get(v) {
             push(icon);
         }
         if let Some(icon) = index.by_stem.get(v) {
@@ -324,22 +324,42 @@ fn insert_desktop_entry(
     stem: &str,
     entry: ParsedDesktopIconEntry,
 ) {
+    let app_name_lower = entry
+        .name
+        .as_deref()
+        .map(|n| n.trim().to_ascii_lowercase());
+    let wm_class_lower = entry
+        .wm_class
+        .as_deref()
+        .map(|w| w.trim().to_ascii_lowercase());
+    let stem_suffix = stem
+        .rsplit('.')
+        .next()
+        .filter(|last| !last.is_empty() && *last != stem);
+
+    let is_primary_for = |exe_name: &str| -> bool {
+        (!stem.is_empty() && stem == exe_name)
+            || stem_suffix == Some(exe_name)
+            || app_name_lower.as_deref() == Some(exe_name)
+            || wm_class_lower.as_deref() == Some(exe_name)
+    };
+
     if let Some(exec_path) = entry.exec_path {
-        index
-            .by_exec_path
-            .entry(exec_path)
-            .or_insert_with(|| entry.icon.clone());
+        let primary = Path::new(&exec_path)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_ascii_lowercase())
+            .map(|base| is_primary_for(&base))
+            .unwrap_or(false);
+        insert_exec_mapping(&mut index.by_exec_path, exec_path, &entry.icon, primary);
     }
     for name in entry.exec_names {
-        index
-            .by_exec_name
-            .entry(name)
-            .or_insert_with(|| entry.icon.clone());
+        let primary = is_primary_for(&name);
+        insert_exec_mapping(&mut index.by_exec_name, name, &entry.icon, primary);
     }
-    if let Some(app_name) = entry.name {
+    if let Some(app_name) = app_name_lower {
         index
             .by_app_name
-            .entry(app_name.to_ascii_lowercase())
+            .entry(app_name)
             .or_insert_with(|| entry.icon.clone());
     }
     if !stem.is_empty() {
@@ -348,20 +368,37 @@ fn insert_desktop_entry(
             .entry(stem.to_string())
             .or_insert_with(|| entry.icon.clone());
         // Also index reverse-DNS suffix (e.g. `org.kde.konsole` -> `konsole`).
-        if let Some(last) = stem.rsplit('.').next() {
-            if !last.is_empty() && last != stem {
-                index
-                    .by_stem
-                    .entry(last.to_string())
-                    .or_insert_with(|| entry.icon.clone());
-            }
+        if let Some(last) = stem_suffix {
+            index
+                .by_stem
+                .entry(last.to_string())
+                .or_insert_with(|| entry.icon.clone());
         }
     }
-    if let Some(wm) = entry.wm_class {
+    if let Some(wm) = wm_class_lower {
         index
             .by_stem
-            .entry(wm.to_ascii_lowercase())
+            .entry(wm)
             .or_insert_with(|| entry.icon.clone());
+    }
+}
+
+fn insert_exec_mapping(
+    map: &mut HashMap<String, (String, bool)>,
+    key: String,
+    icon: &str,
+    primary_match: bool,
+) {
+    match map.get_mut(&key) {
+        Some((existing_icon, existing_primary)) => {
+            if primary_match && !*existing_primary {
+                *existing_icon = icon.to_string();
+                *existing_primary = true;
+            }
+        }
+        None => {
+            map.insert(key, (icon.to_string(), primary_match));
+        }
     }
 }
 
@@ -422,22 +459,26 @@ fn parse_desktop_icon_entry(content: &str) -> Option<ParsedDesktopIconEntry> {
     let icon = icon?;
     let mut exec_path = None;
     let mut exec_names = Vec::new();
+    let mut is_subapp_shortcut = false;
 
     if let Some(ref exec) = exec_line {
-        let (path_opt, names) = parse_exec_tokens(exec);
+        let (path_opt, names, subapp) = parse_exec_tokens(exec);
         exec_path = path_opt;
         exec_names.extend(names);
+        is_subapp_shortcut = subapp;
     }
 
-    if let Some(ref te) = try_exec {
-        let cleaned = te.trim_matches('"').trim_matches('\'');
-        if exec_path.is_none() && cleaned.starts_with('/') {
-            exec_path = Some(cleaned.to_string());
-        }
-        if let Some(fname) = Path::new(cleaned).file_name() {
-            let lower = fname.to_string_lossy().to_ascii_lowercase();
-            if !lower.is_empty() && !exec_names.contains(&lower) {
-                exec_names.push(lower);
+    if !is_subapp_shortcut {
+        if let Some(ref te) = try_exec {
+            let cleaned = te.trim_matches('"').trim_matches('\'');
+            if exec_path.is_none() && cleaned.starts_with('/') {
+                exec_path = Some(cleaned.to_string());
+            }
+            if let Some(fname) = Path::new(cleaned).file_name() {
+                let lower = fname.to_string_lossy().to_ascii_lowercase();
+                if !lower.is_empty() && !exec_names.contains(&lower) {
+                    exec_names.push(lower);
+                }
             }
         }
     }
@@ -452,7 +493,46 @@ fn parse_desktop_icon_entry(content: &str) -> Option<ParsedDesktopIconEntry> {
     })
 }
 
-fn parse_exec_tokens(exec_line: &str) -> (Option<String>, Vec<String>) {
+/// Returns `true` when an `Exec=` invocation launches a sub-application or game shortcut via a
+/// shared host launcher or browser (e.g. `steam steam://rungameid/1240440`,
+/// `flatpak run com.valvesoftware.Steam steam://rungameid/1240440`,
+/// `google-chrome --app-id=...`, `xdg-open ...`).
+///
+/// These entries represent the launched game/web-app (still indexed by `Name=` and desktop stem),
+/// not the host launcher binary itself, so they must not claim `by_exec_path` or `by_exec_name`.
+fn is_subapp_launcher_exec(tokens: &[&str]) -> bool {
+    let Some(&cmd) = tokens.first() else {
+        return false;
+    };
+    let cmd_base = Path::new(cmd)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if cmd_base == "xdg-open" {
+        return true;
+    }
+
+    for &arg in &tokens[1..] {
+        let lower = arg.to_ascii_lowercase();
+        if lower.starts_with("steam://")
+            || lower.starts_with("lutris:")
+            || lower.starts_with("heroic://")
+            || lower.starts_with("com.epicgames.launcher://")
+            || lower.starts_with("--app=")
+            || lower.starts_with("--app-id=")
+            || lower == "-applaunch"
+            || lower == "--applaunch"
+            || lower == "--ssb"
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn parse_exec_tokens(exec_line: &str) -> (Option<String>, Vec<String>, bool) {
     let tokens: Vec<&str> = exec_line
         .split_whitespace()
         .map(|t| t.trim_matches('"').trim_matches('\''))
@@ -470,8 +550,12 @@ fn parse_exec_tokens(exec_line: &str) -> (Option<String>, Vec<String>) {
     }
 
     let Some(&cmd) = tokens.get(idx) else {
-        return (None, Vec::new());
+        return (None, Vec::new(), false);
     };
+
+    if is_subapp_launcher_exec(&tokens[idx..]) {
+        return (None, Vec::new(), true);
+    }
 
     let mut names = Vec::new();
     let cmd_base = Path::new(cmd)
@@ -493,7 +577,7 @@ fn parse_exec_tokens(exec_line: &str) -> (Option<String>, Vec<String>) {
                 break;
             }
         }
-        return (None, names);
+        return (None, names, false);
     }
 
     // Handle `snap run [flags...] <snap-name>`
@@ -504,7 +588,7 @@ fn parse_exec_tokens(exec_line: &str) -> (Option<String>, Vec<String>) {
                 break;
             }
         }
-        return (None, names);
+        return (None, names, false);
     }
 
     let exec_path = if cmd.starts_with('/') {
@@ -517,7 +601,7 @@ fn parse_exec_tokens(exec_line: &str) -> (Option<String>, Vec<String>) {
         names.push(cmd_base);
     }
 
-    (exec_path, names)
+    (exec_path, names, false)
 }
 
 fn icon_base_dirs() -> Vec<PathBuf> {
@@ -865,5 +949,124 @@ StartupWMClass=discord
         assert_eq!(found_steam, hicolor_apps.join("steam_icon_730.png"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn steam_game_desktop_shortcut_does_not_hijack_steam_icon() {
+        let root = std::env::temp_dir().join(format!(
+            "curb-xdg-steam-shortcut-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+
+        let user_apps = root.join("user-applications");
+        let sys_apps = root.join("sys-applications");
+        let icons_dir = root.join("icons");
+        let hicolor_apps = icons_dir.join("hicolor/48x48/apps");
+        fs::create_dir_all(&user_apps).unwrap();
+        fs::create_dir_all(&sys_apps).unwrap();
+        fs::create_dir_all(&hicolor_apps).unwrap();
+
+        // Steam creates per-game `.desktop` shortcuts in `~/.local/share/applications`
+        // (scanned before `/usr/share/applications`) whose `Exec=` invokes `steam`.
+        fs::write(
+            user_apps.join("Halo Infinite.desktop"),
+            "[Desktop Entry]\nName=Halo Infinite\nExec=steam steam://rungameid/1240440\nIcon=steam_icon_1240440\nType=Application\n",
+        )
+        .unwrap();
+        fs::write(
+            sys_apps.join("steam.desktop"),
+            "[Desktop Entry]\nName=Steam\nExec=/usr/bin/steam %U\nIcon=steam\nType=Application\n",
+        )
+        .unwrap();
+        fs::write(hicolor_apps.join("steam.png"), b"\x89PNG").unwrap();
+        fs::write(hicolor_apps.join("steam_icon_1240440.png"), b"\x89PNG").unwrap();
+
+        let index = build_desktop_icon_index_from_dirs(&[user_apps.clone(), sys_apps]);
+        let themes = vec!["hicolor".to_string()];
+        let base_dirs = vec![icons_dir.clone()];
+
+        let steam_req = AppIconRequest {
+            exe_path: None,
+            exe_name: Some("steam"),
+            app_name: Some("Steam"),
+            steam_app_id: None,
+        };
+        let steam_cands = collect_icon_candidates(&steam_req, &index);
+        assert_eq!(steam_cands.first().map(String::as_str), Some("steam"));
+        let found_steam = steam_cands
+            .iter()
+            .find_map(|c| lookup_icon_in_themes(c, &themes, &base_dirs))
+            .expect("should find Steam icon");
+        assert_eq!(found_steam, hicolor_apps.join("steam.png"));
+
+        // Even without a `steam.desktop` file, Halo's shortcut must not hijack `"steam"`.
+        let user_only_index = build_desktop_icon_index_from_dirs(&[user_apps]);
+        let fallback_cands = collect_icon_candidates(&steam_req, &user_only_index);
+        assert!(!fallback_cands.iter().any(|c| c == "steam_icon_1240440"));
+        let found_fallback = fallback_cands
+            .iter()
+            .find_map(|c| lookup_icon_in_themes(c, &themes, &base_dirs))
+            .expect("should fall back to theme icon for steam");
+        assert_eq!(found_fallback, hicolor_apps.join("steam.png"));
+
+        // Halo Infinite itself still resolves to its own icon by display name.
+        let halo_req = AppIconRequest {
+            exe_path: None,
+            exe_name: None,
+            app_name: Some("Halo Infinite"),
+            steam_app_id: None,
+        };
+        let halo_cands = collect_icon_candidates(&halo_req, &user_only_index);
+        assert_eq!(
+            halo_cands.first().map(String::as_str),
+            Some("steam_icon_1240440")
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn subapp_shortcuts_and_wrapper_entries_do_not_override_primary_app_exec() {
+        // Flatpak Steam game shortcut
+        let flatpak_game = parse_desktop_icon_entry(
+            "[Desktop Entry]\nName=Halo\nExec=/usr/bin/flatpak run com.valvesoftware.Steam steam://rungameid/1240440\nTryExec=steam\nIcon=steam_icon_1240440\n",
+        )
+        .expect("parsed");
+        assert!(flatpak_game.exec_path.is_none());
+        assert!(flatpak_game.exec_names.is_empty());
+
+        // Browser PWA shortcut
+        let pwa = parse_desktop_icon_entry(
+            "[Desktop Entry]\nName=YouTube\nExec=/usr/bin/google-chrome-stable --profile-directory=Default --app-id=agimnkijcaahngcdmfeangaknmldooml\nIcon=chrome-youtube\n",
+        )
+        .expect("parsed");
+        assert!(pwa.exec_path.is_none());
+        assert!(pwa.exec_names.is_empty());
+
+        // Primary `.desktop` entry wins over a non-matching wrapper entry even if scanned later.
+        let mut index = DesktopIconIndex::default();
+        let wrapper = parse_desktop_icon_entry(
+            "[Desktop Entry]\nName=Big Picture Mode\nExec=/usr/bin/steam -bigpicture\nIcon=custom-bigpicture\n",
+        )
+        .expect("parsed");
+        let primary = parse_desktop_icon_entry(
+            "[Desktop Entry]\nName=Steam\nExec=/usr/bin/steam %U\nIcon=steam\n",
+        )
+        .expect("parsed");
+        insert_desktop_entry(&mut index, "big-picture", wrapper);
+        insert_desktop_entry(&mut index, "steam", primary);
+
+        assert_eq!(
+            index.by_exec_name.get("steam").map(|(i, _)| i.as_str()),
+            Some("steam")
+        );
+        assert_eq!(
+            index
+                .by_exec_path
+                .get("/usr/bin/steam")
+                .map(|(i, _)| i.as_str()),
+            Some("steam")
+        );
     }
 }
