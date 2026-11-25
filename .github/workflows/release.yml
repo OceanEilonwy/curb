@@ -52,8 +52,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libfontconfig1-dev pkg-config rpm libarchive-tools zstd
           curl -fsSL https://repo-default.voidlinux.org/static/xbps-static-latest.x86_64-musl.tar.xz \
-            | sudo tar -xJ -C /usr/local/bin --strip-components=2 ./usr/bin/xbps-create.static
+            | sudo tar -xJ -C /usr/local/bin --strip-components=3 ./usr/bin/xbps-create.static
           sudo ln -sf /usr/local/bin/xbps-create.static /usr/local/bin/xbps-create
+          xbps-create -V
 
       - name: Build curb-service, curb-cli & Slint curb-app (release)
         run: cargo build --release --workspace
