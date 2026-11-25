@@ -1,19 +1,27 @@
 # Maintainer: Curb Maintainers <https://github.com/OceanEilonwy/curb>
+# Compatible with Arch Linux, CachyOS (x86-64-v3/v4), Manjaro, EndeavourOS, and SteamOS.
 pkgname=curb
-pkgver=0.3.5
+pkgver=0.4.0
 pkgrel=1
 pkgdesc="Default-deny application internet limiter (nftables + NFQUEUE + Slint UI)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/OceanEilonwy/curb"
 license=('AGPL-3.0-or-later')
 depends=('nftables' 'polkit' 'fontconfig')
+optdepends=(
+  'polkit-kde-agent: graphical elevation prompt on KDE Plasma'
+  'polkit-gnome: graphical elevation prompt on XFCE, Sway, Mango, or dwl'
+  'waybar: system tray support on Sway, Mango, and dwl'
+)
 makedepends=('cargo' 'pkgconf')
+install=curb.install
 source=("${pkgname}-${pkgver}.tar.gz::https://github.com/OceanEilonwy/curb/archive/refs/tags/v${pkgver}.tar.gz")
 sha256sums=('SKIP')
 
 build() {
   cd "${srcdir}/${pkgname}-${pkgver}"
   export CARGO_TARGET_DIR=target
+  # Respect user/CachyOS makepkg.conf RUSTFLAGS (e.g. -C target-cpu=x86-64-v3)
   cargo build --release --workspace
 }
 

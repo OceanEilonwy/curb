@@ -1,0 +1,5 @@
+#!/bin/sh
+exec 2>&1
+mkdir -p /run/curb
+chmod 0755 /run/curb
+exec /usr/libexec/curb/curb-service --data-dir /var/lib/curb

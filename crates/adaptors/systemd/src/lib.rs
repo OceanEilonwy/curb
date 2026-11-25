@@ -174,6 +174,35 @@ mod imp {
                 .status();
             Ok(())
         }
+
+        fn upgrade_if_installed(
+            &self,
+            _data_dir: &Path,
+            _service_bin: Option<PathBuf>,
+        ) -> Result<bool, String> {
+            ensure_root()?;
+            if !Path::new("/run/systemd/system").is_dir() {
+                return Ok(false);
+            }
+            let _ = Command::new("systemctl").args(["daemon-reload"]).status();
+            let active = Command::new("systemctl")
+                .args(["is-active", "--quiet", "curb.service"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !active {
+                return Ok(false);
+            }
+            let out = Command::new("systemctl")
+                .args(["restart", "curb.service"])
+                .output()
+                .map_err(|e| format!("Failed to invoke `systemctl restart curb.service`: {e}"))?;
+            if out.status.success() {
+                Ok(true)
+            } else {
+                Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+            }
+        }
     }
 
     #[cfg(test)]

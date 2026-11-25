@@ -1,0 +1,11 @@
+[package]
+name = "curb-runit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+curb-core = { path = "../../curb-core" }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

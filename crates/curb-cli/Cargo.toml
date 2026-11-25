@@ -18,4 +18,6 @@ curb-windows = { path = "../adaptors/windows" }
 [target.'cfg(target_os = "linux")'.dependencies]
 curb-linux = { path = "../adaptors/linux" }
 curb-nftables = { path = "../adaptors/nftables" }
+curb-runit = { path = "../adaptors/runit" }
 curb-systemd = { path = "../adaptors/systemd" }
+curb-xdg = { path = "../adaptors/xdg" }

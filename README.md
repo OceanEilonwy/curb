@@ -45,7 +45,7 @@ Most internet blockers rely on browser extensions or domain blocklists that are 
 
 ## Quick Setup (Linux)
 
-Supported on all major `systemd` + `nftables` distributions (Ubuntu 22.04+, Debian 11+, Linux Mint, Pop!_OS, Fedora, RHEL/Rocky/Alma, openSUSE, Arch Linux, Manjaro, EndeavourOS, SteamOS):
+Supported on all major `systemd` + `nftables` distributions (Ubuntu 22.04+, Debian 11+, Linux Mint, Pop!_OS, Fedora, RHEL/Rocky/Alma, openSUSE, Arch Linux, **CachyOS**, Manjaro, EndeavourOS, SteamOS) as well as **Void Linux (`runit`)** (glibc & musl), with first-class desktop support for **KDE Plasma**, **XFCE**, **GNOME**, **Sway**, **Mango (MangoWC)**, and **dwl**:
 
 - **Ubuntu / Debian / Linux Mint / Pop!_OS (`.deb`):**
   ```bash
@@ -55,16 +55,33 @@ Supported on all major `systemd` + `nftables` distributions (Ubuntu 22.04+, Debi
   ```bash
   sudo dnf install ./curb-*.x86_64.rpm   # or: sudo zypper install ./curb-*.x86_64.rpm
   ```
-- **Arch Linux / Manjaro / EndeavourOS (`PKGBUILD`):**
+- **Arch Linux / CachyOS / Manjaro / EndeavourOS (`PKGBUILD`):**
   ```bash
   cd packaging/linux && makepkg -si
   ```
-- **Any other systemd Linux distro (`.tar.gz`):**
+- **Void Linux (`runit`, glibc & musl):**
+  ```bash
+  # Using the universal tarball (auto-installs /etc/sv/curb):
+  tar -xzf curb-*-linux-x86_64.tar.gz && cd curb-*-linux-x86_64 && sudo ./install.sh
+  sudo curb-cli install   # symlinks /etc/sv/curb -> /var/service/curb and starts it
+  # Or build an xbps package from packaging/linux/void/template with xbps-src
+  ```
+- **Any other systemd or runit Linux distro (`.tar.gz`):**
   ```bash
   tar -xzf curb-*-linux-x86_64.tar.gz && cd curb-*-linux-x86_64 && sudo ./install.sh
   ```
 
-Then launch **Curb** from your application menu (or `curb-app`) and click **Full Protection** (prompts once via Polkit `pkexec` to enable `curb.service`).
+Then launch **Curb** from your application menu (or `curb-app`) and click **Full Protection** (prompts once via Polkit `pkexec` to enable `curb.service` on systemd or `/var/service/curb` on Void runit). See [docs/LINUX_DESKTOPS.md](docs/LINUX_DESKTOPS.md) for CachyOS, Void Linux, KDE, XFCE, Sway, Mango, and dwl tips (floating rules, autostart, and Polkit agents).
+
+### Uninstall (Linux)
+
+Remove Curb's service (`systemd` or Void `runit`), `nftables` firewall rules, per-user desktop autostart & proxy settings (`gsettings`, KDE `kioslaverc`, `~/.config/environment.d/90-curb-proxy.conf`), saved data, and tarball-installed binaries in a single command:
+
+```bash
+sudo curb-cli uninstall --purge
+```
+
+*(Omit `--purge` to keep saved rules and password in `/var/lib/curb`. If Curb was installed via a distro package manager, `curb-cli uninstall --purge` cleans all config and prints the exact `apt`/`dnf`/`pacman`/`xbps-remove` command to unregister the package; removing the package directly also invokes `curb-cli uninstall` automatically.)*
 
 <details>
 <summary>Admin recovery (forgot Curb password?)</summary>

@@ -1,0 +1,5 @@
+case "$ACTION" in
+post)
+	command -v curb-cli >/dev/null 2>&1 && curb-cli upgrade >/dev/null 2>&1 || true
+	;;
+esac

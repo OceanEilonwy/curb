@@ -47,7 +47,10 @@ pub fn discover_linux_upstream_dns() -> Vec<SocketAddr> {
     let mut out = Vec::new();
     for path in [
         "/run/systemd/resolve/resolv.conf",
+        "/run/NetworkManager/no-stub-resolv.conf",
         "/run/NetworkManager/resolv.conf",
+        "/run/resolvconf/resolv.conf",
+        "/var/run/connman/resolv.conf",
         "/etc/resolv.conf",
     ] {
         if let Ok(content) = fs::read_to_string(path) {

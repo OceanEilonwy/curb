@@ -77,7 +77,7 @@ enum Commands {
     EmergencyDisable,
     /// Re-enables default-deny enforcement.
     Enable,
-    /// Install and start Curb's system service (Windows SCM or Linux systemd).
+    /// Install and start Curb's system service (Windows SCM, Linux systemd, or Void runit).
     Install {
         /// Path to curb-service binary (defaults to sibling of curb-cli).
         #[arg(long)]
@@ -91,8 +91,21 @@ enum Commands {
     },
     /// Reset Curb configuration, rules, password, firewall rules, and DNS backups for a clean start.
     Reset,
-    /// Stop and unregister Curb's system service (Windows SCM or Linux systemd).
-    Uninstall,
+    /// Refresh service definitions and restart Curb's system service if already active (used by package upgrades).
+    Upgrade {
+        /// Path to curb-service binary (used on Windows upgrades; defaults to sibling of curb-cli).
+        #[arg(long)]
+        service_bin: Option<PathBuf>,
+    },
+    /// Stop and unregister Curb's system service and clean up applied config.
+    Uninstall {
+        /// Also remove all saved Curb data (/var/lib/curb, /var/log/curb, %ProgramData%\Curb, and per-user data).
+        #[arg(long)]
+        purge: bool,
+        /// Clean up per-user desktop settings only (autostart, proxy, Standard Mode flag) without requiring Administrator/root privileges.
+        #[arg(long)]
+        user_only: bool,
+    },
 }
 
 struct CliAdaptors {
@@ -101,6 +114,17 @@ struct CliAdaptors {
     dns: Box<dyn DnsManager>,
     preset_host: Box<dyn PresetHost>,
     default_data_dir: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_service_manager() -> Box<dyn ServiceManager> {
+    if Path::new("/run/systemd/system").is_dir() {
+        Box::new(curb_systemd::SystemdServiceManager)
+    } else if curb_runit::is_runit_system() {
+        Box::new(curb_runit::RunitServiceManager)
+    } else {
+        Box::new(curb_systemd::SystemdServiceManager)
+    }
 }
 
 fn build_adaptors() -> Option<CliAdaptors> {
@@ -118,7 +142,7 @@ fn build_adaptors() -> Option<CliAdaptors> {
     #[cfg(target_os = "linux")]
     {
         Some(CliAdaptors {
-            service: Box::new(curb_systemd::SystemdServiceManager),
+            service: detect_linux_service_manager(),
             firewall: Box::new(curb_nftables::NftablesFirewall),
             dns: Box::new(curb_linux::LinuxDnsManager),
             preset_host: Box::new(curb_linux::LinuxPresetHost),
@@ -393,7 +417,41 @@ fn main() {
             println!("Curb configuration, rules, password, and DNS backups have been reset.");
         }
 
-        Commands::Uninstall => {
+        Commands::Upgrade { service_bin } => {
+            let Some(a) = &adaptors else {
+                eprintln!("System service upgrade is only supported on Windows and Linux.");
+                std::process::exit(1);
+            };
+            match a.service.upgrade_if_installed(&data_dir, service_bin) {
+                Ok(true) => println!("Curb service upgraded and restarted."),
+                Ok(false) => println!("Curb service is not active; nothing to restart."),
+                Err(e) => {
+                    eprintln!("Failed to upgrade Curb service: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Uninstall { purge, user_only } => {
+            #[cfg(windows)]
+            {
+                for item in curb_windows::cleanup_user_desktop_config(purge) {
+                    println!("{item}");
+                }
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                for item in curb_xdg::cleanup_invoking_user_desktop_config(purge) {
+                    println!("{item}");
+                }
+            }
+
+            if user_only {
+                println!("Per-user Curb desktop settings cleaned up.");
+                return;
+            }
+
             let Some(a) = &adaptors else {
                 eprintln!("System service uninstallation is only supported on Windows and Linux.");
                 std::process::exit(1);
@@ -408,9 +466,85 @@ fn main() {
             if let Err(e) = a.dns.restore_clean(&data_dir) {
                 eprintln!("Warning: DNS restore reported: {e}");
             }
-            println!("Curb service removed and firewall & DNS settings restored.");
+
+            if purge {
+                reset_data_dir(&data_dir, None);
+                if data_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&data_dir);
+                    println!("Removed {}", data_dir.display());
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    for extra in ["/var/log/curb", "/run/curb"] {
+                        let p = Path::new(extra);
+                        if p.exists() {
+                            let _ = std::fs::remove_dir_all(p);
+                            println!("Removed {extra}");
+                        }
+                    }
+                    if let Some(pkg_cmd) = detect_linux_package_remove_cmd() {
+                        println!(
+                            "Curb binaries are managed by your distro package manager. Finish removing the package with:\n  {pkg_cmd}"
+                        );
+                    } else {
+                        for removed in remove_unmanaged_linux_files() {
+                            println!("Removed {removed}");
+                        }
+                    }
+                }
+                println!(
+                    "Curb service, firewall, DNS, desktop config, and all saved data have been removed."
+                );
+            } else {
+                println!("Curb service removed and firewall, DNS, & desktop settings restored.");
+            }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_package_remove_cmd() -> Option<&'static str> {
+    use std::process::Command;
+
+    let checks: &[(&str, &[&str], &str)] = &[
+        ("dpkg", &["-S", "/usr/bin/curb-cli"], "sudo apt purge curb"),
+        ("rpm", &["-qf", "/usr/bin/curb-cli"], "sudo dnf remove curb"),
+        ("pacman", &["-Qo", "/usr/bin/curb-cli"], "sudo pacman -Rns curb"),
+        ("xbps-query", &["-o", "/usr/bin/curb-cli"], "sudo xbps-remove -R curb"),
+    ];
+    for (bin, args, remove_cmd) in checks {
+        if Command::new(bin)
+            .args(*args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Some(*remove_cmd);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn remove_unmanaged_linux_files() -> Vec<&'static str> {
+    let mut removed = Vec::new();
+    for path in [
+        "/usr/bin/curb-app",
+        "/usr/libexec/curb/curb-service",
+        "/usr/lib/systemd/system/curb.service",
+        "/usr/share/applications/curb.desktop",
+        "/usr/share/polkit-1/actions/org.curb.policy",
+        "/usr/share/icons/hicolor/128x128/apps/curb.png",
+        "/usr/share/icons/hicolor/32x32/apps/curb.png",
+        "/usr/bin/curb-cli",
+    ] {
+        let p = Path::new(path);
+        if p.exists() && std::fs::remove_file(p).is_ok() {
+            removed.push(path);
+        }
+    }
+    let _ = std::fs::remove_dir("/usr/libexec/curb");
+    removed
 }
 
 /// Purges Curb firewall objects, restores original DNS settings, and removes

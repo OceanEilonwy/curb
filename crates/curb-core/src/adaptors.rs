@@ -74,6 +74,15 @@ pub trait ServiceManager: Send + Sync {
 
     /// Stops the system service if it is currently running.
     fn stop_if_running(&self) -> std::result::Result<(), String>;
+
+    /// Refreshes service definitions and restarts the system service only if it is
+    /// already installed/active (used by package upgrades and installers).
+    /// Returns `Ok(true)` if an active service was restarted, `Ok(false)` otherwise.
+    fn upgrade_if_installed(
+        &self,
+        data_dir: &Path,
+        service_bin: Option<PathBuf>,
+    ) -> std::result::Result<bool, String>;
 }
 
 /// Request describing an application whose native OS icon should be resolved.

@@ -60,15 +60,20 @@ jobs:
           ./packaging/linux/build-rpm.sh "$VERSION" x86_64 dist-release
 
           TAR_DIR="dist-release/curb-${VERSION}-linux-x86_64"
-          mkdir -p "$TAR_DIR"
+          mkdir -p "$TAR_DIR/runit"
           cp target/release/curb-app target/release/curb-cli target/release/curb-service "$TAR_DIR/"
           cp packaging/linux/curb.service packaging/linux/curb.desktop packaging/linux/org.curb.policy "$TAR_DIR/"
-          cp packaging/linux/install.sh packaging/linux/uninstall.sh "$TAR_DIR/"
+          cp packaging/linux/runit/run packaging/linux/runit/log-run "$TAR_DIR/runit/"
+          cp packaging/linux/install.sh "$TAR_DIR/"
           cp apps/curb-app/icons/128x128.png "$TAR_DIR/icon-128.png"
           cp apps/curb-app/icons/32x32.png "$TAR_DIR/icon-32.png"
           cp README.md LICENSE "$TAR_DIR/"
           tar -C dist-release -czf "dist-release/curb-${VERSION}-linux-x86_64.tar.gz" "curb-${VERSION}-linux-x86_64"
           cp packaging/linux/PKGBUILD dist-release/PKGBUILD
+          cp packaging/linux/curb.install dist-release/curb.install
+          cp packaging/linux/void/template dist-release/void-template
+          cp packaging/linux/void/INSTALL dist-release/void-INSTALL
+          cp packaging/linux/void/REMOVE dist-release/void-REMOVE
           ls -lh dist-release/
 
       - name: Publish Linux Artifacts to GitHub Release
@@ -81,6 +86,10 @@ jobs:
             dist-release/*.rpm
             dist-release/*.tar.gz
             dist-release/PKGBUILD
+            dist-release/curb.install
+            dist-release/void-template
+            dist-release/void-INSTALL
+            dist-release/void-REMOVE
 
   release-windows:
     name: Build Windows Release

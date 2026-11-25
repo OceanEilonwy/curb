@@ -104,6 +104,19 @@ impl CurbServiceManager for WindowsServiceManager {
     fn stop_if_running(&self) -> Result<(), String> {
         stop_service_if_running()
     }
+
+    fn upgrade_if_installed(
+        &self,
+        data_dir: &Path,
+        service_bin: Option<PathBuf>,
+    ) -> Result<bool, String> {
+        let installed_service = data_dir.join("bin").join("curb-service.exe");
+        if !installed_service.exists() {
+            return Ok(false);
+        }
+        self.install(data_dir, service_bin, None, false)?;
+        Ok(true)
+    }
 }
 
 pub fn stop_service_if_running() -> Result<(), String> {

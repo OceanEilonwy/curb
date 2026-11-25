@@ -172,6 +172,7 @@ struct AppController {
 
     locking: bool,
     hiding_to_tray: bool,
+    close_quits_app: bool,
     busy_steam: bool,
     busy_baseline: bool,
     pending_mode: Option<i32>,
@@ -236,6 +237,7 @@ pub fn create_main_window(
     backend: CurbBackend,
     theme_dark_pref: Rc<Cell<bool>>,
     last_geometry: Rc<RefCell<Option<SavedWindowGeometry>>>,
+    close_quits_app: bool,
     on_window_dropped: Rc<dyn Fn()>,
 ) -> Result<(u64, MainWindow), slint::PlatformError> {
     let win = MainWindow::new()?;
@@ -261,6 +263,7 @@ pub fn create_main_window(
         adv_open: HashSet::new(),
         locking: false,
         hiding_to_tray: false,
+        close_quits_app,
         busy_steam: false,
         busy_baseline: false,
         pending_mode: None,
@@ -1330,11 +1333,17 @@ impl AppController {
 
         let gen_id = self.gen_id;
         let on_drop = self.on_window_dropped.clone();
+        let quit_after_drop = self.close_quits_app;
+        let backend_quit = self.backend.clone();
         // Defer dropping the MainWindow & controller to the next event loop turn
         // so we are never dropping a component while inside its own callback stack.
         Timer::single_shot(Duration::ZERO, move || {
             clear_active_controller(gen_id);
             (on_drop)();
+            if quit_after_drop {
+                backend_quit.deactivate_proxy();
+                let _ = slint::quit_event_loop();
+            }
         });
     }
 

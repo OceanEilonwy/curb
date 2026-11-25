@@ -39,9 +39,25 @@ pub fn clamp_to_rect(
     (pos.0.clamp(monitor.x, max_x), pos.1.clamp(monitor.y, max_y))
 }
 
+fn is_wayland_session() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var("WAYLAND_DISPLAY")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 /// Captures the window's current physical position and inner size so it can be
 /// restored when reopened from the system tray.
 pub fn capture_geometry(win: &MainWindow) -> Option<SavedWindowGeometry> {
+    if is_wayland_session() {
+        return None;
+    }
     win.window()
         .with_winit_window(|winit_win| {
             if winit_win.is_minimized().unwrap_or(false) {
@@ -63,6 +79,9 @@ pub fn capture_geometry(win: &MainWindow) -> Option<SavedWindowGeometry> {
 /// Applies previously saved size & position before `win.show()` so reopening from
 /// the tray does not flash at a default OS position.
 pub fn prepare_before_show(win: &MainWindow, saved: Option<SavedWindowGeometry>) {
+    if is_wayland_session() {
+        return;
+    }
     if let Some(geo) = saved {
         win.window().set_size(geo.size);
         win.window().set_position(geo.position);
@@ -73,6 +92,9 @@ pub fn prepare_before_show(win: &MainWindow, saved: Option<SavedWindowGeometry>)
 /// position to stay within a connected monitor. If called before the event loop
 /// creates the underlying winit window, defers placement to the first event-loop turn.
 pub fn place_after_show(win: &MainWindow, saved: Option<SavedWindowGeometry>) {
+    if is_wayland_session() {
+        return;
+    }
     if apply_winit_placement(win, saved) {
         return;
     }
@@ -95,6 +117,9 @@ pub fn focus_existing_window(win: &MainWindow) {
 }
 
 fn apply_winit_placement(win: &MainWindow, saved: Option<SavedWindowGeometry>) -> bool {
+    if is_wayland_session() {
+        return true;
+    }
     win.window()
         .with_winit_window(|winit_win| {
             let outer = winit_win.outer_size();

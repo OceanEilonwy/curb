@@ -9,3 +9,4 @@ Terminal=false
 Categories=Network;Security;System;
 Keywords=firewall;internet;limiter;parental;nftables;
 StartupNotify=true
+StartupWMClass=curb-app

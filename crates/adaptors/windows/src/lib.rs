@@ -16,7 +16,7 @@ pub mod scm;
 pub mod verify;
 
 #[cfg(windows)]
-pub use desktop::WindowsDesktopIntegration;
+pub use desktop::{cleanup_user_desktop_config, WindowsDesktopIntegration};
 #[cfg(windows)]
 pub use dns::{restore_adapter_dns_clean, WindowsDnsManager};
 #[cfg(windows)]

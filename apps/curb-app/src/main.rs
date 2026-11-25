@@ -5,6 +5,7 @@ mod backend;
 mod elevate;
 mod ipc_client;
 mod local_mode;
+mod single_instance;
 mod window_placement;
 
 use std::cell::{Cell, RefCell};
@@ -21,6 +22,13 @@ use crate::window_placement::{
 fn main() {
     let demo_mode = std::env::args().any(|a| a == "--demo")
         || std::env::var("CURB_DEMO").map(|v| v == "1").unwrap_or(false);
+    let no_tray_flag = std::env::args().any(|a| a == "--no-tray");
+
+    // On Linux (especially Sway, Mango, dwl), re-running `curb-app` from a keybind
+    // or launcher focuses/reopens the existing window instead of spawning a duplicate.
+    if !demo_mode && single_instance::try_activate_existing() {
+        return;
+    }
 
     let backend = CurbBackend::new(demo_mode);
     backend.maybe_autostart_standard_proxy();
@@ -28,6 +36,35 @@ fn main() {
     let theme_dark_pref = Rc::new(Cell::new(true));
     let last_geometry: Rc<RefCell<Option<SavedWindowGeometry>>> = Rc::new(RefCell::new(None));
     let active_window: Rc<RefCell<Option<(u64, MainWindow)>>> = Rc::new(RefCell::new(None));
+
+    let tray_host_available = if no_tray_flag {
+        false
+    } else {
+        #[cfg(target_os = "linux")]
+        {
+            curb_xdg::has_status_notifier_watcher()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
+        }
+    };
+
+    let tray = if tray_host_available {
+        match CurbTray::new() {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("Warning: system tray unavailable ({e}); running window-only.");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // When no system tray host is present (e.g. dwl, Mango, bare Sway, or `--no-tray`),
+    // closing the window quits `curb-app` cleanly instead of hiding into an unreachable tray.
+    let close_quits_app = tray.is_none();
 
     let open_or_focus: Rc<dyn Fn()> = {
         let backend = backend.clone();
@@ -50,6 +87,7 @@ fn main() {
                 backend.clone(),
                 theme_dark_pref.clone(),
                 last_geometry.clone(),
+                close_quits_app,
                 on_drop,
             ) {
                 Ok((gen_id, win)) => {
@@ -63,14 +101,6 @@ fn main() {
                 }
             }
         })
-    };
-
-    let tray = match CurbTray::new() {
-        Ok(t) => Some(t),
-        Err(e) => {
-            eprintln!("Warning: system tray unavailable ({e}); running window-only.");
-            None
-        }
     };
 
     if let Some(tray) = &tray {
@@ -91,6 +121,32 @@ fn main() {
         let _ = tray.show();
     }
 
+    let _single_instance_guard = if !demo_mode {
+        // Trigger `open_or_focus` via a thread-safe wakeup channel bridged into Slint's loop.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let open_on_activate = open_or_focus.clone();
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(150),
+            move || {
+                let mut should_open = false;
+                while rx.try_recv().is_ok() {
+                    should_open = true;
+                }
+                if should_open {
+                    open_on_activate();
+                }
+            },
+        );
+        let guard = single_instance::start_listener(move || {
+            let _ = tx.send(());
+        });
+        Some((guard, timer))
+    } else {
+        None
+    };
+
     // Show the main window on startup
     open_or_focus();
 
@@ -98,6 +154,6 @@ fn main() {
         eprintln!("Slint event loop error: {e}");
     }
 
-    // Ensure Standard Mode HKCU proxy is always cleaned up on process exit
+    // Ensure Standard Mode proxy is always cleaned up on process exit
     backend.deactivate_proxy();
 }

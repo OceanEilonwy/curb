@@ -25,8 +25,9 @@ curb/
 │       ├── windows/          # curb-windows (WFP, ETW, SCM, WinTrust, UAC, Registry, WindowsPresetHost)
 │       ├── linux/            # curb-linux (/proc, ELF, resolv.conf, SO_MARK, LinuxPresetHost)
 │       ├── nftables/         # curb-nftables (nftables table inet curb + Netlink NFQUEUE)
+│       ├── runit/            # curb-runit (Void Linux /etc/sv/curb + sv lifecycle)
 │       ├── systemd/          # curb-systemd (systemctl curb.service lifecycle)
-│       └── xdg/              # curb-xdg (Polkit pkexec, .desktop names, autostart, GNOME/KDE proxy)
+│       └── xdg/              # curb-xdg (Polkit pkexec, .desktop names, autostart, KDE/XFCE/GNOME/wlroots)
 └── apps/
     └── curb-app/             # Unprivileged pure-Rust Slint system tray app (software renderer)
 ```
@@ -70,14 +71,15 @@ curb/
 
 ## Linux Enforcement Architecture
 
-On Linux (`systemd` + `nftables` distributions including Ubuntu, Debian, Linux Mint, Pop!_OS, Fedora, RHEL, openSUSE, Arch, Manjaro, and SteamOS), `curb-service` provides full parity without a custom kernel module:
+On Linux (`systemd` + `nftables` distributions including Ubuntu, Debian, Linux Mint, Pop!_OS, Fedora, RHEL, openSUSE, Arch, CachyOS, Manjaro, and SteamOS, plus **Void Linux** with `runit`), `curb-service` provides full parity without a custom kernel module:
 
 1. **`nftables` (`table inet curb`) + `NFQUEUE`:**
    - Installs an atomic `inet` output filter chain allowing loopback, `ct state established,related`, Curb's own marked upstream DNS sockets (`meta mark 0x43555242`), DHCP, NTP, and IPv6 Neighbor Discovery while dropping external DoT/DNS (ports 853/53) and queueing new outbound TCP/UDP flows (`ct state new`) to userspace `NFQUEUE` #42 (fail-closed).
-   - Pure-Rust Netlink `nfnetlink_queue` consumer (`crates/curb-service/src/linux/nfqueue.rs`) resolves the originating socket inode via `/proc/net/{tcp,tcp6,udp,udp6}`, maps it to `/proc/<pid>/exe` + `ppid`, verifies the binary against Curb's rules + `DnsCache`, and returns `NF_ACCEPT` or `NF_DROP` (recording a `BlockedEvent` on drop).
+   - Pure-Rust Netlink `nfnetlink_queue` consumer (`crates/adaptors/nftables/src/nfqueue.rs`) resolves the originating socket inode via `/proc/net/{tcp,tcp6,udp,udp6}`, maps it to `/proc/<pid>/exe` + `ppid`, verifies the binary against Curb's rules + `DnsCache`, and returns `NF_ACCEPT` or `NF_DROP` (recording a `BlockedEvent` on drop).
 2. **Transparent DNS Interception (`nat_output`):**
    - Redirects non-Curb outbound UDP/TCP port 53 traffic to Curb's local DNS proxy (`127.0.0.1:5353`), avoiding conflicts with `systemd-resolved` (`127.0.0.53:53`) and never modifying `/etc/resolv.conf`.
-   - Upstream resolvers are read from `/run/systemd/resolve/resolv.conf`, `/run/NetworkManager/resolv.conf`, and `/etc/resolv.conf`, and `curb-service` sets `SO_MARK = 0x43555242` on its own upstream sockets so they bypass the redirect.
+   - Upstream resolvers are read from `/run/systemd/resolve/resolv.conf`, `/run/NetworkManager/no-stub-resolv.conf`, `/run/NetworkManager/resolv.conf`, `/run/resolvconf/resolv.conf`, `/var/run/connman/resolv.conf`, and `/etc/resolv.conf`, and `curb-service` sets `SO_MARK = 0x43555242` on its own upstream sockets so they bypass the redirect.
 3. **Desktop & Service Integration:**
-   - Managed via `curb.service` (`systemd`), with one-click GUI elevation via Polkit (`pkexec` + `org.curb.policy`) and XDG autostart (`~/.config/autostart/curb.desktop`).
+   - Auto-detects `systemd` (`curb.service`) vs. Void Linux `runit` (`/etc/sv/curb` -> `/var/service/curb`), with one-click GUI elevation via Polkit (`pkexec` + `org.curb.policy`) and actionable `sudo`/`doas` fallback when no Polkit agent is active.
+   - Integrates cleanly across **KDE Plasma** (KIO proxy + D-Bus reload), **XFCE**, **GNOME**, **Sway** (`swaymsg -t get_tree` window discovery), **Mango (MangoWC)**, and **dwl** (Wayland-safe placement, `StatusNotifierWatcher` detection for graceful no-tray exit, and single-instance reactivation via `$XDG_RUNTIME_DIR/curb-app.sock`).
    - Discovers running apps from `/proc` with friendly names from `.desktop` files, and discovers Steam games across native, Flatpak, and Snap installations (supporting both native ELF and Proton `.exe` binaries).

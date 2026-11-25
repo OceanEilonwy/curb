@@ -1,0 +1,18 @@
+post_install() {
+  command -v curb-cli >/dev/null 2>&1 && curb-cli upgrade >/dev/null 2>&1 || true
+  echo "Curb installed. Launch 'curb-app' or enable Full Protection with: sudo curb-cli install"
+}
+
+post_upgrade() {
+  command -v curb-cli >/dev/null 2>&1 && curb-cli upgrade || true
+}
+
+pre_remove() {
+  command -v curb-cli >/dev/null 2>&1 && curb-cli uninstall || true
+}
+
+post_remove() {
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+  fi
+}

@@ -62,9 +62,7 @@ cat > "$STAGE/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
 set -e
 if [ "$1" = "configure" ]; then
-  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-    systemctl daemon-reload || true
-  fi
+  command -v curb-cli >/dev/null 2>&1 && curb-cli upgrade >/dev/null 2>&1 || true
   if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
   fi
@@ -76,13 +74,10 @@ chmod 0755 "$STAGE/DEBIAN/postinst"
 cat > "$STAGE/DEBIAN/prerm" <<'EOF'
 #!/bin/sh
 set -e
-if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
-  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-    systemctl disable --now curb.service || true
-  fi
-  if command -v nft >/dev/null 2>&1; then
-    nft delete table inet curb 2>/dev/null || true
-  fi
+if [ "$1" = "purge" ]; then
+  command -v curb-cli >/dev/null 2>&1 && curb-cli uninstall --purge || true
+elif [ "$1" = "remove" ]; then
+  command -v curb-cli >/dev/null 2>&1 && curb-cli uninstall || true
 fi
 exit 0
 EOF

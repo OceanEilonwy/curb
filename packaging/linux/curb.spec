@@ -1,5 +1,5 @@
 Name:           curb
-Version:        %{?_version}%{!?_version:0.3.5}
+Version:        %{?_version}%{!?_version:0.4.0}
 Release:        1%{?dist}
 Summary:        Default-deny application internet limiter
 License:        AGPL-3.0-or-later
@@ -34,18 +34,11 @@ install -m 0644 %{_sourcedir}/LICENSE %{buildroot}/usr/share/doc/curb/LICENSE
 install -m 0644 %{_sourcedir}/README.md %{buildroot}/usr/share/doc/curb/README.md
 
 %post
-if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-    systemctl daemon-reload >/dev/null 2>&1 || true
-fi
+command -v curb-cli >/dev/null 2>&1 && curb-cli upgrade >/dev/null 2>&1 || true
 
 %preun
 if [ "$1" -eq 0 ]; then
-    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-        systemctl disable --now curb.service >/dev/null 2>&1 || true
-    fi
-    if command -v nft >/dev/null 2>&1; then
-        nft delete table inet curb >/dev/null 2>&1 || true
-    fi
+    command -v curb-cli >/dev/null 2>&1 && curb-cli uninstall >/dev/null 2>&1 || true
 fi
 
 %files

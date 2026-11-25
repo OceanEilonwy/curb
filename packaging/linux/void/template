@@ -1,0 +1,32 @@
+# Template file for 'curb' (Void Linux xbps-src — glibc & musl)
+pkgname=curb
+version=0.4.0
+revision=1
+build_style=cargo
+hostmakedepends="pkg-config"
+makedepends="fontconfig-devel"
+depends="nftables polkit fontconfig"
+short_desc="Default-deny application internet limiter (nftables + NFQUEUE + Slint UI)"
+maintainer="Curb Maintainers <https://github.com/OceanEilonwy/curb>"
+license="AGPL-3.0-or-later"
+homepage="https://github.com/OceanEilonwy/curb"
+distfiles="https://github.com/OceanEilonwy/curb/archive/refs/tags/v${version}.tar.gz"
+checksum=SKIP
+
+do_build() {
+	cargo build --release --workspace --target "${RUST_TARGET}"
+}
+
+do_install() {
+	local target_dir="target/${RUST_TARGET}/release"
+	vbin "${target_dir}/curb-app"
+	vbin "${target_dir}/curb-cli"
+	vinstall "${target_dir}/curb-service" 755 usr/libexec/curb
+	vinstall packaging/linux/curb.desktop 644 usr/share/applications
+	vinstall packaging/linux/org.curb.policy 644 usr/share/polkit-1/actions
+	vinstall apps/curb-app/icons/128x128.png 644 usr/share/icons/hicolor/128x128/apps curb.png
+	vinstall apps/curb-app/icons/32x32.png 644 usr/share/icons/hicolor/32x32/apps curb.png
+	vinstall packaging/linux/runit/run 755 etc/sv/curb
+	vinstall packaging/linux/runit/log-run 755 etc/sv/curb/log run
+	vlicense LICENSE
+}

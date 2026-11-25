@@ -9,7 +9,7 @@ SetCompressor /SOLID lzma
 !include "MUI2.nsh"
 
 !ifndef PRODUCT_VERSION
-  !define PRODUCT_VERSION "0.3.5"
+  !define PRODUCT_VERSION "0.4.0"
 !endif
 !ifndef BIN_DIR
   !define BIN_DIR "..\..\..\target\release"
@@ -115,7 +115,7 @@ Section -PostInstall
       ExecShellWait "runas" "$INSTDIR\resources\curb-cli.exe" 'install --reset --service-bin "$INSTDIR\resources\curb-service.exe"' SW_HIDE
       Goto DoneService
     UpgradeKeepConfig:
-      ExecShellWait "runas" "$INSTDIR\resources\curb-cli.exe" 'install --service-bin "$INSTDIR\resources\curb-service.exe"' SW_HIDE
+      ExecShellWait "runas" "$INSTDIR\resources\curb-cli.exe" 'upgrade --service-bin "$INSTDIR\resources\curb-service.exe"' SW_HIDE
       Goto DoneService
 
   CheckOrphanReset:
@@ -140,7 +140,24 @@ Section "Uninstall"
   Pop $0
   Pop $1
 
-  ; Remove installed files and shortcuts
+  ; 1. Delegate per-user desktop cleanup (HKCU Run autostart, Standard Mode proxy,
+  ;    standard_mode.flag) to curb-cli.exe unprivileged so it cleans the daily user's HKCU.
+  IfFileExists "$INSTDIR\resources\curb-cli.exe" 0 SkipUserCleanup
+    nsExec::ExecToStack '"$INSTDIR\resources\curb-cli.exe" uninstall --user-only'
+    Pop $0
+    Pop $1
+  SkipUserCleanup:
+
+  ; 2. If Full Protection (CurbService) was installed in %ProgramData%\Curb, invoke
+  ;    curb-cli.exe elevated to stop/remove the service, purge WFP filters, and restore DNS.
+  ReadEnvStr $0 "ProgramData"
+  StrCmp $0 "" 0 +2
+    StrCpy $0 "C:\ProgramData"
+  IfFileExists "$0\Curb\bin\curb-cli.exe" 0 SkipServiceCleanup
+    ExecShellWait "runas" "$0\Curb\bin\curb-cli.exe" "uninstall" SW_HIDE
+  SkipServiceCleanup:
+
+  ; 3. Remove NSIS-installed files, shortcuts, and Add/Remove Programs registration
   Delete "$INSTDIR\curb-app.exe"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\LICENSE"
@@ -153,26 +170,5 @@ Section "Uninstall"
   RMDir "$SMPROGRAMS\Curb"
 
   DeleteRegKey HKCU "${UNINST_KEY}"
-
-  ; 1. If Full Protection (CurbService) was installed in C:\ProgramData\Curb, stop & remove
-  ;    the service, purge all Curb WFP filters, and restore original adapter DNS settings.
-  ReadEnvStr $0 "ProgramData"
-  StrCmp $0 "" 0 +2
-    StrCpy $0 "C:\ProgramData"
-  IfFileExists "$0\Curb\bin\curb-cli.exe" 0 +2
-    ExecShellWait "runas" "$0\Curb\bin\curb-cli.exe" "uninstall" SW_HIDE
-
-  ; 2. Remove Curb taskbar tray auto-start entry
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Curb"
-
-  ; 3. Reset HKCU Windows proxy ONLY if it points to Curb's Standard Mode proxy (127.0.0.1:48921)
-  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Internet Settings" "ProxyServer"
-  StrCmp $0 "127.0.0.1:48921" 0 +3
-    WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Internet Settings" "ProxyEnable" 0
-    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Internet Settings" "ProxyServer"
-
-  ; 4. Clear Standard Mode marker so a fresh reinstall shows the setup chooser cleanly
-  Delete "$LOCALAPPDATA\Curb\standard_mode.flag"
-
   RMDir "$INSTDIR"
 SectionEnd
