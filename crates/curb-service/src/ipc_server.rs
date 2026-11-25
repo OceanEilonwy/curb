@@ -73,6 +73,26 @@ where
             continue;
         }
         let response = match serde_json::from_str::<IpcRequest>(line) {
+            Ok(IpcRequest::RelayForward {
+                relay_url,
+                from_peer_id,
+                target_peer_id,
+                payload,
+            }) => match curb_p2p::forward_relay_frame(
+                &relay_url,
+                &from_peer_id,
+                &target_peer_id,
+                &payload,
+            )
+            .await
+            {
+                Ok(reply_payload) => IpcResponse::RelayForwarded {
+                    payload: reply_payload,
+                },
+                Err(e) => IpcResponse::Error {
+                    message: e.to_string(),
+                },
+            },
             Ok(req) => {
                 let eng = engine.clone();
                 tokio::task::spawn_blocking(move || eng.handle_request(req))

@@ -7,7 +7,10 @@ use thiserror::Error;
 
 pub use backup::{download_encrypted_backup, upload_encrypted_backup};
 pub use identity::PeerIdentity;
-pub use transport::{check_peer_online, run_p2p_host, run_p2p_host_with_status, send_remote_request};
+pub use transport::{
+    check_peer_online, forward_relay_frame, open_remote_response, run_p2p_host,
+    run_p2p_host_with_status, seal_remote_request, send_remote_request,
+};
 
 #[derive(Debug, Error)]
 pub enum P2pError {

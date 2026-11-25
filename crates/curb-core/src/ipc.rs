@@ -240,6 +240,14 @@ pub enum IpcRequest {
     },
     /// Immediately retries the `curb-service` connection to the configured `curb-relay`.
     RetryRelayConnection,
+    /// Proxies an already E2E-encrypted P2P frame through local `curb-service` to `relay_url`
+    /// so `curb-app` can reach remote devices even while WFP/NFQUEUE protection is enforcing.
+    RelayForward {
+        relay_url: String,
+        from_peer_id: String,
+        target_peer_id: String,
+        payload: String,
+    },
 }
 
 /// Responses returned by `curb-service`.
@@ -278,6 +286,10 @@ pub enum IpcResponse {
         /// Populated only for `InviteKind::SyncDevice` so the new device joins the sync group.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         group_key_hex: Option<String>,
+    },
+    /// Opaque E2E-encrypted reply payload returned by [`IpcRequest::RelayForward`].
+    RelayForwarded {
+        payload: String,
     },
     Ok,
     Error {

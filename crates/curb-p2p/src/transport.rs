@@ -255,15 +255,52 @@ pub async fn run_p2p_host_with_status<F, S>(
     }
 }
 
-/// Sends a single E2E-encrypted [`IpcRequest`] to a remote `curb-service` peer
-/// via `relay_url` and awaits the decrypted [`IpcResponse`].
-pub async fn send_remote_request(
+/// Encrypts an [`IpcRequest`] into an opaque E2E-encrypted payload for `target_peer_id`,
+/// returning `(request_id, base64_ciphertext)`.
+pub fn seal_remote_request(
     my_identity: &PeerIdentity,
-    relay_url: &str,
     target_peer_id: &str,
     request: &IpcRequest,
+) -> Result<(Uuid, String)> {
+    let request_id = Uuid::new_v4();
+    let env = PeerEnvelope::Request {
+        request_id,
+        request: request.clone(),
+    };
+    let plaintext = serde_json::to_vec(&env)?;
+    let ciphertext = encrypt_for_peer(my_identity, target_peer_id, &plaintext)?;
+    Ok((request_id, ciphertext))
+}
+
+/// Decrypts an opaque E2E-encrypted reply payload from `target_peer_id` and verifies
+/// that its `request_id` matches `expected_request_id`.
+pub fn open_remote_response(
+    my_identity: &PeerIdentity,
+    target_peer_id: &str,
+    expected_request_id: Uuid,
+    payload: &str,
 ) -> Result<IpcResponse> {
-    let ws_url = http_to_ws_relay_url(relay_url, &my_identity.peer_id());
+    let pt = decrypt_from_peer(my_identity, target_peer_id, payload)?;
+    match serde_json::from_slice::<PeerEnvelope>(&pt)? {
+        PeerEnvelope::Response {
+            request_id,
+            response,
+        } if request_id == expected_request_id => Ok(response),
+        _ => Err(P2pError::Network(
+            "Unexpected or mismatched P2P response envelope".into(),
+        )),
+    }
+}
+
+/// Forwards an already E2E-encrypted payload to `target_peer_id` via `relay_url` as
+/// `from_peer_id` and awaits the opaque encrypted reply payload from `target_peer_id`.
+pub async fn forward_relay_frame(
+    relay_url: &str,
+    from_peer_id: &str,
+    target_peer_id: &str,
+    payload: &str,
+) -> Result<String> {
+    let ws_url = http_to_ws_relay_url(relay_url, from_peer_id);
     let (ws_stream, _) = tokio::time::timeout(
         Duration::from_secs(8),
         tokio_tungstenite::connect_async(&ws_url),
@@ -273,17 +310,10 @@ pub async fn send_remote_request(
     .map_err(|e| P2pError::Network(format!("Could not connect to relay: {e}")))?;
 
     let (mut tx, mut rx) = ws_stream.split();
-    let request_id = Uuid::new_v4();
-    let env = PeerEnvelope::Request {
-        request_id,
-        request: request.clone(),
-    };
-    let plaintext = serde_json::to_vec(&env)?;
-    let ciphertext = encrypt_for_peer(my_identity, target_peer_id, &plaintext)?;
     let fwd = RelayWireMessage::Forward {
         to: target_peer_id.to_string(),
         from: None,
-        payload: ciphertext,
+        payload: payload.to_string(),
     };
     let json = serde_json::to_string(&fwd)?;
     tx.send(Message::Text(json.into()))
@@ -307,27 +337,35 @@ pub async fn send_remote_request(
                     payload,
                     ..
                 } if from == target_peer_id => {
-                    let pt = decrypt_from_peer(my_identity, target_peer_id, &payload)?;
-                    if let Ok(PeerEnvelope::Response {
-                        request_id: rid,
-                        response,
-                    }) = serde_json::from_slice::<PeerEnvelope>(&pt)
-                    {
-                        if rid == request_id {
-                            return Ok(response);
-                        }
-                    }
+                    return Ok(payload);
                 }
                 _ => {}
             }
         }
-        Err(P2pError::Network("Relay closed before response arrived".into()))
+        Err(P2pError::Network(
+            "Relay closed before response arrived".into(),
+        ))
     })
     .await
     .map_err(|_| P2pError::Network("Timed out waiting for remote device response".into()))?;
 
     let _ = tx.close().await;
     reply
+}
+
+/// Sends a single E2E-encrypted [`IpcRequest`] to a remote `curb-service` peer
+/// via `relay_url` and awaits the decrypted [`IpcResponse`].
+pub async fn send_remote_request(
+    my_identity: &PeerIdentity,
+    relay_url: &str,
+    target_peer_id: &str,
+    request: &IpcRequest,
+) -> Result<IpcResponse> {
+    let (request_id, ciphertext) = seal_remote_request(my_identity, target_peer_id, request)?;
+    let reply_ct =
+        forward_relay_frame(relay_url, &my_identity.peer_id(), target_peer_id, &ciphertext)
+            .await?;
+    open_remote_response(my_identity, target_peer_id, request_id, &reply_ct)
 }
 
 /// Checks whether `target_peer_id` is currently online on `relay_url`.

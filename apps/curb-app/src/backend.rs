@@ -350,15 +350,60 @@ impl CurbBackend {
         }
     }
 
+    /// Sends an E2E-encrypted remote IPC request to `target_peer_id` via `relay_url`.
+    /// When local `curb-service` is running (Full Protection), proxies the already-encrypted
+    /// frame through `curb-service` over local IPC so WFP/NFQUEUE never blocks `curb-app`
+    /// from reaching the relay while protection is active. Falls back to a direct WebSocket
+    /// connection when running without `curb-service` (Standard/Local mode).
+    async fn send_remote_p2p(
+        &self,
+        relay_url: &str,
+        target_peer_id: &str,
+        req: &IpcRequest,
+    ) -> Result<IpcResponse, String> {
+        let identity = self.remote_store.lock().unwrap().identity().clone();
+        let (request_id, ciphertext) =
+            curb_p2p::seal_remote_request(&identity, target_peer_id, req)
+                .map_err(|e| e.to_string())?;
+
+        let proxy_req = IpcRequest::RelayForward {
+            relay_url: relay_url.to_string(),
+            from_peer_id: identity.peer_id(),
+            target_peer_id: target_peer_id.to_string(),
+            payload: ciphertext.clone(),
+        };
+
+        let reply_payload = match ipc_client::send_request(&proxy_req).await {
+            Ok(IpcResponse::RelayForwarded { payload }) => payload,
+            Ok(IpcResponse::Error { message })
+                if !message.starts_with("Malformed IPC request") =>
+            {
+                return Err(message);
+            }
+            // Local curb-service not running (Standard/Local mode) or older service without RelayForward:
+            // connect directly from curb-app.
+            _ => curb_p2p::forward_relay_frame(
+                relay_url,
+                &identity.peer_id(),
+                target_peer_id,
+                &ciphertext,
+            )
+            .await
+            .map_err(|e| e.to_string())?,
+        };
+
+        curb_p2p::open_remote_response(&identity, target_peer_id, request_id, &reply_payload)
+            .map_err(|e| e.to_string())
+    }
+
     /// Dispatches an IPC request to the currently selected target:
     /// - If a remote friend's device is active, sends over E2E-encrypted P2P via `curb-p2p`.
     /// - Otherwise sends to local `CurbService`, falling back to `LocalStandardRuntime`.
     async fn dispatch_request(&self, req: IpcRequest) -> Result<IpcResponse, String> {
         if let Some(peer) = self.active_remote_peer() {
-            let identity = self.remote_store.lock().unwrap().identity().clone();
-            return curb_p2p::send_remote_request(&identity, &peer.relay_url, &peer.peer_id, &req)
-                .await
-                .map_err(|e| e.to_string());
+            return self
+                .send_remote_p2p(&peer.relay_url, &peer.peer_id, &req)
+                .await;
         }
         if let Ok(resp) = ipc_client::send_request(&req).await {
             self.local.clear_standard_mode_for_full_service();
@@ -645,14 +690,9 @@ impl CurbBackend {
             name: my_name,
             password: my_password,
         };
-        let resp = curb_p2p::send_remote_request(
-            &identity,
-            &invite.relay_url,
-            &invite.target_peer_id,
-            &req,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+        let resp = self
+            .send_remote_p2p(&invite.relay_url, &invite.target_peer_id, &req)
+            .await?;
 
         match resp {
             IpcResponse::InviteRedeemed {

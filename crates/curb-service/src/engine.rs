@@ -1129,6 +1129,10 @@ impl ServiceEngine {
                     data: guard.snapshot(),
                 }
             }
+
+            IpcRequest::RelayForward { .. } => IpcResponse::Error {
+                message: "RelayForward is only supported over local IPC.".into(),
+            },
         }
     }
 
