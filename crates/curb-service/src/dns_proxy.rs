@@ -229,6 +229,39 @@ pub async fn prewarm_ncsi_dns(engine: &ServiceEngine, fallback_upstream: SocketA
     }
 }
 
+/// Pre-resolves Linux NetworkManager / ConnMan connectivity-check hosts through
+/// Curb's upstream forwarder so NFQUEUE permits OS connectivity probes immediately
+/// when Curb transitions into enforcing mode.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub async fn prewarm_linux_connectivity_dns(engine: &ServiceEngine, fallback_upstream: SocketAddr) {
+    let probes = [
+        ("ping.archlinux.org.", RecordType::A),
+        ("ping.archlinux.org.", RecordType::AAAA),
+        ("fedoraproject.org.", RecordType::A),
+        ("fedoraproject.org.", RecordType::AAAA),
+        ("connectivity-check.ubuntu.com.", RecordType::A),
+        ("connectivity-check.ubuntu.com.", RecordType::AAAA),
+        ("nmcheck.gnome.org.", RecordType::A),
+        ("nmcheck.gnome.org.", RecordType::AAAA),
+        ("networkcheck.kde.org.", RecordType::A),
+        ("networkcheck.kde.org.", RecordType::AAAA),
+        ("ipv4.connman.net.", RecordType::A),
+    ];
+    for (idx, (host, rtype)) in probes.iter().enumerate() {
+        let Ok(name) = Name::from_utf8(*host) else {
+            continue;
+        };
+        let mut msg = Message::new();
+        msg.set_id(0x4360u16.wrapping_add(idx as u16));
+        msg.set_message_type(MessageType::Query);
+        msg.set_recursion_desired(true);
+        msg.add_query(Query::query(name, *rtype));
+        if let Ok(packet) = msg.to_vec() {
+            let _ = handle_dns_packet(engine, &packet, fallback_upstream, false).await;
+        }
+    }
+}
+
 async fn handle_dns_packet(
     engine: &ServiceEngine,
     packet: &[u8],

@@ -25,7 +25,7 @@ mod imp {
         format!(
             "[Unit]\n\
              Description=Curb Default-Deny Application Firewall Service\n\
-             After=network-pre.target nftables.service\n\
+             After=network-pre.target nftables.service firewalld.service ufw.service\n\
              Wants=network-pre.target\n\
              \n\
              [Service]\n\

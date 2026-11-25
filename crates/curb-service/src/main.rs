@@ -29,7 +29,7 @@ fn default_data_dir() -> PathBuf {
 }
 
 #[cfg(target_os = "linux")]
-const DEFAULT_DNS_BIND: &str = "127.0.0.1:5353";
+const DEFAULT_DNS_BIND: &str = "127.0.0.1:15353";
 #[cfg(not(target_os = "linux"))]
 const DEFAULT_DNS_BIND: &str = "127.0.0.1:53";
 

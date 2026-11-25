@@ -27,14 +27,22 @@ pub fn default_preset_registry() -> Arc<PresetRegistry> {
     Arc::new(reg)
 }
 
-/// Microsoft NCSI probe domains used by Windows to verify internet connectivity
-/// and keep Wi-Fi / Ethernet adapters from showing "No Internet" or bouncing.
+/// OS connectivity-check probe domains (Windows NCSI + Linux NetworkManager/ConnMan)
+/// used to keep Wi-Fi / Ethernet adapters from showing "No Internet" or "Limited".
 pub const NCSI_DOMAINS: &[&str] = &[
+    // Windows NCSI
     "www.msftconnecttest.com",
     "ipv6.msftconnecttest.com",
     "dns.msftncsi.com",
     "www.msftncsi.com",
     "ipv6.msftncsi.com",
+    // Linux NetworkManager / ConnMan connectivity checks
+    "ping.archlinux.org",
+    "fedoraproject.org",
+    "connectivity-check.ubuntu.com",
+    "nmcheck.gnome.org",
+    "networkcheck.kde.org",
+    "ipv4.connman.net",
 ];
 
 /// Represents an allowed running process currently tracked by `curb-service`.
@@ -360,7 +368,14 @@ impl EngineState {
 
         // Allow NTP pools if baseline NTP is enabled.
         if self.config.baseline.ntp {
-            let ntp = ["time.windows.com".to_string(), "*.pool.ntp.org".to_string()];
+            let ntp = [
+                "time.windows.com".to_string(),
+                "*.pool.ntp.org".to_string(),
+                "*.ntp.org".to_string(),
+                "ntp.ubuntu.com".to_string(),
+                "time.cloudflare.com".to_string(),
+                "time.nist.gov".to_string(),
+            ];
             if domain_matches_any(domain, &ntp)
                 || origin.as_deref().is_some_and(|o| domain_matches_any(o, &ntp))
             {

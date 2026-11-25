@@ -1,7 +1,7 @@
 [Unit]
 Description=Curb Default-Deny Application Firewall Service
 Documentation=https://github.com/OceanEilonwy/curb
-After=network-pre.target nftables.service
+After=network-pre.target nftables.service firewalld.service ufw.service
 Wants=network-pre.target
 
 [Service]

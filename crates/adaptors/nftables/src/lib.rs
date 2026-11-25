@@ -7,6 +7,12 @@ pub mod ruleset;
 pub const CURB_NFQUEUE_NUM: u16 = 42;
 
 #[cfg(target_os = "linux")]
-pub use nfqueue::{parse_ip_packet, run_nfqueue_loop, L4Proto, PacketContext, PacketTuple};
+pub use nfqueue::{
+    parse_ip_packet, run_nfqueue_loop, run_nfqueue_loop_with_ready, L4Proto, NfqueueVerdict,
+    PacketContext, PacketTuple,
+};
 #[cfg(target_os = "linux")]
-pub use ruleset::{build_ruleset, NftablesFirewall};
+pub use ruleset::{
+    build_ruleset, build_ruleset_with_options, policy_mark_for_generation, NftablesFirewall,
+    RulesetOptions, CURB_POLICY_MARK_BASE,
+};

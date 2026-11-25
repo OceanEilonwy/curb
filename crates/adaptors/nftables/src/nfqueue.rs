@@ -9,6 +9,10 @@ use curb_linux::proc_net::{read_proc_exe, read_proc_ppid, resolve_pid_for_socket
 use tracing::{debug, info, warn};
 
 const NETLINK_NETFILTER: libc::c_int = 12;
+const SOL_NETLINK: libc::c_int = 270;
+const NETLINK_NO_ENOBUFS: libc::c_int = 5;
+
+const NLMSG_ERROR: u16 = 2;
 const NFNL_SUBSYS_QUEUE: u16 = 3;
 const NFQNL_MSG_PACKET: u16 = 0;
 const NFQNL_MSG_VERDICT: u16 = 1;
@@ -16,27 +20,45 @@ const NFQNL_MSG_CONFIG: u16 = 2;
 
 const NFQNL_CFG_CMD_BIND: u8 = 1;
 const NFQNL_CFG_CMD_UNBIND: u8 = 2;
-const NFQNL_CFG_CMD_PF_BIND: u8 = 3;
-const NFQNL_CFG_CMD_PF_UNBIND: u8 = 4;
 
 const NFQNL_COPY_PACKET: u8 = 2;
 
 const NFQA_PACKET_HDR: u16 = 1;
 const NFQA_VERDICT_HDR: u16 = 2;
+const NFQA_MARK: u16 = 3;
 const NFQA_PAYLOAD: u16 = 9;
+
 const NFQA_CFG_CMD: u16 = 1;
 const NFQA_CFG_PARAMS: u16 = 2;
+const NFQA_CFG_QUEUE_MAXLEN: u16 = 3;
 
 const NF_DROP: u32 = 0;
 const NF_ACCEPT: u32 = 1;
+const NF_REPEAT: u32 = 4;
 
 const NLM_F_REQUEST: u16 = 0x0001;
 const NLM_F_ACK: u16 = 0x0004;
+
+const NFQUEUE_RCVBUF_BYTES: libc::c_int = 4 * 1024 * 1024;
+const NFQUEUE_MAXLEN: u32 = 4096;
+const NFQUEUE_COPY_RANGE: u32 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum L4Proto {
     Tcp,
     Udp,
+}
+
+/// Verdict returned by the NFQUEUE policy callback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NfqueueVerdict {
+    /// Drop the packet (`NF_DROP`).
+    Drop,
+    /// Accept the packet (`NF_ACCEPT`).
+    Accept,
+    /// Re-inject with `NF_REPEAT` + `NFQA_MARK` so `chain output` stamps `ct mark`
+    /// for the current policy generation and fast-paths subsequent packets.
+    AcceptAndMark(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +112,37 @@ impl NetlinkSocket {
             let err = io::Error::last_os_error();
             unsafe { libc::close(fd) };
             return Err(err);
+        }
+
+        // Expand netlink receive buffer (try SO_RCVBUFFORCE first for CAP_NET_ADMIN,
+        // falling back to SO_RCVBUF) and enable NETLINK_NO_ENOBUFS so bursts don't
+        // stall packet processing.
+        let rcvbuf = NFQUEUE_RCVBUF_BYTES;
+        unsafe {
+            let force_rc = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUFFORCE,
+                (&rcvbuf as *const libc::c_int).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            if force_rc < 0 {
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    (&rcvbuf as *const libc::c_int).cast::<libc::c_void>(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+            }
+            let one: libc::c_int = 1;
+            let _ = libc::setsockopt(
+                fd,
+                SOL_NETLINK,
+                NETLINK_NO_ENOBUFS,
+                (&one as *const libc::c_int).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
         }
 
         let tv = libc::timeval {
@@ -187,12 +240,46 @@ fn build_nfq_msg(
     msg
 }
 
+fn recv_ack(sock: &NetlinkSocket, expected_seq: u32) -> io::Result<()> {
+    let mut buf = [0u8; 4096];
+    for _ in 0..8 {
+        let n = sock.recv(&mut buf)?;
+        let mut offset = 0usize;
+        while offset + 16 <= n {
+            let nlmsg_len = u32::from_ne_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
+            let nlmsg_type = u16::from_ne_bytes(buf[offset + 4..offset + 6].try_into().unwrap());
+            let nlmsg_seq = u32::from_ne_bytes(buf[offset + 8..offset + 12].try_into().unwrap());
+            if nlmsg_len < 16 || offset + nlmsg_len > n {
+                break;
+            }
+            if nlmsg_type == NLMSG_ERROR && nlmsg_len >= 20 && nlmsg_seq == expected_seq {
+                let err_code =
+                    i32::from_ne_bytes(buf[offset + 16..offset + 20].try_into().unwrap());
+                if err_code == 0 {
+                    return Ok(());
+                }
+                return Err(io::Error::from_raw_os_error(-err_code));
+            }
+            let step = align4(nlmsg_len);
+            if step == 0 {
+                break;
+            }
+            offset += step;
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "timed out waiting for NFQUEUE netlink ACK",
+    ))
+}
+
 fn send_cfg_cmd(
     sock: &NetlinkSocket,
     seq: &mut u32,
     queue_num: u16,
     cmd: u8,
     pf: u16,
+    wait_ack: bool,
 ) -> io::Result<()> {
     *seq = seq.wrapping_add(1);
     let mut payload = [0u8; 4];
@@ -201,24 +288,34 @@ fn send_cfg_cmd(
     payload[2..4].copy_from_slice(&pf.to_be_bytes());
     let mut attrs = Vec::new();
     push_nlattr(&mut attrs, NFQA_CFG_CMD, &payload);
+    let flags = if wait_ack {
+        NLM_F_REQUEST | NLM_F_ACK
+    } else {
+        NLM_F_REQUEST
+    };
     let msg = build_nfq_msg(
         NFQNL_MSG_CONFIG,
-        NLM_F_REQUEST | NLM_F_ACK,
+        flags,
         *seq,
         libc::AF_UNSPEC as u8,
         queue_num,
         &attrs,
     );
-    sock.send(&msg)
+    sock.send(&msg)?;
+    if wait_ack {
+        recv_ack(sock, *seq)?;
+    }
+    Ok(())
 }
 
 fn send_cfg_params(sock: &NetlinkSocket, seq: &mut u32, queue_num: u16) -> io::Result<()> {
     *seq = seq.wrapping_add(1);
     let mut payload = [0u8; 5];
-    payload[0..4].copy_from_slice(&128u32.to_be_bytes());
+    payload[0..4].copy_from_slice(&NFQUEUE_COPY_RANGE.to_be_bytes());
     payload[4] = NFQNL_COPY_PACKET;
     let mut attrs = Vec::new();
     push_nlattr(&mut attrs, NFQA_CFG_PARAMS, &payload);
+    push_nlattr(&mut attrs, NFQA_CFG_QUEUE_MAXLEN, &NFQUEUE_MAXLEN.to_be_bytes());
     let msg = build_nfq_msg(
         NFQNL_MSG_CONFIG,
         NLM_F_REQUEST | NLM_F_ACK,
@@ -227,7 +324,8 @@ fn send_cfg_params(sock: &NetlinkSocket, seq: &mut u32, queue_num: u16) -> io::R
         queue_num,
         &attrs,
     );
-    sock.send(&msg)
+    sock.send(&msg)?;
+    recv_ack(sock, *seq)
 }
 
 fn send_verdict(
@@ -235,15 +333,22 @@ fn send_verdict(
     seq: &mut u32,
     queue_num: u16,
     packet_id: u32,
-    accept: bool,
+    verdict: NfqueueVerdict,
 ) -> io::Result<()> {
     *seq = seq.wrapping_add(1);
-    let verdict = if accept { NF_ACCEPT } else { NF_DROP };
+    let (nf_verdict, mark) = match verdict {
+        NfqueueVerdict::Drop => (NF_DROP, None),
+        NfqueueVerdict::Accept => (NF_ACCEPT, None),
+        NfqueueVerdict::AcceptAndMark(m) => (NF_REPEAT, Some(m)),
+    };
     let mut payload = [0u8; 8];
-    payload[0..4].copy_from_slice(&verdict.to_be_bytes());
+    payload[0..4].copy_from_slice(&nf_verdict.to_be_bytes());
     payload[4..8].copy_from_slice(&packet_id.to_be_bytes());
     let mut attrs = Vec::new();
     push_nlattr(&mut attrs, NFQA_VERDICT_HDR, &payload);
+    if let Some(m) = mark {
+        push_nlattr(&mut attrs, NFQA_MARK, &m.to_be_bytes());
+    }
     let msg = build_nfq_msg(
         NFQNL_MSG_VERDICT,
         NLM_F_REQUEST,
@@ -262,17 +367,36 @@ pub fn run_nfqueue_loop<F>(queue_num: u16, stop: Arc<AtomicBool>, decide: F) -> 
 where
     F: Fn(&PacketContext) -> bool,
 {
+    let ready = Arc::new(AtomicBool::new(false));
+    run_nfqueue_loop_with_ready(queue_num, stop, ready, |ctx| {
+        if decide(ctx) {
+            NfqueueVerdict::Accept
+        } else {
+            NfqueueVerdict::Drop
+        }
+    })
+}
+
+/// Runs the blocking NFQUEUE packet loop, verifying kernel bind ACKs, setting
+/// `ready` to `true` once bound, and supporting `AcceptAndMark` verdicts for
+/// conntrack policy-generation stamping.
+pub fn run_nfqueue_loop_with_ready<F>(
+    queue_num: u16,
+    stop: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
+    decide: F,
+) -> io::Result<()>
+where
+    F: Fn(&PacketContext) -> NfqueueVerdict,
+{
     let sock = NetlinkSocket::open()?;
     let mut seq = 0u32;
 
-    for pf in [libc::AF_INET as u16, libc::AF_INET6 as u16] {
-        let _ = send_cfg_cmd(&sock, &mut seq, 0, NFQNL_CFG_CMD_PF_UNBIND, pf);
-        let _ = send_cfg_cmd(&sock, &mut seq, 0, NFQNL_CFG_CMD_PF_BIND, pf);
-    }
-    send_cfg_cmd(&sock, &mut seq, queue_num, NFQNL_CFG_CMD_BIND, 0)?;
+    send_cfg_cmd(&sock, &mut seq, queue_num, NFQNL_CFG_CMD_BIND, 0, true)?;
     send_cfg_params(&sock, &mut seq, queue_num)?;
 
-    info!("Curb NFQUEUE verifier bound to queue {queue_num}");
+    ready.store(true, Ordering::Release);
+    info!("Curb NFQUEUE verifier bound to queue {queue_num} (maxlen={NFQUEUE_MAXLEN})");
 
     let mut buf = vec![0u8; 65536];
     while !stop.load(Ordering::Relaxed) {
@@ -302,7 +426,7 @@ where
             if nlmsg_type == ((NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_PACKET) && nlmsg_len >= 20 {
                 let attrs = &buf[offset + 20..offset + nlmsg_len];
                 if let Some((packet_id, payload)) = parse_nfq_packet_attrs(attrs) {
-                    let allow = match parse_ip_packet(payload) {
+                    let verdict = match parse_ip_packet(payload) {
                         Some(tuple) => {
                             let pid = resolve_pid_for_socket(
                                 tuple.proto == L4Proto::Tcp,
@@ -319,9 +443,9 @@ where
                             };
                             decide(&ctx)
                         }
-                        None => false,
+                        None => NfqueueVerdict::Drop,
                     };
-                    if let Err(e) = send_verdict(&sock, &mut seq, queue_num, packet_id, allow) {
+                    if let Err(e) = send_verdict(&sock, &mut seq, queue_num, packet_id, verdict) {
                         debug!("Failed to send NFQUEUE verdict for packet {packet_id}: {e}");
                     }
                 }
@@ -335,7 +459,8 @@ where
         }
     }
 
-    let _ = send_cfg_cmd(&sock, &mut seq, queue_num, NFQNL_CFG_CMD_UNBIND, 0);
+    ready.store(false, Ordering::Release);
+    let _ = send_cfg_cmd(&sock, &mut seq, queue_num, NFQNL_CFG_CMD_UNBIND, 0, false);
     info!("Curb NFQUEUE verifier unbound from queue {queue_num}");
     Ok(())
 }
@@ -370,7 +495,8 @@ fn parse_nfq_packet_attrs(mut data: &[u8]) -> Option<(u32, &[u8])> {
     Some((packet_id?, payload?))
 }
 
-/// Parses an IPv4 or IPv6 packet header and extracts its TCP/UDP 5-tuple.
+/// Parses an IPv4 or IPv6 packet header (including IPv6 extension headers) and
+/// extracts its TCP/UDP 5-tuple.
 pub fn parse_ip_packet(pkt: &[u8]) -> Option<PacketTuple> {
     if pkt.is_empty() {
         return None;
@@ -403,27 +529,67 @@ pub fn parse_ip_packet(pkt: &[u8]) -> Option<PacketTuple> {
             })
         }
         6 => {
-            if pkt.len() < 44 {
+            if pkt.len() < 40 {
                 return None;
             }
-            let proto = match pkt[6] {
-                6 => L4Proto::Tcp,
-                17 => L4Proto::Udp,
-                _ => return None,
-            };
             let src_bytes: [u8; 16] = pkt[8..24].try_into().ok()?;
             let dst_bytes: [u8; 16] = pkt[24..40].try_into().ok()?;
             let src_ip = IpAddr::V6(Ipv6Addr::from(src_bytes));
             let dst_ip = IpAddr::V6(Ipv6Addr::from(dst_bytes));
-            let src_port = u16::from_be_bytes([pkt[40], pkt[41]]);
-            let dst_port = u16::from_be_bytes([pkt[42], pkt[43]]);
-            Some(PacketTuple {
-                proto,
-                src_ip,
-                src_port,
-                dst_ip,
-                dst_port,
-            })
+
+            let mut next_hdr = pkt[6];
+            let mut offset = 40usize;
+            for _ in 0..8 {
+                match next_hdr {
+                    6 => {
+                        if pkt.len() < offset + 4 {
+                            return None;
+                        }
+                        let src_port = u16::from_be_bytes([pkt[offset], pkt[offset + 1]]);
+                        let dst_port = u16::from_be_bytes([pkt[offset + 2], pkt[offset + 3]]);
+                        return Some(PacketTuple {
+                            proto: L4Proto::Tcp,
+                            src_ip,
+                            src_port,
+                            dst_ip,
+                            dst_port,
+                        });
+                    }
+                    17 => {
+                        if pkt.len() < offset + 4 {
+                            return None;
+                        }
+                        let src_port = u16::from_be_bytes([pkt[offset], pkt[offset + 1]]);
+                        let dst_port = u16::from_be_bytes([pkt[offset + 2], pkt[offset + 3]]);
+                        return Some(PacketTuple {
+                            proto: L4Proto::Udp,
+                            src_ip,
+                            src_port,
+                            dst_ip,
+                            dst_port,
+                        });
+                    }
+                    // Hop-by-Hop (0), Routing (43), Destination Options (60), Mobility (135)
+                    0 | 43 | 60 | 135 => {
+                        if pkt.len() < offset + 2 {
+                            return None;
+                        }
+                        next_hdr = pkt[offset];
+                        let hdr_len = (pkt[offset + 1] as usize + 1) * 8;
+                        offset = offset.checked_add(hdr_len)?;
+                    }
+                    // Fragment header (44): fixed 8 bytes
+                    44 => {
+                        if pkt.len() < offset + 8 {
+                            return None;
+                        }
+                        next_hdr = pkt[offset];
+                        offset = offset.checked_add(8)?;
+                    }
+                    _ => return None,
+                }
+            }
+            None
         }
         _ => None,
     }
@@ -465,6 +631,30 @@ mod tests {
         let tuple = parse_ip_packet(&pkt).expect("parsed IPv6 UDP");
         assert_eq!(tuple.proto, L4Proto::Udp);
         assert_eq!(tuple.src_port, 40000);
+        assert_eq!(tuple.dst_port, 443);
+    }
+
+    #[test]
+    fn parses_ipv6_tcp_packet_with_extension_headers() {
+        // 40B IPv6 base + 8B Hop-by-Hop (0) + 8B Fragment (44) + 4B TCP ports
+        let mut pkt = vec![0u8; 60];
+        pkt[0] = 0x60;
+        pkt[6] = 0; // Hop-by-Hop
+        pkt[23] = 1;
+        pkt[24..40]
+            .copy_from_slice(&"2606:4700:4700::1111".parse::<Ipv6Addr>().unwrap().octets());
+        // Hop-by-Hop at offset 40: next=44 (Fragment), hdr_ext_len=0 (8 bytes)
+        pkt[40] = 44;
+        pkt[41] = 0;
+        // Fragment at offset 48: next=6 (TCP)
+        pkt[48] = 6;
+        // TCP ports at offset 56
+        pkt[56..58].copy_from_slice(&51234u16.to_be_bytes());
+        pkt[58..60].copy_from_slice(&443u16.to_be_bytes());
+
+        let tuple = parse_ip_packet(&pkt).expect("parsed IPv6 TCP with extension headers");
+        assert_eq!(tuple.proto, L4Proto::Tcp);
+        assert_eq!(tuple.src_port, 51234);
         assert_eq!(tuple.dst_port, 443);
     }
 }
