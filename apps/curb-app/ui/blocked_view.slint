@@ -1,7 +1,7 @@
 import { Theme } from "theme.slint";
 import { BlockedEventItem } from "types.slint";
 import { LoadingDots } from "icons.slint";
-import { CurbScrollView } from "components.slint";
+import { AppIconBadge, CurbScrollView } from "components.slint";
 
 export component BlockedView inherits CurbScrollView {
     in property <[BlockedEventItem]> events: [];
@@ -51,6 +51,16 @@ export component BlockedView inherits CurbScrollView {
                     padding-bottom: 10px;
                     spacing: 10px;
                     cross-axis-alignment: center;
+
+                    AppIconBadge {
+                        icon: ev.icon;
+                        has-icon: ev.has-icon;
+                        initials: ev.initials;
+                        avatar-color: ev.avatar-color;
+                        size: 28px;
+                        corner-radius: 7px;
+                        font-size: 11px;
+                    }
 
                     VerticalLayout {
                         horizontal-stretch: 1;

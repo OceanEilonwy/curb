@@ -1,12 +1,14 @@
 import { Theme } from "theme.slint";
 import { RuleItem } from "types.slint";
 import { CheckIcon, ChevronIcon, LoadingDots, WarnIcon } from "icons.slint";
-import { CurbScrollView, CurbSwitch, DomainChip, ReadOnlyStatusPill, SubprocessSelector } from "components.slint";
+import { AppIconBadge, CurbScrollView, CurbSwitch, DomainChip, ReadOnlyStatusPill, SubprocessSelector } from "components.slint";
 
 export component AllowedView inherits CurbScrollView {
     in property <bool> unlocked: false;
 
     // Built-in Steam preset
+    in property <image> steam-icon;
+    in property <bool> steam-has-icon: false;
     in property <bool> steam-enabled: true;
     in property <bool> steam-store: true;
     in property <bool> steam-community: false;
@@ -180,46 +182,62 @@ export component AllowedView inherits CurbScrollView {
                         horizontal-stretch: 1;
                         background: transparent;
 
-                        VerticalLayout {
-                            spacing: 4px;
+                        HorizontalLayout {
+                            spacing: 10px;
+                            cross-axis-alignment: center;
 
-                            HorizontalLayout {
-                                spacing: 8px;
-                                alignment: start;
-                                cross-axis-alignment: center;
+                            AppIconBadge {
+                                icon: root.steam-icon;
+                                has-icon: root.steam-has-icon;
+                                initials: "ST";
+                                avatar-color: #1b2838;
+                                size: 28px;
+                                corner-radius: 7px;
+                                font-size: 11px;
+                            }
 
-                                Text {
-                                    text: "Steam";
-                                    color: Theme.text;
-                                    font-size: 13px;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 4px;
 
-                                Rectangle {
-                                    height: 19px;
-                                    border-radius: 9.5px;
-                                    background: Theme.accent-soft;
-                                    HorizontalLayout {
-                                        padding-left: 8px;
-                                        padding-right: 8px;
-                                        cross-axis-alignment: center;
-                                        Text {
-                                            text: "Built-in";
-                                            color: Theme.accent-text;
-                                            font-size: 11px;
-                                            font-weight: 600;
-                                            vertical-alignment: center;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    cross-axis-alignment: center;
+
+                                    Text {
+                                        text: "Steam";
+                                        color: Theme.text;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Rectangle {
+                                        height: 19px;
+                                        border-radius: 9.5px;
+                                        background: Theme.accent-soft;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            cross-axis-alignment: center;
+                                            Text {
+                                                text: "Built-in";
+                                                color: Theme.accent-text;
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            Text {
-                                text: root.steam-summary;
-                                color: Theme.text-muted;
-                                font-size: 12px;
-                                overflow: elide;
+                                Text {
+                                    text: root.steam-summary;
+                                    color: Theme.text-muted;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                }
                             }
                         }
 
@@ -473,106 +491,122 @@ export component AllowedView inherits CurbScrollView {
                         horizontal-stretch: 1;
                         background: transparent;
 
-                        VerticalLayout {
-                            spacing: 4px;
+                        HorizontalLayout {
+                            spacing: 10px;
+                            cross-axis-alignment: center;
 
-                            HorizontalLayout {
-                                spacing: 6px;
-                                alignment: start;
-                                cross-axis-alignment: center;
-
-                                Text {
-                                    text: rule.name;
-                                    color: Theme.text;
-                                    font-size: 13px;
-                                    font-weight: 600;
-                                    overflow: elide;
-                                }
-
-                                if rule.first-class: Rectangle {
-                                    height: 17px;
-                                    border-radius: 8.5px;
-                                    background: Theme.accent-soft;
-                                    HorizontalLayout {
-                                        padding-left: 6px;
-                                        padding-right: 6px;
-                                        cross-axis-alignment: center;
-                                        Text {
-                                            text: "✦ Match-aware";
-                                            color: Theme.accent-text;
-                                            font-size: 10px;
-                                            font-weight: 600;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
+                            AppIconBadge {
+                                icon: rule.icon;
+                                has-icon: rule.has-icon;
+                                initials: rule.initials;
+                                avatar-color: rule.avatar-color;
+                                size: 28px;
+                                corner-radius: 7px;
+                                font-size: 11px;
                             }
 
-                            if rule.playtime-enabled: HorizontalLayout {
-                                spacing: 6px;
-                                alignment: start;
-                                cross-axis-alignment: center;
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 4px;
 
-                                Rectangle {
-                                    height: 18px;
-                                    border-radius: 9px;
-                                    background: !rule.playtime-active || rule.playtime-chip-state == 0
-                                        ? Theme.green-soft
-                                        : rule.playtime-chip-state == 1
-                                            ? Theme.amber-soft
-                                            : Theme.red-soft;
-                                    HorizontalLayout {
-                                        padding-left: 7px;
-                                        padding-right: 7px;
-                                        cross-axis-alignment: center;
-                                        Text {
-                                            text: !rule.playtime-active || rule.playtime-chip-state == 0
-                                                ? "Playing"
-                                                : rule.playtime-chip-state == 1
-                                                    ? "Finishing Match"
-                                                    : "Overtime";
-                                            color: !rule.playtime-active || rule.playtime-chip-state == 0
-                                                ? Theme.green-text
-                                                : rule.playtime-chip-state == 1
-                                                    ? Theme.amber-text
-                                                    : Theme.red-text;
-                                            font-size: 11px;
-                                            font-weight: 600;
-                                            vertical-alignment: center;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    alignment: start;
+                                    cross-axis-alignment: center;
+
+                                    Text {
+                                        text: rule.name;
+                                        color: Theme.text;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        overflow: elide;
+                                    }
+
+                                    if rule.first-class: Rectangle {
+                                        height: 17px;
+                                        border-radius: 8.5px;
+                                        background: Theme.accent-soft;
+                                        HorizontalLayout {
+                                            padding-left: 6px;
+                                            padding-right: 6px;
+                                            cross-axis-alignment: center;
+                                            Text {
+                                                text: "✦ Match-aware";
+                                                color: Theme.accent-text;
+                                                font-size: 10px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                            }
                                         }
                                     }
                                 }
 
-                                Text {
-                                    text: rule.playtime-sub-meta;
-                                    color: rule.playtime-active && rule.playtime-chip-state == 2
-                                        ? Theme.red-text
-                                        : rule.playtime-active && rule.playtime-chip-state == 1
-                                            ? Theme.amber-text
-                                            : Theme.text-sec;
-                                    font-size: 11px;
-                                    overflow: elide;
-                                }
-                            }
+                                if rule.playtime-enabled: HorizontalLayout {
+                                    spacing: 6px;
+                                    alignment: start;
+                                    cross-axis-alignment: center;
 
-                            if !rule.playtime-enabled: HorizontalLayout {
-                                spacing: 5px;
-                                alignment: start;
-                                cross-axis-alignment: center;
+                                    Rectangle {
+                                        height: 18px;
+                                        border-radius: 9px;
+                                        background: !rule.playtime-active || rule.playtime-chip-state == 0
+                                            ? Theme.green-soft
+                                            : rule.playtime-chip-state == 1
+                                                ? Theme.amber-soft
+                                                : Theme.red-soft;
+                                        HorizontalLayout {
+                                            padding-left: 7px;
+                                            padding-right: 7px;
+                                            cross-axis-alignment: center;
+                                            Text {
+                                                text: !rule.playtime-active || rule.playtime-chip-state == 0
+                                                    ? "Playing"
+                                                    : rule.playtime-chip-state == 1
+                                                        ? "Finishing Match"
+                                                        : "Overtime";
+                                                color: !rule.playtime-active || rule.playtime-chip-state == 0
+                                                    ? Theme.green-text
+                                                    : rule.playtime-chip-state == 1
+                                                        ? Theme.amber-text
+                                                        : Theme.red-text;
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
 
-                                if rule.signed: CheckIcon {
-                                    color: Theme.green-text;
-                                    size: 12px;
+                                    Text {
+                                        text: rule.playtime-sub-meta;
+                                        color: rule.playtime-active && rule.playtime-chip-state == 2
+                                            ? Theme.red-text
+                                            : rule.playtime-active && rule.playtime-chip-state == 1
+                                                ? Theme.amber-text
+                                                : Theme.text-sec;
+                                        font-size: 11px;
+                                        overflow: elide;
+                                    }
                                 }
-                                if !rule.signed: WarnIcon {
-                                    color: Theme.amber-text;
-                                    size: 12px;
-                                }
-                                Text {
-                                    text: rule.signed ? "Updates automatically" : "Needs re-approval after updates";
-                                    color: rule.signed ? Theme.green-text : Theme.amber-text;
-                                    font-size: 12px;
-                                    overflow: elide;
+
+                                if !rule.playtime-enabled: HorizontalLayout {
+                                    spacing: 5px;
+                                    alignment: start;
+                                    cross-axis-alignment: center;
+
+                                    if rule.signed: CheckIcon {
+                                        color: Theme.green-text;
+                                        size: 12px;
+                                    }
+                                    if !rule.signed: WarnIcon {
+                                        color: Theme.amber-text;
+                                        size: 12px;
+                                    }
+                                    Text {
+                                        text: rule.signed ? "Updates automatically" : "Needs re-approval after updates";
+                                        color: rule.signed ? Theme.green-text : Theme.amber-text;
+                                        font-size: 12px;
+                                        overflow: elide;
+                                    }
                                 }
                             }
                         }

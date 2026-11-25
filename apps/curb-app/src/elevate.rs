@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use curb_core::adaptors::{DesktopIntegration, ServiceAdaptors};
+use curb_core::adaptors::{AppIcon, AppIconRequest, DesktopIntegration, ServiceAdaptors};
 
 fn desktop_adaptor() -> Option<Box<dyn DesktopIntegration>> {
     #[cfg(windows)]
@@ -93,4 +93,10 @@ pub fn exe_path_prompt() -> (&'static str, &'static str) {
             "Enter or paste the full path to an executable binary on this computer.",
             "/usr/bin/example",
         ))
+}
+
+/// Resolves a small native OS icon for an application via the active desktop adaptor
+/// (Windows Task Manager PE icons, Linux KDE/GNOME `.desktop` + XDG Icon Theme).
+pub fn resolve_app_icon(req: &AppIconRequest<'_>) -> Option<AppIcon> {
+    desktop_adaptor().and_then(|a| a.resolve_app_icon(req))
 }

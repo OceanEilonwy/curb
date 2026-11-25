@@ -37,6 +37,7 @@ uuid = { version = "1.16", features = ["v4", "serde"] }
 windows-service = "0.7"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_NetworkManagement_WindowsFilteringPlatform",

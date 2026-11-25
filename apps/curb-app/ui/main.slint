@@ -85,6 +85,8 @@ export component MainWindow inherits Window {
     in property <string> setup-error: "";
 
     // Allowed tab properties
+    in property <image> steam-icon;
+    in property <bool> steam-has-icon: false;
     in property <bool> steam-enabled: true;
     in property <bool> steam-store: true;
     in property <bool> steam-community: false;
@@ -137,6 +139,10 @@ export component MainWindow inherits Window {
     in property <bool> picker-saving: false;
     in property <bool> picker-has-selection: false;
     in property <string> picker-selected-name: "";
+    in property <image> picker-selected-icon;
+    in property <bool> picker-selected-has-icon: false;
+    in property <string> picker-selected-initials: "";
+    in property <color> picker-selected-avatar-color: Theme.accent;
     in property <string> picker-selected-path: "";
     in property <bool> picker-selected-signed: false;
     in property <string> picker-selected-signer: "";
@@ -848,6 +854,8 @@ export component MainWindow inherits Window {
                 if root.active-tab == 0: AllowedView {
                     vertical-stretch: 1;
                     unlocked: root.unlocked;
+                    steam-icon: root.steam-icon;
+                    steam-has-icon: root.steam-has-icon;
                     steam-enabled: root.steam-enabled;
                     steam-store: root.steam-store;
                     steam-community: root.steam-community;
@@ -1023,6 +1031,10 @@ export component MainWindow inherits Window {
                 saving: root.picker-saving;
                 has-selection: root.picker-has-selection;
                 selected-name: root.picker-selected-name;
+                selected-icon: root.picker-selected-icon;
+                selected-has-icon: root.picker-selected-has-icon;
+                selected-initials: root.picker-selected-initials;
+                selected-avatar-color: root.picker-selected-avatar-color;
                 selected-path: root.picker-selected-path;
                 selected-signed: root.picker-selected-signed;
                 selected-signer: root.picker-selected-signer;

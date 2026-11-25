@@ -1,9 +1,11 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
+use curb_core::adaptors::{AppIcon, AppIconRequest};
 use curb_core::config::{
     BaselinePolicy, EnforcementMode, ExecutableMatcher, NetworkPolicy, Rule, SubprocessPolicy,
     VerificationMethod,
@@ -12,7 +14,10 @@ use curb_core::ipc::{ProtectionTier, RunningAppInfo, ServiceSnapshot};
 use curb_core::presets::SteamPresetConfig;
 use curb_core::steam::DiscoveredSteamGame;
 use curb_core::verify::BinaryIdentity;
-use slint::{Color, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
+use slint::{
+    Color, ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer,
+    TimerMode, VecModel, Weak,
+};
 use uuid::Uuid;
 
 use crate::backend::CurbBackend;
@@ -48,6 +53,23 @@ pub fn initials_for(name: &str) -> String {
         format!("{a}{b}").to_uppercase()
     } else {
         name.chars().take(2).collect::<String>().to_uppercase()
+    }
+}
+
+fn app_icon_to_slint_image(icon: AppIcon) -> Option<Image> {
+    match icon {
+        AppIcon::Rgba {
+            width,
+            height,
+            data,
+        } => {
+            if width == 0 || height == 0 || data.len() != (width as usize) * (height as usize) * 4 {
+                return None;
+            }
+            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&data, width, height);
+            Some(Image::from_rgba8(buf))
+        }
+        AppIcon::Path(path) => Image::load_from_path(&path).ok(),
     }
 }
 
@@ -177,6 +199,7 @@ struct AppController {
     prompt_purpose: PromptPurpose,
     toast_timer: Timer,
     poll_timer: Timer,
+    icon_cache: RefCell<HashMap<String, Option<Image>>>,
 }
 
 thread_local! {
@@ -262,7 +285,19 @@ pub fn create_main_window(
         prompt_purpose: PromptPurpose::None,
         toast_timer: Timer::default(),
         poll_timer: Timer::default(),
+        icon_cache: RefCell::new(HashMap::new()),
     }));
+
+    {
+        let (steam_icon, steam_has_icon) = ctrl.borrow().resolve_icon(&AppIconRequest {
+            exe_path: None,
+            exe_name: Some("steam"),
+            app_name: Some("Steam"),
+            steam_app_id: None,
+        });
+        win.set_steam_icon(steam_icon);
+        win.set_steam_has_icon(steam_has_icon);
+    }
 
     ACTIVE_CONTROLLER.with(|cell| {
         *cell.borrow_mut() = Some((gen_id, ctrl.clone()));
@@ -823,9 +858,21 @@ impl AppController {
                     .and_then(|s| s.live_telemetry.clone())
                     .unwrap_or_default();
 
+                let exe_path_ref = r.exe_path.as_deref().filter(|p| !p.is_empty()).map(Path::new);
+                let (icon, has_icon) = self.resolve_icon(&AppIconRequest {
+                    exe_path: exe_path_ref,
+                    exe_name: (!r.exe_hint.is_empty()).then_some(r.exe_hint.as_str()),
+                    app_name: Some(r.name.as_str()),
+                    steam_app_id: app_id,
+                });
+
                 RuleItem {
                     id: id_str.clone().into(),
                     name: r.name.clone().into(),
+                    icon,
+                    has_icon,
+                    initials: initials_for(&r.name).into(),
+                    avatar_color: avatar_color_for(&r.name),
                     enabled: r.enabled,
                     signed: r.matcher.is_signed(),
                     is_steam_game: matches!(r.matcher, ExecutableMatcher::SteamGame { .. }),
@@ -865,18 +912,57 @@ impl AppController {
         let blocked_items: Vec<BlockedEventItem> = snap
             .blocked_events
             .iter()
-            .map(|ev| BlockedEventItem {
-                id: ev.id.to_string().into(),
-                app_name: ev.app_name.clone().into(),
-                relative_time: format_relative_time(ev.timestamp).into(),
-                destination: ev.destination.clone().into(),
-                is_steam_community: ev.is_steam_community,
-                allowing: self.allowing_blocked == Some(ev.id),
+            .map(|ev| {
+                let exe_path_ref = (!ev.path.is_empty()).then_some(Path::new(ev.path.as_str()));
+                let (icon, has_icon) = self.resolve_icon(&AppIconRequest {
+                    exe_path: exe_path_ref,
+                    exe_name: (!ev.exe.is_empty()).then_some(ev.exe.as_str()),
+                    app_name: Some(ev.app_name.as_str()),
+                    steam_app_id: None,
+                });
+                BlockedEventItem {
+                    id: ev.id.to_string().into(),
+                    app_name: ev.app_name.clone().into(),
+                    icon,
+                    has_icon,
+                    initials: initials_for(&ev.app_name).into(),
+                    avatar_color: avatar_color_for(&ev.app_name),
+                    relative_time: format_relative_time(ev.timestamp).into(),
+                    destination: ev.destination.clone().into(),
+                    is_steam_community: ev.is_steam_community,
+                    allowing: self.allowing_blocked == Some(ev.id),
+                }
             })
             .collect();
         win.set_blocked_events(ModelRc::new(VecModel::from(blocked_items)));
 
         self.sync_picker();
+    }
+
+    fn resolve_icon(&self, req: &AppIconRequest<'_>) -> (Image, bool) {
+        let key = format!(
+            "{}|{}|{}|{:?}",
+            req.exe_path
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            req.exe_name.unwrap_or_default(),
+            req.app_name.unwrap_or_default(),
+            req.steam_app_id
+        );
+
+        if let Some(cached) = self.icon_cache.borrow().get(&key) {
+            return match cached {
+                Some(img) => (img.clone(), true),
+                None => (Image::default(), false),
+            };
+        }
+
+        let loaded = crate::elevate::resolve_app_icon(req).and_then(app_icon_to_slint_image);
+        self.icon_cache.borrow_mut().insert(key, loaded.clone());
+        match loaded {
+            Some(img) => (img, true),
+            None => (Image::default(), false),
+        }
     }
 
     fn is_already_allowed(
@@ -908,9 +994,18 @@ impl AppController {
     fn to_running_item(&self, app: &RunningAppInfo) -> RunningAppItem {
         let already = self.is_already_allowed(&app.exe, Some(&app.path), None);
         let selected = !already && self.selected_key.as_deref() == Some(app.key.as_str());
+        let exe_path_ref = (!app.path.is_empty()).then_some(Path::new(app.path.as_str()));
+        let (icon, has_icon) = self.resolve_icon(&AppIconRequest {
+            exe_path: exe_path_ref,
+            exe_name: (!app.exe.is_empty()).then_some(app.exe.as_str()),
+            app_name: Some(app.name.as_str()),
+            steam_app_id: None,
+        });
         RunningAppItem {
             key: app.key.clone().into(),
             name: app.name.clone().into(),
+            icon,
+            has_icon,
             initials: initials_for(&app.name).into(),
             avatar_color: avatar_color_for(&app.name),
             exe: app.exe.clone().into(),
@@ -1063,10 +1158,18 @@ impl AppController {
                 let already =
                     self.is_already_allowed(&g.exe_name, Some(&exe_path_str), Some(g.app_id));
                 let selected = !already && self.selected_key.as_deref() == Some(key.as_str());
+                let (icon, has_icon) = self.resolve_icon(&AppIconRequest {
+                    exe_path: (!exe_path_str.is_empty()).then_some(g.exe_path.as_path()),
+                    exe_name: (!g.exe_name.is_empty()).then_some(g.exe_name.as_str()),
+                    app_name: Some(g.name.as_str()),
+                    steam_app_id: Some(g.app_id),
+                });
                 SteamGameItem {
                     key: key.into(),
                     app_id: g.app_id as i32,
                     name: g.name.clone().into(),
+                    icon,
+                    has_icon,
                     initials: initials_for(&g.name).into(),
                     avatar_color: avatar_color_for(&g.name),
                     exe_name: g.exe_name.clone().into(),
@@ -1082,7 +1185,17 @@ impl AppController {
         if let Some(sel) = self.selected_summary() {
             let norm = sel.path.to_ascii_lowercase();
             let inspecting = self.inspecting_path.as_deref() == Some(norm.as_str());
+            let (sel_icon, sel_has_icon) = self.resolve_icon(&AppIconRequest {
+                exe_path: (!sel.path.is_empty()).then_some(Path::new(sel.path.as_str())),
+                exe_name: (!sel.exe.is_empty()).then_some(sel.exe.as_str()),
+                app_name: Some(sel.name.as_str()),
+                steam_app_id: sel.app_id,
+            });
             win.set_picker_has_selection(true);
+            win.set_picker_selected_icon(sel_icon);
+            win.set_picker_selected_has_icon(sel_has_icon);
+            win.set_picker_selected_initials(initials_for(&sel.name).into());
+            win.set_picker_selected_avatar_color(avatar_color_for(&sel.name));
             win.set_picker_selected_name(sel.name.into());
             win.set_picker_selected_path(sel.path.into());
             win.set_picker_selected_signed(sel.signed);
@@ -1092,6 +1205,7 @@ impl AppController {
             win.set_picker_inspect_error(self.inspect_error.clone().unwrap_or_default().into());
         } else {
             win.set_picker_has_selection(false);
+            win.set_picker_selected_has_icon(false);
             win.set_picker_inspecting(false);
             win.set_picker_inspect_error(SharedString::default());
         }

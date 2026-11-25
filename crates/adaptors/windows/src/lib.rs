@@ -5,6 +5,8 @@ pub mod dns;
 #[cfg(windows)]
 pub mod firewall;
 #[cfg(windows)]
+pub mod icons;
+#[cfg(windows)]
 pub mod preset_host;
 #[cfg(windows)]
 pub mod processes;

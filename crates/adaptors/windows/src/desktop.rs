@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use curb_core::adaptors::DesktopIntegration;
+use curb_core::adaptors::{AppIcon, AppIconRequest, DesktopIntegration};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Registry::{
@@ -147,6 +147,10 @@ impl DesktopIntegration for WindowsDesktopIntegration {
             "Enter or paste the full path to an executable (.exe) on this computer.",
             r"C:\Program Files\Example\App.exe",
         )
+    }
+
+    fn resolve_app_icon(&self, req: &AppIconRequest<'_>) -> Option<AppIcon> {
+        crate::icons::resolve_app_icon(req)
     }
 }
 

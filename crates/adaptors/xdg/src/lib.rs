@@ -3,7 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use curb_core::adaptors::DesktopIntegration;
+pub mod icons;
+
+use curb_core::adaptors::{AppIcon, AppIconRequest, DesktopIntegration};
 use curb_core::store::LINUX_SYSTEM_DATA_DIR;
 
 /// Linux XDG / Polkit / GNOME / KDE desktop integration adaptor.
@@ -171,6 +173,10 @@ impl DesktopIntegration for XdgDesktopIntegration {
             "Enter or paste the full path to an executable binary on this computer.",
             "/usr/bin/example",
         )
+    }
+
+    fn resolve_app_icon(&self, req: &AppIconRequest<'_>) -> Option<AppIcon> {
+        icons::resolve_app_icon(req)
     }
 }
 

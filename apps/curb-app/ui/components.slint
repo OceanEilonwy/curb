@@ -152,6 +152,38 @@ export component RadioCircle inherits Rectangle {
     }
 }
 
+export component AppIconBadge inherits Rectangle {
+    in property <image> icon;
+    in property <bool> has-icon: false;
+    in property <string> initials: "";
+    in property <color> avatar-color: Theme.accent;
+    in property <length> size: 28px;
+    in property <length> corner-radius: 7px;
+    in property <length> font-size: 11px;
+
+    width: size;
+    height: size;
+    border-radius: corner-radius;
+    background: has-icon ? transparent : avatar-color;
+    clip: true;
+
+    if has-icon: Image {
+        width: 100%;
+        height: 100%;
+        source: root.icon;
+        image-fit: contain;
+    }
+
+    if !has-icon: Text {
+        text: root.initials;
+        color: #ffffff;
+        font-size: root.font-size;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
 export component CurbInput inherits Rectangle {
     in-out property <string> text: "";
     in property <string> placeholder: "";

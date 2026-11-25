@@ -76,8 +76,34 @@ pub trait ServiceManager: Send + Sync {
     fn stop_if_running(&self) -> std::result::Result<(), String>;
 }
 
+/// Request describing an application whose native OS icon should be resolved.
+#[derive(Debug, Clone, Default)]
+pub struct AppIconRequest<'a> {
+    /// Full path to the executable binary, if known (e.g. `C:\...\app.exe` or `/usr/bin/firefox`).
+    pub exe_path: Option<&'a Path>,
+    /// Executable filename or hint (e.g. `firefox.exe`, `discord`, `steam`).
+    pub exe_name: Option<&'a str>,
+    /// Human-friendly display name (e.g. `"Mozilla Firefox"`, `"Steam"`).
+    pub app_name: Option<&'a str>,
+    /// Optional Steam AppID (helps locate `steam_icon_<app_id>` or Steam library cache icons).
+    pub steam_app_id: Option<u32>,
+}
+
+/// Resolved native application icon returned by [`DesktopIntegration::resolve_app_icon`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppIcon {
+    /// Decoded straight-alpha RGBA8 pixel buffer (e.g. extracted from a Windows PE `HICON`).
+    Rgba {
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    },
+    /// Path to an on-disk icon image file (e.g. `.png` or `.svg` from an XDG icon theme).
+    Path(PathBuf),
+}
+
 /// Desktop-environment integration for the unprivileged `curb-app` UI:
-/// privilege elevation, login tray autostart, Standard Mode proxy, and data paths.
+/// privilege elevation, login tray autostart, Standard Mode proxy, app icons, and data paths.
 pub trait DesktopIntegration: Send + Sync {
     /// Triggers a single native admin prompt (UAC / Polkit) to install Curb's service.
     fn launch_elevated_install(&self, migrate_from: &Path) -> std::result::Result<(), String>;
@@ -99,6 +125,13 @@ pub trait DesktopIntegration: Send + Sync {
 
     /// Returns `(description, placeholder)` for the "Add Executable by Path" UI prompt.
     fn exe_path_prompt(&self) -> (&'static str, &'static str);
+
+    /// Resolves a small native application icon the same way the host OS process monitor does
+    /// (Windows Task Manager PE/Shell icons, KDE System Monitor / GNOME `.desktop` + XDG Icon Theme).
+    /// Returns `None` if no native icon is found so the UI can fall back to an avatar badge.
+    fn resolve_app_icon(&self, _req: &AppIconRequest<'_>) -> Option<AppIcon> {
+        None
+    }
 }
 
 /// Composed set of OS/subsystem adaptors injected into `ServiceEngine`.

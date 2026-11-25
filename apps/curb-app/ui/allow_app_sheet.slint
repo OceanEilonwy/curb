@@ -11,6 +11,7 @@ import {
     WarnIcon,
 } from "icons.slint";
 import {
+    AppIconBadge,
     CurbCheckbox,
     CurbInput,
     CurbScrollView,
@@ -36,21 +37,14 @@ component RunningAppRow inherits Rectangle {
         spacing: 12px;
         cross-axis-alignment: center;
 
-        // Colored avatar square
-        Rectangle {
-            width: 36px;
-            height: 36px;
-            border-radius: 8px;
-            background: app.avatar-color;
-
-            Text {
-                text: app.initials;
-                color: #ffffff;
-                font-size: 12px;
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
+        AppIconBadge {
+            icon: app.icon;
+            has-icon: app.has-icon;
+            initials: app.initials;
+            avatar-color: app.avatar-color;
+            size: 34px;
+            corner-radius: 8px;
+            font-size: 12px;
         }
 
         // Info column
@@ -195,20 +189,14 @@ component SteamGameRow inherits Rectangle {
         spacing: 12px;
         cross-axis-alignment: center;
 
-        Rectangle {
-            width: 36px;
-            height: 36px;
-            border-radius: 8px;
-            background: game.avatar-color;
-
-            Text {
-                text: game.initials;
-                color: #ffffff;
-                font-size: 12px;
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
+        AppIconBadge {
+            icon: game.icon;
+            has-icon: game.has-icon;
+            initials: game.initials;
+            avatar-color: game.avatar-color;
+            size: 34px;
+            corner-radius: 8px;
+            font-size: 12px;
         }
 
         VerticalLayout {
@@ -308,6 +296,10 @@ export component AllowAppSheet inherits Rectangle {
     // Selected entry summary
     in property <bool> has-selection: false;
     in property <string> selected-name: "";
+    in property <image> selected-icon;
+    in property <bool> selected-has-icon: false;
+    in property <string> selected-initials: "";
+    in property <color> selected-avatar-color: Theme.accent;
     in property <string> selected-path: "";
     in property <bool> selected-signed: false;
     in property <string> selected-signer: "";
@@ -825,8 +817,18 @@ export component AllowAppSheet inherits Rectangle {
 
                     // Summary + Advanced toggle
                     HorizontalLayout {
-                        spacing: 8px;
+                        spacing: 10px;
                         cross-axis-alignment: center;
+
+                        AppIconBadge {
+                            icon: root.selected-icon;
+                            has-icon: root.selected-has-icon;
+                            initials: root.selected-initials;
+                            avatar-color: root.selected-avatar-color;
+                            size: 28px;
+                            corner-radius: 7px;
+                            font-size: 11px;
+                        }
 
                         VerticalLayout {
                             horizontal-stretch: 1;
