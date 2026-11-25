@@ -1,7 +1,7 @@
 # Maintainer: Curb Maintainers <https://github.com/OceanEilonwy/curb>
 # Compatible with Arch Linux, CachyOS (x86-64-v3/v4), Manjaro, EndeavourOS, and SteamOS.
 pkgname=curb
-pkgver=0.4.5
+pkgver=0.4.6
 pkgrel=1
 pkgdesc="Default-deny application internet limiter (nftables + NFQUEUE + Slint UI)"
 arch=('x86_64' 'aarch64')
