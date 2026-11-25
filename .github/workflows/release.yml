@@ -32,7 +32,7 @@ jobs:
         run: cargo test --workspace
 
   release-linux:
-    name: Build Linux Release (.deb, .rpm, .tar.gz, PKGBUILD)
+    name: Build Linux Release (.deb, .rpm, .tar.gz)
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -69,11 +69,6 @@ jobs:
           cp apps/curb-app/icons/32x32.png "$TAR_DIR/icon-32.png"
           cp README.md LICENSE "$TAR_DIR/"
           tar -C dist-release -czf "dist-release/curb-${VERSION}-linux-x86_64.tar.gz" "curb-${VERSION}-linux-x86_64"
-          cp packaging/linux/PKGBUILD dist-release/PKGBUILD
-          cp packaging/linux/curb.install dist-release/curb.install
-          cp packaging/linux/void/template dist-release/void-template
-          cp packaging/linux/void/INSTALL dist-release/void-INSTALL
-          cp packaging/linux/void/REMOVE dist-release/void-REMOVE
           ls -lh dist-release/
 
       - name: Publish Linux Artifacts to GitHub Release
@@ -85,11 +80,6 @@ jobs:
             dist-release/*.deb
             dist-release/*.rpm
             dist-release/*.tar.gz
-            dist-release/PKGBUILD
-            dist-release/curb.install
-            dist-release/void-template
-            dist-release/void-INSTALL
-            dist-release/void-REMOVE
 
   release-windows:
     name: Build Windows Release
