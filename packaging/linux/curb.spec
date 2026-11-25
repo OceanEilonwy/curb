@@ -19,6 +19,7 @@ mkdir -p %{buildroot}/usr/lib/systemd/system
 mkdir -p %{buildroot}/usr/share/applications
 mkdir -p %{buildroot}/usr/share/icons/hicolor/128x128/apps
 mkdir -p %{buildroot}/usr/share/icons/hicolor/32x32/apps
+mkdir -p %{buildroot}/usr/share/icons/hicolor/scalable/apps
 mkdir -p %{buildroot}/usr/share/polkit-1/actions
 mkdir -p %{buildroot}/usr/share/doc/curb
 
@@ -30,6 +31,7 @@ install -m 0644 %{_sourcedir}/curb.desktop %{buildroot}/usr/share/applications/c
 install -m 0644 %{_sourcedir}/org.curb.policy %{buildroot}/usr/share/polkit-1/actions/org.curb.policy
 install -m 0644 %{_sourcedir}/icon-128.png %{buildroot}/usr/share/icons/hicolor/128x128/apps/curb.png
 install -m 0644 %{_sourcedir}/icon-32.png %{buildroot}/usr/share/icons/hicolor/32x32/apps/curb.png
+install -m 0644 %{_sourcedir}/icon.svg %{buildroot}/usr/share/icons/hicolor/scalable/apps/curb.svg
 install -m 0644 %{_sourcedir}/LICENSE %{buildroot}/usr/share/doc/curb/LICENSE
 install -m 0644 %{_sourcedir}/README.md %{buildroot}/usr/share/doc/curb/README.md
 
@@ -49,6 +51,7 @@ fi
 /usr/share/applications/curb.desktop
 /usr/share/icons/hicolor/128x128/apps/curb.png
 /usr/share/icons/hicolor/32x32/apps/curb.png
+/usr/share/icons/hicolor/scalable/apps/curb.svg
 /usr/share/polkit-1/actions/org.curb.policy
 %doc /usr/share/doc/curb/README.md
 %license /usr/share/doc/curb/LICENSE

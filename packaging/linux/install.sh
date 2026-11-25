@@ -24,6 +24,9 @@ install -Dm644 "$SCRIPT_DIR/curb.desktop" /usr/share/applications/curb.desktop
 install -Dm644 "$SCRIPT_DIR/org.curb.policy" /usr/share/polkit-1/actions/org.curb.policy
 install -Dm644 "$SCRIPT_DIR/icon-128.png" /usr/share/icons/hicolor/128x128/apps/curb.png
 install -Dm644 "$SCRIPT_DIR/icon-32.png" /usr/share/icons/hicolor/32x32/apps/curb.png
+if [[ -f "$SCRIPT_DIR/icon.svg" ]]; then
+  install -Dm644 "$SCRIPT_DIR/icon.svg" /usr/share/icons/hicolor/scalable/apps/curb.svg
+fi
 
 if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
   install -Dm644 "$SCRIPT_DIR/curb.service" /usr/lib/systemd/system/curb.service

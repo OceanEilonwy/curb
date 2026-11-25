@@ -38,6 +38,7 @@ install -Dm644 "$SCRIPT_DIR/curb.desktop" "$STAGE/usr/share/applications/curb.de
 install -Dm644 "$SCRIPT_DIR/org.curb.policy" "$STAGE/usr/share/polkit-1/actions/org.curb.policy"
 install -Dm644 "$REPO_ROOT/apps/curb-app/icons/128x128.png" "$STAGE/usr/share/icons/hicolor/128x128/apps/curb.png"
 install -Dm644 "$REPO_ROOT/apps/curb-app/icons/32x32.png" "$STAGE/usr/share/icons/hicolor/32x32/apps/curb.png"
+install -Dm644 "$REPO_ROOT/apps/curb-app/icons/icon.svg" "$STAGE/usr/share/icons/hicolor/scalable/apps/curb.svg"
 install -Dm644 "$REPO_ROOT/LICENSE" "$STAGE/usr/share/licenses/curb/LICENSE"
 install -Dm644 "$SCRIPT_DIR/curb.install" "$STAGE/.INSTALL"
 

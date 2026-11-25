@@ -35,5 +35,6 @@ package() {
   install -Dm644 packaging/linux/org.curb.policy "${pkgdir}/usr/share/polkit-1/actions/org.curb.policy"
   install -Dm644 apps/curb-app/icons/128x128.png "${pkgdir}/usr/share/icons/hicolor/128x128/apps/curb.png"
   install -Dm644 apps/curb-app/icons/32x32.png "${pkgdir}/usr/share/icons/hicolor/32x32/apps/curb.png"
+  install -Dm644 apps/curb-app/icons/icon.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/curb.svg"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 }

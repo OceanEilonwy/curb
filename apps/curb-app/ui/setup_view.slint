@@ -1,5 +1,5 @@
 import { Theme } from "theme.slint";
-import { CheckIcon, CloseIcon, LoadingDots, ShieldIcon, WarnIcon } from "icons.slint";
+import { CheckIcon, CloseIcon, LoadingDots, WarnIcon } from "icons.slint";
 import { CurbInput, CurbScrollView, RadioCircle } from "components.slint";
 
 export component SetupView inherits Rectangle {
@@ -35,18 +35,11 @@ export component SetupView inherits Rectangle {
                         spacing: 10px;
                         cross-axis-alignment: center;
 
-                        Rectangle {
+                        Image {
+                            source: @image-url("../icons/128x128.png");
                             width: 32px;
                             height: 32px;
-                            border-radius: 8px;
-                            background: Theme.green-soft;
-                            ShieldIcon {
-                                mode: 0;
-                                color: Theme.green-text;
-                                size: 16px;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                            }
+                            image-fit: contain;
                         }
 
                         VerticalLayout {
