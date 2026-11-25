@@ -428,6 +428,12 @@ fn evaluate_linux_packet(
         return NfqueueVerdict::Drop;
     };
 
+    // Always permit a trusted local `curb-relay` binary's TCP traffic so self-hosting
+    // `curb-relay` on the same Linux machine continues working while Curb is enforcing.
+    if ctx.tuple.proto == L4Proto::Tcp && is_trusted_curb_relay_binary(path) {
+        return NfqueueVerdict::AcceptAndMark(policy_ct_mark);
+    }
+
     let identity = inspect_linux_binary(engine.adaptors.verifier.as_ref(), path, ctx.pid);
 
     // Phase 1: fast evaluation under lock (no disk I/O).
@@ -526,6 +532,50 @@ fn evaluate_linux_packet(
         is_steam_community,
     });
     NfqueueVerdict::Drop
+}
+
+#[cfg(target_os = "linux")]
+fn is_trusted_curb_relay_binary(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    if path.file_name().and_then(|f| f.to_str()) != Some("curb-relay") {
+        return false;
+    }
+
+    // Permit a sibling `curb-relay` binary alongside `curb-service` itself
+    // (covers custom prefixes and local/dev builds).
+    if let Ok(self_exe) = std::env::current_exe() {
+        if let Some(dir) = self_exe.parent() {
+            if path == dir.join("curb-relay") {
+                return true;
+            }
+        }
+    }
+
+    // Permit packaged system installations owned by root and not group/world-writable.
+    const SYSTEM_RELAY_PATHS: &[&str] = &[
+        "/usr/bin/curb-relay",
+        "/usr/local/bin/curb-relay",
+        "/usr/sbin/curb-relay",
+        "/sbin/curb-relay",
+        "/usr/libexec/curb/curb-relay",
+        "/usr/lib/curb/curb-relay",
+    ];
+    let Some(path_str) = path.to_str() else {
+        return false;
+    };
+    if !SYSTEM_RELAY_PATHS.contains(&path_str) {
+        return false;
+    }
+
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.is_file() && meta.uid() == 0 && (meta.mode() & 0o022) == 0,
+        // During a live package upgrade the old binary may be briefly unlinked
+        // (and `read_proc_exe` strips the trailing `" (deleted)"` suffix).
+        // Non-root users cannot create files in these system directories.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -801,5 +851,44 @@ mod tests {
             !id.sha256.is_empty(),
             "expected SHA-256 computed via /proc/<pid>/exe magic symlink"
         );
+    }
+
+    #[test]
+    fn permits_trusted_curb_relay_tcp_and_rejects_untrusted_or_udp() {
+        let dir = std::env::temp_dir().join(format!("curb_lx_relay_{}", Uuid::new_v4()));
+        let engine = crate::engine::ServiceEngine::new(dir.clone()).unwrap();
+        let mark = 0x4356_0001;
+
+        let make_ctx = |proto: L4Proto, exe: &str| PacketContext {
+            tuple: PacketTuple {
+                proto,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+                src_port: 8443,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 25)),
+                dst_port: 51234,
+            },
+            pid: Some(424242),
+            ppid: Some(1),
+            exe_path: Some(PathBuf::from(exe)),
+        };
+
+        // Packaged system `/usr/bin/curb-relay` TCP reply is permitted automatically.
+        let ok = evaluate_linux_packet(&engine, &make_ctx(L4Proto::Tcp, "/usr/bin/curb-relay"), mark);
+        assert_eq!(ok, NfqueueVerdict::AcceptAndMark(mark));
+        assert!(engine.state.lock().unwrap().blocked_events.is_empty());
+
+        // UDP from `curb-relay` is NOT exempted (relay is TCP-only).
+        let udp = evaluate_linux_packet(&engine, &make_ctx(L4Proto::Udp, "/usr/bin/curb-relay"), mark);
+        assert_eq!(udp, NfqueueVerdict::Drop);
+
+        // User-controlled path spoofed as `curb-relay` must NOT be exempted.
+        let spoof = evaluate_linux_packet(
+            &engine,
+            &make_ctx(L4Proto::Tcp, "/home/user/curb-relay"),
+            mark,
+        );
+        assert_eq!(spoof, NfqueueVerdict::Drop);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
