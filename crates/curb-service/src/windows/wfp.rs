@@ -245,7 +245,8 @@ impl WfpController {
         }
         self.persistent_filter_ids = new_persistent;
 
-        // 5. Permit ONLY `curb-service.exe` to send upstream DNS (UDP/TCP 53).
+        // 5. Permit `curb-service.exe` to send upstream DNS (UDP 53) and outbound TCP
+        // (TCP DNS + P2P `curb-relay` WebSocket & encrypted backup connections while enforcing).
         // Windows DNS Client (`svchost.exe` / `Dnscache`) resolves through Curb's local
         // DNS proxy on `127.0.0.1:53` / `[::1]:53` via the loopback baseline, ensuring
         // all DNS traffic is inspected and populates `DnsCache` without allowing DNS
@@ -253,22 +254,31 @@ impl WfpController {
         let old_svc_ids: Vec<u64> = self.service_dns_filter_ids.drain(..).collect();
         self.remove_dynamic_filters(&old_svc_ids);
 
-        let dns_policy = NetworkPolicy {
-            allow_tcp: true,
+        let svc_udp_dns_policy = NetworkPolicy {
+            allow_tcp: false,
             allow_udp: true,
             dns_whitelist: None,
         };
-        let mut dns_filter_ids = Vec::new();
+        let svc_tcp_policy = NetworkPolicy {
+            allow_tcp: true,
+            allow_udp: false,
+            dns_whitelist: None,
+        };
+        let mut service_filter_ids = Vec::new();
         if let Some(svc_path) = service_exe_path {
-            match self.replace_app_dynamic(&[], svc_path, &dns_policy, None, Some(53)) {
-                Ok(ids) => dns_filter_ids.extend(ids),
-                Err(e) => warn!("Failed to permit curb-service.exe upstream DNS in WFP: {e}"),
+            match self.replace_app_dynamic(&[], svc_path, &svc_udp_dns_policy, None, Some(53)) {
+                Ok(ids) => service_filter_ids.extend(ids),
+                Err(e) => warn!("Failed to permit curb-service.exe upstream UDP DNS in WFP: {e}"),
+            }
+            match self.replace_app_dynamic(&[], svc_path, &svc_tcp_policy, None, None) {
+                Ok(ids) => service_filter_ids.extend(ids),
+                Err(e) => warn!("Failed to permit curb-service.exe outbound TCP (DNS/relay) in WFP: {e}"),
             }
         }
-        self.service_dns_filter_ids = dns_filter_ids;
+        self.service_dns_filter_ids = service_filter_ids;
 
         info!(
-            "Installed {} persistent WFP default-deny & baseline filters (+ {} service DNS filters)",
+            "Installed {} persistent WFP default-deny & baseline filters (+ {} service DNS/relay filters)",
             self.persistent_filter_ids.len(),
             self.service_dns_filter_ids.len()
         );

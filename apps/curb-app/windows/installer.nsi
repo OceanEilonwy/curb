@@ -9,7 +9,7 @@ SetCompressor /SOLID lzma
 !include "MUI2.nsh"
 
 !ifndef PRODUCT_VERSION
-  !define PRODUCT_VERSION "0.4.6"
+  !define PRODUCT_VERSION "0.4.7"
 !endif
 !ifndef BIN_DIR
   !define BIN_DIR "..\..\..\target\release"

@@ -401,7 +401,8 @@ impl LocalStandardRuntime {
             | IpcRequest::CreateInvite { .. }
             | IpcRequest::RedeemInvite { .. }
             | IpcRequest::RemoveAdmin { .. }
-            | IpcRequest::SetRelayConfig { .. } => IpcResponse::Error {
+            | IpcRequest::SetRelayConfig { .. }
+            | IpcRequest::RetryRelayConnection => IpcResponse::Error {
                 message: "Remote admin & sync hosting requires Full Protection (Curb service)."
                     .into(),
             },

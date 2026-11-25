@@ -32,6 +32,8 @@ export component SettingsView inherits CurbScrollView {
     in property <string> device-name: "This PC";
     in property <[RemoteAdminItem]> remote-admins: [];
     in-out property <string> relay-url: "";
+    in property <string> relay-status: "disabled";
+    in property <string> relay-error: "";
     in property <bool> encrypted-backup-enabled: true;
 
     in-out property <bool> adv-open: false;
@@ -52,6 +54,7 @@ export component SettingsView inherits CurbScrollView {
     callback connect-friend-clicked();
     callback remove-friend-admin(string);
     callback save-relay-config(string, bool);
+    callback retry-relay-connection();
 
     content-padding: 16px;
     content-spacing: 12px;
@@ -702,6 +705,82 @@ export component SettingsView inherits CurbScrollView {
                 }
             }
 
+            if root.is-full-service && root.relay-status != "disabled": Rectangle {
+                border-radius: 8px;
+                background: root.relay-status == "connected" ? Theme.green-soft
+                    : root.relay-status == "connecting" ? Theme.amber-soft
+                    : Theme.red-soft;
+
+                VerticalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    padding-top: 7px;
+                    padding-bottom: 7px;
+                    spacing: 4px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+
+                        Rectangle {
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: root.relay-status == "connected" ? Theme.green-switch
+                                : root.relay-status == "connecting" ? Theme.amber-solid
+                                : Theme.red-solid;
+                        }
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.relay-status == "connected" ? "Connected to sync relay"
+                                : root.relay-status == "connecting" ? "Connecting to sync relay…"
+                                : "Not connected to sync relay";
+                            color: root.relay-status == "connected" ? Theme.green-text
+                                : root.relay-status == "connecting" ? Theme.amber-text
+                                : Theme.red-text;
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+
+                        if root.relay-status != "connected": Rectangle {
+                            horizontal-stretch: 0;
+                            height: 24px;
+                            border-radius: 6px;
+                            background: friend-retry-ta.has-hover ? Theme.card-hover : Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.border;
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                cross-axis-alignment: center;
+                                Text {
+                                    text: root.relay-status == "connecting" ? "Retrying…" : "Retry";
+                                    color: Theme.text;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            friend-retry-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.retry-relay-connection(); }
+                            }
+                        }
+                    }
+
+                    if root.relay-status == "disconnected" && root.relay-error != "": Text {
+                        text: root.relay-error;
+                        color: Theme.red-text;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
             if root.remote-admins.length > 0: VerticalLayout {
                 spacing: 6px;
 
@@ -963,11 +1042,86 @@ export component SettingsView inherits CurbScrollView {
                     VerticalLayout {
                         spacing: 8px;
 
-                        Text {
-                            text: "Sync Relay (P2P Proxy)";
-                            color: Theme.text;
-                            font-size: 12px;
-                            font-weight: 600;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            cross-axis-alignment: center;
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: "Sync Relay (P2P Proxy)";
+                                color: Theme.text;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 0;
+                                height: 22px;
+                                border-radius: 11px;
+                                background: root.relay-status == "connected" ? Theme.green-soft
+                                    : root.relay-status == "connecting" ? Theme.amber-soft
+                                    : root.relay-status == "disconnected" ? Theme.red-soft
+                                    : Theme.pill;
+
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 5px;
+                                    cross-axis-alignment: center;
+
+                                    Rectangle {
+                                        width: 6px;
+                                        height: 6px;
+                                        border-radius: 3px;
+                                        background: root.relay-status == "connected" ? Theme.green-switch
+                                            : root.relay-status == "connecting" ? Theme.amber-solid
+                                            : root.relay-status == "disconnected" ? Theme.red-solid
+                                            : Theme.text-muted;
+                                    }
+
+                                    Text {
+                                        text: root.relay-status == "connected" ? "Connected"
+                                            : root.relay-status == "connecting" ? "Connecting…"
+                                            : root.relay-status == "disconnected" ? "Disconnected"
+                                            : "Off";
+                                        color: root.relay-status == "connected" ? Theme.green-text
+                                            : root.relay-status == "connecting" ? Theme.amber-text
+                                            : root.relay-status == "disconnected" ? Theme.red-text
+                                            : Theme.text-muted;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            if root.relay-status != "disabled": Rectangle {
+                                horizontal-stretch: 0;
+                                height: 22px;
+                                border-radius: 6px;
+                                background: adv-retry-ta.has-hover ? Theme.card-hover : Theme.sub;
+                                border-width: 1px;
+                                border-color: Theme.border;
+
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: "Retry";
+                                        color: Theme.text;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                adv-retry-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.retry-relay-connection(); }
+                                }
+                            }
                         }
 
                         HorizontalLayout {
@@ -977,7 +1131,7 @@ export component SettingsView inherits CurbScrollView {
                             CurbInput {
                                 horizontal-stretch: 1;
                                 text <=> root.relay-url;
-                                placeholder: "https://relay.curb.app (blank = off)";
+                                placeholder: "http://your-relay:8443 or https://relay.curb.app";
                                 enabled: root.unlocked;
                             }
 
@@ -1012,6 +1166,13 @@ export component SettingsView inherits CurbScrollView {
                                     }
                                 }
                             }
+                        }
+
+                        if root.relay-status == "disconnected" && root.relay-error != "": Text {
+                            text: root.relay-error;
+                            color: Theme.red-text;
+                            font-size: 11px;
+                            wrap: word-wrap;
                         }
 
                         HorizontalLayout {

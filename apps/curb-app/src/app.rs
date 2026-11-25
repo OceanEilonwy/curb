@@ -169,6 +169,7 @@ struct AppController {
     last_geometry: Rc<RefCell<Option<SavedWindowGeometry>>>,
 
     snapshot: Option<ServiceSnapshot>,
+    local_device_name: RefCell<String>,
     token: Option<String>,
     pending_open_allow: bool,
 
@@ -262,6 +263,7 @@ pub fn create_main_window(
         theme_dark_pref,
         last_geometry,
         snapshot: None,
+        local_device_name: RefCell::new("This PC".into()),
         token: None,
         pending_open_allow: false,
         expanded_id: Some("steam".into()),
@@ -561,6 +563,9 @@ fn wire_callbacks(win: &MainWindow, gen_id: u64) {
     win.on_save_relay_config(move |url, backup| {
         with_controller(gen_id, |c| c.handle_save_relay_config(url.into(), backup))
     });
+    win.on_retry_relay_connection(move || {
+        with_controller(gen_id, |c| c.handle_retry_relay_connection())
+    });
 
     // AllowAppSheet picker
     win.on_picker_cancel(move || with_controller(gen_id, |c| c.close_allow_sheet()));
@@ -733,11 +738,13 @@ impl AppController {
         // Remote devices, friendly device name, admins, and relay status
         let active_remote = self.backend.active_remote_peer();
         let saved_peers = self.backend.saved_remote_peers();
-        let local_name = if snap.remote_status.device_name.trim().is_empty() {
-            "This PC".to_string()
-        } else {
-            snap.remote_status.device_name.clone()
-        };
+        if active_remote.is_none() {
+            let trimmed = snap.remote_status.device_name.trim();
+            if !trimmed.is_empty() {
+                *self.local_device_name.borrow_mut() = trimmed.to_string();
+            }
+        }
+        let local_name = self.local_device_name.borrow().clone();
         let active_label = match &active_remote {
             Some(peer) => peer.name.clone(),
             None if !saved_peers.is_empty() => local_name.clone(),
@@ -777,6 +784,26 @@ impl AppController {
         if win.get_relay_url().is_empty() && !snap.remote_status.relay_url.is_empty() {
             win.set_relay_url(snap.remote_status.relay_url.clone().into());
         }
+        let relay_status_str = match snap.remote_status.relay_state {
+            curb_core::sync::RelayConnectionState::Connected => "connected",
+            curb_core::sync::RelayConnectionState::Connecting => "connecting",
+            curb_core::sync::RelayConnectionState::Disconnected => "disconnected",
+            curb_core::sync::RelayConnectionState::Disabled => {
+                if snap.remote_status.relay_connected {
+                    "connected"
+                } else {
+                    "disabled"
+                }
+            }
+        };
+        win.set_relay_status(relay_status_str.into());
+        win.set_relay_error(
+            snap.remote_status
+                .relay_error
+                .clone()
+                .unwrap_or_default()
+                .into(),
+        );
         win.set_encrypted_backup_enabled(snap.remote_status.encrypted_backup_enabled);
 
         let status_by_id: HashMap<Uuid, &curb_core::playtime::PlaytimeRuleStatus> = snap
@@ -1295,17 +1322,24 @@ impl AppController {
     fn refresh_snapshot_opts(&mut self, silent: bool) {
         let gen_id = self.gen_id;
         let backend = self.backend.clone();
+        let target_peer_id = self.backend.active_remote_peer().map(|p| p.id);
         self.backend.spawn(async move {
             let res = backend.get_snapshot().await;
             let _ = slint::invoke_from_event_loop(move || {
-                with_controller(gen_id, |c| match res {
-                    Ok(snap) => {
-                        c.snapshot = Some(snap);
-                        c.sync_all();
+                with_controller(gen_id, |c| {
+                    // Ignore stale responses if the user switched devices while this request was in flight.
+                    if c.backend.active_remote_peer().map(|p| p.id) != target_peer_id {
+                        return;
                     }
-                    Err(e) => {
-                        if !silent {
-                            c.show_toast(format!("Service error: {e}"));
+                    match res {
+                        Ok(snap) => {
+                            c.snapshot = Some(snap);
+                            c.sync_all();
+                        }
+                        Err(e) => {
+                            if !silent {
+                                c.show_toast(format!("Service error: {e}"));
+                            }
                         }
                     }
                 });
@@ -2416,8 +2450,11 @@ impl AppController {
         } else if let Ok(uuid) = Uuid::parse_str(id) {
             self.backend.set_active_remote_peer(Some(uuid));
         }
-        // Each device has its own independent lock session.
+        // Each device has its own independent lock session and relay configuration.
         self.token = None;
+        if let Some(win) = self.window() {
+            win.set_relay_url(SharedString::default());
+        }
         self.refresh_snapshot();
     }
 
@@ -2525,6 +2562,23 @@ impl AppController {
                 with_controller(gen_id, |c| match res {
                     Ok(_) => {
                         c.show_toast("Saved sync settings");
+                        c.refresh_snapshot();
+                    }
+                    Err(e) => c.show_toast(e),
+                });
+            });
+        });
+    }
+
+    fn handle_retry_relay_connection(&mut self) {
+        let gen_id = self.gen_id;
+        let backend = self.backend.clone();
+        self.backend.spawn(async move {
+            let res = backend.retry_relay_connection().await;
+            let _ = slint::invoke_from_event_loop(move || {
+                with_controller(gen_id, |c| match res {
+                    Ok(_) => {
+                        c.show_toast("Retrying relay connection…");
                         c.refresh_snapshot();
                     }
                     Err(e) => c.show_toast(e),

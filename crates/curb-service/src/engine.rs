@@ -19,8 +19,8 @@ use curb_core::store::{
     save_config, save_sync_config, save_usage,
 };
 use curb_core::sync::{
-    generate_invite_code, InviteKind, InviteToken, RemoteStatus, RemoteSyncConfig,
-    DEFAULT_RELAY_URL,
+    generate_invite_code, InviteKind, InviteToken, RelayConnectionState, RemoteStatus,
+    RemoteSyncConfig, DEFAULT_RELAY_URL,
 };
 use curb_core::verify::BinaryIdentity;
 use curb_p2p::PeerIdentity;
@@ -91,6 +91,8 @@ pub struct EngineState {
     pub sync_config: RemoteSyncConfig,
     pub peer_identity: PeerIdentity,
     pub pending_invites: HashMap<String, PendingInvite>,
+    pub relay_state: RelayConnectionState,
+    pub relay_error: Option<String>,
 }
 
 impl EngineState {
@@ -115,6 +117,11 @@ impl EngineState {
             .unwrap_or_else(|_| RemoteSyncConfig::new_default("This PC"));
         let peer_identity = PeerIdentity::load_or_create(&peer_identity_path(&data_dir))
             .unwrap_or_else(|_| PeerIdentity::generate());
+        let initial_relay_state = if sync_config.relay_url.trim().is_empty() {
+            RelayConnectionState::Disabled
+        } else {
+            RelayConnectionState::Connecting
+        };
         let mut st = Self {
             data_dir,
             config,
@@ -133,6 +140,8 @@ impl EngineState {
             sync_config,
             peer_identity,
             pending_invites: HashMap::new(),
+            relay_state: initial_relay_state,
+            relay_error: None,
         };
         st.refresh_playtime_statuses();
         Ok(st)
@@ -459,7 +468,9 @@ impl EngineState {
             device_name: self.sync_config.device_name.clone(),
             peer_id: self.peer_identity.peer_id(),
             relay_url: self.sync_config.relay_url.clone(),
-            relay_connected: !self.sync_config.relay_url.trim().is_empty(),
+            relay_connected: self.relay_state == RelayConnectionState::Connected,
+            relay_state: self.relay_state,
+            relay_error: self.relay_error.clone(),
             encrypted_backup_enabled: self.sync_config.encrypted_backup_enabled,
             revision: self.sync_config.revision,
             admins: self
@@ -532,6 +543,7 @@ pub struct ServiceEngine {
     pub adaptors: curb_core::adaptors::ServiceAdaptors,
     pub reconcile_notify: Arc<Notify>,
     pub dns_refresh_notify: Arc<Notify>,
+    pub relay_notify: Arc<Notify>,
     pub dns_v4_ready: Arc<AtomicBool>,
     pub dns_v6_ready: Arc<AtomicBool>,
     pub wfp_loop_active: Arc<AtomicBool>,
@@ -559,12 +571,19 @@ impl ServiceEngine {
             adaptors,
             reconcile_notify: Arc::new(Notify::new()),
             dns_refresh_notify: Arc::new(Notify::new()),
+            relay_notify: Arc::new(Notify::new()),
             dns_v4_ready: Arc::new(AtomicBool::new(false)),
             dns_v6_ready: Arc::new(AtomicBool::new(false)),
             wfp_loop_active: Arc::new(AtomicBool::new(false)),
             wfp_dns_sync_tx: Arc::new(wfp_dns_sync_tx),
             wfp_dns_sync_rx,
         })
+    }
+
+    pub fn set_relay_status(&self, state: RelayConnectionState, error: Option<String>) {
+        let mut guard = self.state.lock().unwrap();
+        guard.relay_state = state;
+        guard.relay_error = error;
     }
 
     pub fn notify_reconcile(&self) {
@@ -933,7 +952,10 @@ impl ServiceEngine {
                 // Auto-enable default relay if none configured yet so invites work out of the box.
                 if guard.sync_config.relay_url.trim().is_empty() {
                     guard.sync_config.relay_url = DEFAULT_RELAY_URL.to_string();
+                    guard.relay_state = RelayConnectionState::Connecting;
+                    guard.relay_error = None;
                     let _ = save_sync_config(&guard.data_dir, &guard.sync_config);
+                    self.relay_notify.notify_waiters();
                 }
                 let now = Utc::now();
                 guard.pending_invites.retain(|_, inv| inv.expires_at > now);
@@ -1071,12 +1093,37 @@ impl ServiceEngine {
                         message: "Admin session locked or expired. Please unlock again.".into(),
                     };
                 }
-                guard.sync_config.relay_url = relay_url.trim().to_string();
+                let trimmed = relay_url.trim().to_string();
+                let url_changed = guard.sync_config.relay_url != trimmed;
+                guard.sync_config.relay_url = trimmed.clone();
                 guard.sync_config.encrypted_backup_enabled = encrypted_backup_enabled;
+                if trimmed.is_empty() {
+                    guard.relay_state = RelayConnectionState::Disabled;
+                    guard.relay_error = None;
+                } else if url_changed || guard.relay_state != RelayConnectionState::Connected {
+                    guard.relay_state = RelayConnectionState::Connecting;
+                    guard.relay_error = None;
+                }
                 if let Err(e) = save_sync_config(&guard.data_dir, &guard.sync_config) {
                     return IpcResponse::Error {
                         message: format!("Failed to save sync settings: {e}"),
                     };
+                }
+                self.relay_notify.notify_waiters();
+                IpcResponse::Snapshot {
+                    data: guard.snapshot(),
+                }
+            }
+
+            IpcRequest::RetryRelayConnection => {
+                let mut guard = self.state.lock().unwrap();
+                if guard.sync_config.relay_url.trim().is_empty() {
+                    guard.relay_state = RelayConnectionState::Disabled;
+                    guard.relay_error = None;
+                } else {
+                    guard.relay_state = RelayConnectionState::Connecting;
+                    guard.relay_error = None;
+                    self.relay_notify.notify_waiters();
                 }
                 IpcResponse::Snapshot {
                     data: guard.snapshot(),

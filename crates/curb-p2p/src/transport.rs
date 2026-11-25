@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use curb_core::ipc::{IpcRequest, IpcResponse};
+use curb_core::sync::RelayConnectionState;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -71,10 +72,34 @@ fn http_to_ws_relay_url(relay_url: &str, peer_id: &str) -> String {
 pub async fn run_p2p_host<F>(
     identity: PeerIdentity,
     relay_url: String,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
     handler: Arc<F>,
 ) where
     F: Fn(String, IpcRequest) -> IpcResponse + Send + Sync + 'static,
+{
+    run_p2p_host_with_status(
+        identity,
+        relay_url,
+        shutdown,
+        Arc::new(Notify::new()),
+        Arc::new(|_, _| {}),
+        handler,
+    )
+    .await;
+}
+
+/// Like [`run_p2p_host`], but also reports live [`RelayConnectionState`] transitions
+/// (and any last error message) to `on_status` and wakes immediately when `retry` is notified.
+pub async fn run_p2p_host_with_status<F, S>(
+    identity: PeerIdentity,
+    relay_url: String,
+    mut shutdown: watch::Receiver<bool>,
+    retry: Arc<Notify>,
+    on_status: Arc<S>,
+    handler: Arc<F>,
+) where
+    F: Fn(String, IpcRequest) -> IpcResponse + Send + Sync + 'static,
+    S: Fn(RelayConnectionState, Option<String>) + Send + Sync + 'static,
 {
     let ws_url = http_to_ws_relay_url(&relay_url, &identity.peer_id());
     let mut backoff = Duration::from_secs(1);
@@ -84,13 +109,32 @@ pub async fn run_p2p_host<F>(
             break;
         }
 
-        match tokio_tungstenite::connect_async(&ws_url).await {
-            Ok((ws_stream, _)) => {
+        on_status(RelayConnectionState::Connecting, None);
+
+        let connect_outcome = tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    break;
+                }
+                continue;
+            }
+            _ = retry.notified() => {
+                backoff = Duration::from_secs(1);
+                continue;
+            }
+            res = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(&ws_url)) => res,
+        };
+
+        match connect_outcome {
+            Ok(Ok((ws_stream, _))) => {
                 info!(relay = %relay_url, peer = %identity.peer_id(), "Connected to curb-relay as P2P host");
+                on_status(RelayConnectionState::Connected, None);
                 backoff = Duration::from_secs(1);
                 let (mut tx, mut rx) = ws_stream.split();
 
                 let mut ping_interval = tokio::time::interval(Duration::from_secs(25));
+                let mut manual_retry = false;
+                let mut disconnect_reason: Option<String> = None;
                 loop {
                     tokio::select! {
                         _ = shutdown.changed() => {
@@ -99,16 +143,31 @@ pub async fn run_p2p_host<F>(
                                 return;
                             }
                         }
+                        _ = retry.notified() => {
+                            let _ = tx.close().await;
+                            backoff = Duration::from_secs(1);
+                            manual_retry = true;
+                            break;
+                        }
                         _ = ping_interval.tick() => {
                             if let Ok(json) = serde_json::to_string(&RelayWireMessage::Ping) {
-                                if tx.send(Message::Text(json.into())).await.is_err() {
+                                if let Err(e) = tx.send(Message::Text(json.into())).await {
+                                    disconnect_reason = Some(format!("Relay ping failed: {e}"));
                                     break;
                                 }
                             }
                         }
                         incoming = rx.next() => {
-                            let Some(Ok(frame)) = incoming else {
+                            let Some(frame_res) = incoming else {
+                                disconnect_reason = Some("Relay closed the connection".into());
                                 break;
+                            };
+                            let frame = match frame_res {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    disconnect_reason = Some(format!("Relay connection error: {e}"));
+                                    break;
+                                }
                             };
                             let Message::Text(text) = frame else {
                                 continue;
@@ -149,7 +208,8 @@ pub async fn run_p2p_host<F>(
                                         payload: ct,
                                     };
                                     if let Ok(json) = serde_json::to_string(&fwd) {
-                                        if tx.send(Message::Text(json.into())).await.is_err() {
+                                        if let Err(e) = tx.send(Message::Text(json.into())).await {
+                                            disconnect_reason = Some(format!("Relay send failed: {e}"));
                                             break;
                                         }
                                     }
@@ -158,9 +218,24 @@ pub async fn run_p2p_host<F>(
                         }
                     }
                 }
+                if manual_retry {
+                    continue;
+                }
+                on_status(
+                    RelayConnectionState::Disconnected,
+                    disconnect_reason.or_else(|| Some("Relay connection lost".into())),
+                );
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!(relay = %relay_url, error = %e, "Could not connect to curb-relay; retrying");
+                on_status(RelayConnectionState::Disconnected, Some(e.to_string()));
+            }
+            Err(_) => {
+                warn!(relay = %relay_url, "Timed out connecting to curb-relay; retrying");
+                on_status(
+                    RelayConnectionState::Disconnected,
+                    Some("Connection timed out".into()),
+                );
             }
         }
 
@@ -169,6 +244,9 @@ pub async fn run_p2p_host<F>(
                 if *shutdown.borrow() {
                     break;
                 }
+            }
+            _ = retry.notified() => {
+                backoff = Duration::from_secs(1);
             }
             _ = tokio::time::sleep(backoff) => {
                 backoff = (backoff * 2).min(Duration::from_secs(30));

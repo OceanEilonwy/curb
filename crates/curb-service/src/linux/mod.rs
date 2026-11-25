@@ -406,6 +406,12 @@ fn evaluate_linux_packet(
 
     use crate::engine::TrackedProcess;
 
+    // Always permit `curb-service`'s own outbound traffic (P2P `curb-relay` WebSocket,
+    // E2E-encrypted backups, etc.) so remote management works while enforcing.
+    if ctx.pid == Some(std::process::id()) {
+        return NfqueueVerdict::AcceptAndMark(policy_ct_mark);
+    }
+
     let Some(path) = &ctx.exe_path else {
         let guard = engine.state.lock().unwrap();
         if !guard.config.mode.is_actively_enforcing(Utc::now()) {

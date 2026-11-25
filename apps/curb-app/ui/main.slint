@@ -187,6 +187,8 @@ export component MainWindow inherits Window {
     in-out property <bool> device-menu-open: false;
     in property <[RemoteAdminItem]> remote-admins: [];
     in-out property <string> relay-url: "";
+    in property <string> relay-status: "disabled";
+    in property <string> relay-error: "";
     in property <bool> encrypted-backup-enabled: true;
 
     // Toast
@@ -208,6 +210,7 @@ export component MainWindow inherits Window {
     callback add-friend-admin-clicked();
     callback remove-friend-admin(string);
     callback save-relay-config(string, bool);
+    callback retry-relay-connection();
 
     // Setup callbacks
     callback setup-full();
@@ -973,6 +976,8 @@ export component MainWindow inherits Window {
                     device-name: root.active-device-name;
                     remote-admins: root.remote-admins;
                     relay-url <=> root.relay-url;
+                    relay-status: root.relay-status;
+                    relay-error: root.relay-error;
                     encrypted-backup-enabled: root.encrypted-backup-enabled;
 
                     require-unlock => { root.open-unlock(); }
@@ -991,6 +996,7 @@ export component MainWindow inherits Window {
                     connect-friend-clicked => { root.connect-friend-clicked(); }
                     remove-friend-admin(id) => { root.remove-friend-admin(id); }
                     save-relay-config(url, b) => { root.save-relay-config(url, b); }
+                    retry-relay-connection => { root.retry-relay-connection(); }
                 }
 
                 // Sticky Footer on Allowed Tab

@@ -44,6 +44,8 @@ impl DemoState {
                 remote_status: curb_core::sync::RemoteStatus {
                     device_name: "This PC".into(),
                     relay_url: curb_core::sync::DEFAULT_RELAY_URL.into(),
+                    relay_connected: true,
+                    relay_state: curb_core::sync::RelayConnectionState::Connected,
                     encrypted_backup_enabled: true,
                     ..Default::default()
                 },
@@ -694,7 +696,15 @@ impl CurbBackend {
     ) -> Result<ServiceSnapshot, String> {
         if let Some(demo) = &self.demo {
             let mut g = demo.lock().unwrap();
-            g.snapshot.remote_status.relay_url = relay_url;
+            let trimmed = relay_url.trim().to_string();
+            g.snapshot.remote_status.relay_url = trimmed.clone();
+            g.snapshot.remote_status.relay_connected = !trimmed.is_empty();
+            g.snapshot.remote_status.relay_state = if trimmed.is_empty() {
+                curb_core::sync::RelayConnectionState::Disabled
+            } else {
+                curb_core::sync::RelayConnectionState::Connected
+            };
+            g.snapshot.remote_status.relay_error = None;
             g.snapshot.remote_status.encrypted_backup_enabled = encrypted_backup_enabled;
             return Ok(g.snapshot.clone());
         }
@@ -704,6 +714,29 @@ impl CurbBackend {
                 relay_url,
                 encrypted_backup_enabled,
             })
+            .await?
+        {
+            IpcResponse::Snapshot { data } => Ok(data),
+            IpcResponse::Error { message } => Err(message),
+            _ => Err("Unexpected response from Curb".into()),
+        }
+    }
+
+    pub async fn retry_relay_connection(&self) -> Result<ServiceSnapshot, String> {
+        if let Some(demo) = &self.demo {
+            let mut g = demo.lock().unwrap();
+            let has_url = !g.snapshot.remote_status.relay_url.trim().is_empty();
+            g.snapshot.remote_status.relay_connected = has_url;
+            g.snapshot.remote_status.relay_state = if has_url {
+                curb_core::sync::RelayConnectionState::Connected
+            } else {
+                curb_core::sync::RelayConnectionState::Disabled
+            };
+            g.snapshot.remote_status.relay_error = None;
+            return Ok(g.snapshot.clone());
+        }
+        match self
+            .dispatch_request(IpcRequest::RetryRelayConnection)
             .await?
         {
             IpcResponse::Snapshot { data } => Ok(data),

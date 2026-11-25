@@ -238,6 +238,8 @@ pub enum IpcRequest {
         relay_url: String,
         encrypted_backup_enabled: bool,
     },
+    /// Immediately retries the `curb-service` connection to the configured `curb-relay`.
+    RetryRelayConnection,
 }
 
 /// Responses returned by `curb-service`.

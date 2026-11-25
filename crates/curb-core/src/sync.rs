@@ -211,6 +211,21 @@ impl RemoteSyncConfig {
     }
 }
 
+/// Live WebSocket connection state between `curb-service` and `curb-relay`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayConnectionState {
+    /// No relay URL is configured (remote sync disabled).
+    #[default]
+    Disabled,
+    /// Attempting to establish (or re-establish) the WebSocket connection.
+    Connecting,
+    /// Actively connected to the configured `curb-relay`.
+    Connected,
+    /// Last connection attempt failed (retrying in the background).
+    Disconnected,
+}
+
 /// Read-only status returned to `curb-app` for rendering the device name, admins, and Settings -> Advanced.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct RemoteStatus {
@@ -218,6 +233,10 @@ pub struct RemoteStatus {
     pub peer_id: String,
     pub relay_url: String,
     pub relay_connected: bool,
+    #[serde(default)]
+    pub relay_state: RelayConnectionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_error: Option<String>,
     pub encrypted_backup_enabled: bool,
     pub revision: u64,
     pub admins: Vec<RemoteAdminSummary>,
