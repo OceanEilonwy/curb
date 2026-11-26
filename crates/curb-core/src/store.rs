@@ -201,6 +201,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn external_change_ignores_own_writes_but_detects_foreign_ones() {
+        let dir = std::env::temp_dir().join(format!("curb_store_ext_{}", uuid::Uuid::new_v4()));
+        let cfg = Config::default();
+        save_config(&dir, &cfg).unwrap();
+        let path = config_path(&dir);
+        let mut seen = file_mtime(&path);
+
+        // Our own write is not an external change.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        save_config(&dir, &cfg).unwrap();
+        assert!(!external_change(&path, &mut seen));
+
+        // A write by "another process" (plain fs::write, not recorded) is.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&path, fs::read(&path).unwrap()).unwrap();
+        assert!(external_change(&path, &mut seen));
+        assert!(!external_change(&path, &mut seen));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn round_trips_config_atomically() {
         let dir = std::env::temp_dir().join(format!("curb_store_{}", uuid::Uuid::new_v4()));
         let mut cfg = Config::default();

@@ -1,6 +1,6 @@
 # Maintainer: Curb Maintainers <https://github.com/OceanEilonwy/curb>
 pkgname=curb-relay
-pkgver=0.4.12
+pkgver=0.4.14
 pkgrel=1
 pkgdesc="Zero-knowledge P2P relay and optional E2E-encrypted backup server for Curb"
 arch=('x86_64' 'aarch64')
