@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 
 use std::time::{Duration, Instant};
 
-use crate::ruleset::merge_policy_mark;
+use crate::ruleset::{merge_policy_mark, CURB_POLICY_MARK_CLEAR, CURB_POLICY_MARK_MASK};
 
 const NETLINK_NETFILTER: libc::c_int = 12;
 const SOL_NETLINK: libc::c_int = 270;
@@ -360,6 +360,33 @@ fn send_cfg_params(sock: &NetlinkSocket, seq: &mut u32, queue_num: u16) -> io::R
     recv_ack(sock, seq, queue_num, expected_seq)
 }
 
+/// Resolves an `NfqueueVerdict` into `(nf_verdict, optional_nfqa_mark)`.
+/// If a packet already carries the exact Curb policy mark we are about to stamp via
+/// `NF_REPEAT`, downgrade to `NF_ACCEPT` (clearing Curb's top byte while preserving
+/// lower 24-bit VPN/routing marks) so a generation-transition race can never cause an
+/// infinite `NF_REPEAT` loop.
+fn resolve_verdict_and_mark(existing_mark: u32, verdict: NfqueueVerdict) -> (u32, Option<u32>) {
+    match verdict {
+        NfqueueVerdict::Drop => (NF_DROP, None),
+        NfqueueVerdict::Accept => {
+            if (existing_mark & CURB_POLICY_MARK_MASK) != 0 {
+                (NF_ACCEPT, Some(existing_mark & CURB_POLICY_MARK_CLEAR))
+            } else {
+                (NF_ACCEPT, None)
+            }
+        }
+        NfqueueVerdict::AcceptAndMark(m) => {
+            let masked_new = m & CURB_POLICY_MARK_MASK;
+            let masked_existing = existing_mark & CURB_POLICY_MARK_MASK;
+            if masked_new != 0 && masked_existing == masked_new {
+                (NF_ACCEPT, Some(existing_mark & CURB_POLICY_MARK_CLEAR))
+            } else {
+                (NF_REPEAT, Some(merge_policy_mark(existing_mark, m)))
+            }
+        }
+    }
+}
+
 fn send_verdict(
     sock: &NetlinkSocket,
     seq: &mut u32,
@@ -369,11 +396,7 @@ fn send_verdict(
     verdict: NfqueueVerdict,
 ) -> io::Result<()> {
     *seq = seq.wrapping_add(1);
-    let (nf_verdict, mark) = match verdict {
-        NfqueueVerdict::Drop => (NF_DROP, None),
-        NfqueueVerdict::Accept => (NF_ACCEPT, None),
-        NfqueueVerdict::AcceptAndMark(m) => (NF_REPEAT, Some(merge_policy_mark(existing_mark, m))),
-    };
+    let (nf_verdict, mark) = resolve_verdict_and_mark(existing_mark, verdict);
     let mut payload = [0u8; 8];
     payload[0..4].copy_from_slice(&nf_verdict.to_be_bytes());
     payload[4..8].copy_from_slice(&packet_id.to_be_bytes());
@@ -425,7 +448,32 @@ where
     let sock = NetlinkSocket::open()?;
     let mut seq = 0u32;
 
-    send_cfg_cmd(&sock, &mut seq, queue_num, NFQNL_CFG_CMD_BIND, 0, true)?;
+    // Retry briefly on EEXIST/EBUSY/EADDRINUSE so rapid protection off->on toggles
+    // never fail while the kernel finishes releasing the previous netlink queue binding.
+    let mut bind_err = None;
+    for attempt in 0..8 {
+        match send_cfg_cmd(&sock, &mut seq, queue_num, NFQNL_CFG_CMD_BIND, 0, true) {
+            Ok(()) => {
+                bind_err = None;
+                break;
+            }
+            Err(e) => {
+                let transient = matches!(
+                    e.raw_os_error(),
+                    Some(libc::EEXIST | libc::EBUSY | libc::EADDRINUSE)
+                );
+                if transient && attempt < 7 && !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(50));
+                    bind_err = Some(e);
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    if let Some(e) = bind_err {
+        return Err(e);
+    }
     send_cfg_params(&sock, &mut seq, queue_num)?;
 
     ready.store(true, Ordering::Release);
@@ -752,5 +800,35 @@ mod tests {
         assert_eq!(tuple.proto, L4Proto::Tcp);
         assert_eq!(tuple.src_port, 51234);
         assert_eq!(tuple.dst_port, 443);
+    }
+
+    #[test]
+    fn resolve_verdict_prevents_nf_repeat_loop_and_preserves_vpn_mark() {
+        let vpn_mark = 0x0008_CA6C;
+        let gen_mark = 0x0200_0000;
+
+        // First pass: packet has no Curb policy mark -> NF_REPEAT with merged mark.
+        assert_eq!(
+            resolve_verdict_and_mark(vpn_mark, NfqueueVerdict::AcceptAndMark(gen_mark)),
+            (NF_REPEAT, Some(gen_mark | vpn_mark))
+        );
+
+        // If the packet somehow re-enters the queue already carrying the same Curb
+        // policy mark (e.g. during a ruleset generation reload), downgrade to NF_ACCEPT
+        // and clear only Curb's top byte so it never loops infinitely.
+        assert_eq!(
+            resolve_verdict_and_mark(gen_mark | vpn_mark, NfqueueVerdict::AcceptAndMark(gen_mark)),
+            (NF_ACCEPT, Some(vpn_mark))
+        );
+
+        // Plain Accept also strips any stale Curb top-byte mark while preserving VPN mark.
+        assert_eq!(
+            resolve_verdict_and_mark(gen_mark | vpn_mark, NfqueueVerdict::Accept),
+            (NF_ACCEPT, Some(vpn_mark))
+        );
+        assert_eq!(
+            resolve_verdict_and_mark(vpn_mark, NfqueueVerdict::Accept),
+            (NF_ACCEPT, None)
+        );
     }
 }

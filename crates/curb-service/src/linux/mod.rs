@@ -189,7 +189,17 @@ pub async fn run_linux_enforcement_loop(
             }
 
             if !nfqueue_ready.load(Ordering::Acquire) {
-                warn!("NFQUEUE verifier is not bound yet; skipping nftables apply to avoid blackholing traffic");
+                warn!("NFQUEUE verifier did not bind in time; tearing down thread before retry");
+                if let Some(flag) = nfqueue_stop.take() {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                nfqueue_ready.store(false, Ordering::Release);
+                if let Some(handle) = nfqueue_handle.take() {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = handle.join();
+                    })
+                    .await;
+                }
                 continue;
             }
 
@@ -234,15 +244,24 @@ pub async fn run_linux_enforcement_loop(
                     policy_ct_mark: candidate_mark,
                 };
 
-                // Run `nft -f -` on a blocking thread and ONLY commit `current_policy_mark`
-                // after `nft` succeeds so NFQUEUE never sends `NF_REPEAT` with a mark that
-                // the active kernel chain does not recognize.
+                // When entering enforcing mode (no `table inet curb` active yet), pre-stage
+                // `candidate_mark` before `nft -f -` so the very first packets queued after
+                // the table appears immediately carry the new generation's mark. If `nft`
+                // fails, roll back to `prev_mark`.
+                let prev_mark = current_policy_mark.load(Ordering::Acquire);
+                if entering_enforcing {
+                    current_policy_mark.store(candidate_mark, Ordering::Release);
+                }
                 let baseline_for_apply = baseline.clone();
                 let apply_res = tokio::task::spawn_blocking(move || {
                     firewall.apply_enforcing_with_options(&baseline_for_apply, opts)
                 })
                 .await
                 .unwrap_or_else(|e| Err(format!("nft apply task failed: {e}")));
+
+                if apply_res.is_err() && entering_enforcing {
+                    current_policy_mark.store(prev_mark, Ordering::Release);
+                }
 
                 match commit_policy_mark_on_apply(
                     apply_res,
@@ -299,32 +318,61 @@ pub async fn run_linux_enforcement_loop(
                 });
                 last_connectivity_prewarm = Some(Instant::now());
             }
-        } else if currently_enforcing {
-            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || firewall.purge_all()).await {
-                warn!("Failed to remove Linux nftables ruleset: {e}");
-            }
-            currently_enforcing = false;
-            last_baseline = None;
-            last_config_version = None;
-            last_redirect_ipv6 = None;
-            last_connectivity_prewarm = None;
-            {
-                let mut guard = engine.state.lock().unwrap();
-                guard.active_wfp_filters = 0;
-                guard.tracked_processes.clear();
+        } else {
+            let stale_table = !currently_enforcing
+                && last_drift_check.elapsed() >= NFT_DRIFT_CHECK
+                && {
+                    last_drift_check = Instant::now();
+                    tokio::task::spawn_blocking(move || firewall.is_applied())
+                        .await
+                        .unwrap_or(false)
+                };
+
+            if currently_enforcing || stale_table {
+                let purge_res = tokio::task::spawn_blocking(move || firewall.purge_all())
+                    .await
+                    .unwrap_or_else(|e| Err(format!("nft purge task failed: {e}")));
+
+                if let Err(e) = purge_res {
+                    warn!("Failed to remove Linux nftables ruleset: {e}");
+                    let still_applied = tokio::task::spawn_blocking(move || firewall.is_applied())
+                        .await
+                        .unwrap_or(true);
+                    if still_applied {
+                        // Keep `currently_enforcing = true` and leave the NFQUEUE thread
+                        // alive (returning `Accept` while not enforcing) so packets are
+                        // never blackholed while we retry `purge_all()` on the next tick.
+                        currently_enforcing = true;
+                        continue;
+                    }
+                }
+
+                currently_enforcing = false;
+                last_baseline = None;
+                last_config_version = None;
+                last_redirect_ipv6 = None;
+                last_connectivity_prewarm = None;
+                last_drift_check = Instant::now();
+                {
+                    let mut guard = engine.state.lock().unwrap();
+                    guard.active_wfp_filters = 0;
+                    guard.tracked_processes.clear();
+                }
+                info!("Linux nftables enforcement paused/disabled; full network access restored");
             }
 
-            if let Some(flag) = nfqueue_stop.take() {
-                flag.store(true, Ordering::Relaxed);
+            if nfqueue_handle.is_some() {
+                if let Some(flag) = nfqueue_stop.take() {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                nfqueue_ready.store(false, Ordering::Release);
+                if let Some(handle) = nfqueue_handle.take() {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = handle.join();
+                    })
+                    .await;
+                }
             }
-            nfqueue_ready.store(false, Ordering::Release);
-            if let Some(handle) = nfqueue_handle.take() {
-                let _ = tokio::task::spawn_blocking(move || {
-                    let _ = handle.join();
-                })
-                .await;
-            }
-            info!("Linux nftables enforcement paused/disabled; full network access restored");
         }
     }
 

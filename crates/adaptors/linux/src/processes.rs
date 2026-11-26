@@ -148,7 +148,7 @@ impl ProcessDiscoverer for LinuxProcessDiscoverer {
         };
         let desktop_names = curb_xdg::load_desktop_names();
 
-        let mut grouped: HashMap<String, (u32, bool)> = HashMap::new();
+        let mut grouped: HashMap<String, (u32, bool, u32)> = HashMap::new();
         let Ok(entries) = fs::read_dir("/proc") else {
             return Vec::new();
         };
@@ -177,16 +177,31 @@ impl ProcessDiscoverer for LinuxProcessDiscoverer {
             }
 
             let is_fg = visible_pids.contains(&pid);
-            let slot = grouped.entry(full_path).or_insert((0, false));
+            let slot = grouped.entry(full_path).or_insert((0, false, pid));
             slot.0 += 1;
             slot.1 = slot.1 || is_fg;
         }
 
         let mut apps = Vec::new();
-        for (path_str, (count, has_window)) in grouped {
+        for (path_str, (count, has_window, sample_pid)) in grouped {
             let path = Path::new(&path_str);
-            let Ok(identity) = peek_binary(path) else {
-                continue;
+            let identity = match peek_binary(path) {
+                Ok(id) => id,
+                Err(_) => {
+                    // Flatpak/Snap/container processes report mount-namespace paths like
+                    // `/app/lib/librewolf/librewolf` that do not exist on the host; fall
+                    // back to `/proc/<pid>/exe` while preserving the logical path & name.
+                    let proc_exe = std::path::PathBuf::from(format!("/proc/{sample_pid}/exe"));
+                    let Ok(mut id) = peek_binary(&proc_exe) else {
+                        continue;
+                    };
+                    id.filename = path
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    id.path = path_str.clone();
+                    id
+                }
             };
             let exe_lower = identity.filename.to_ascii_lowercase();
             let display_name = desktop_names

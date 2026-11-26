@@ -1,5 +1,5 @@
 Name:           curb-relay
-Version:        %{?_version}%{!?_version:0.4.10}
+Version:        %{?_version}%{!?_version:0.4.11}
 Release:        1%{?dist}
 Summary:        Zero-knowledge P2P relay and encrypted backup server for Curb
 License:        AGPL-3.0-or-later

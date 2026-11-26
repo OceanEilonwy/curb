@@ -209,6 +209,7 @@ mod runtime {
         let mut dns_redirected = false;
         let mut last_dns_attempt: Option<Instant> = None;
         let mut last_ncsi_prewarm: Option<Instant> = None;
+        let mut last_good_upstreams: Vec<SocketAddr> = Vec::new();
 
         let notify = engine.reconcile_notify.clone();
         let dns_refresh = engine.dns_refresh_notify.clone();
@@ -255,15 +256,19 @@ mod runtime {
                 });
                 if let Err(e) = res {
                     warn!("Failed to apply WFP default-deny baseline: {e}");
+                    if !was_enforcing {
+                        continue;
+                    }
+                } else {
+                    if !was_enforcing {
+                        last_config_version = None;
+                        st.last_event_poll = Utc::now();
+                    }
+                    st.ncsi_ips = None; // force NCSI permit refresh
+                    was_enforcing = true;
+                    engine.set_wfp_loop_active(true);
+                    last_baseline = Some(baseline.clone());
                 }
-                if !was_enforcing {
-                    last_config_version = None;
-                    st.last_event_poll = Utc::now();
-                }
-                st.ncsi_ips = None; // force NCSI permit refresh
-                was_enforcing = true;
-                engine.set_wfp_loop_active(true);
-                last_baseline = Some(baseline.clone());
             } else if !enforcing && was_enforcing {
                 engine.set_wfp_loop_active(false);
                 let dns_restored = tokio::task::block_in_place(|| {
@@ -292,6 +297,11 @@ mod runtime {
             }
 
             if !enforcing {
+                if curb_core::store::dns_backup_path(&data_dir).exists() {
+                    let dir = data_dir.clone();
+                    let _ = tokio::task::spawn_blocking(move || restore_original_adapter_dns(&dir))
+                        .await;
+                }
                 continue;
             }
 
@@ -331,7 +341,12 @@ mod runtime {
                 .unwrap_or_else(|e| Err(e.to_string()));
                 match res {
                     Ok(upstreams) => {
-                        engine.set_upstream_dns(upstreams);
+                        if !upstreams.is_empty() {
+                            last_good_upstreams = upstreams.clone();
+                            engine.set_upstream_dns(upstreams);
+                        } else if !last_good_upstreams.is_empty() {
+                            engine.set_upstream_dns(last_good_upstreams.clone());
+                        }
                         if !dns_redirected {
                             dns_redirected = true;
                         }

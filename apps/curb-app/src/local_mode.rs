@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -18,6 +19,8 @@ use tokio::runtime::Handle;
 use uuid::Uuid;
 
 pub const LOCAL_PROXY_PORT: u16 = 48921;
+
+static STANDARD_PROXY_CLEARED: AtomicBool = AtomicBool::new(false);
 
 /// Returns the per-user Curb data directory (`%LOCALAPPDATA%\Curb` on Windows, XDG on Linux).
 pub fn user_data_dir() -> PathBuf {
@@ -87,6 +90,7 @@ impl LocalStandardRuntime {
         if should_start {
             self.spawn_proxy();
         }
+        STANDARD_PROXY_CLEARED.store(false, Ordering::Release);
         set_windows_user_proxy(enforcing);
         Ok(token)
     }
@@ -102,6 +106,7 @@ impl LocalStandardRuntime {
         if should_start {
             self.spawn_proxy();
         }
+        STANDARD_PROXY_CLEARED.store(false, Ordering::Release);
         set_windows_user_proxy(enforcing);
     }
 
@@ -110,11 +115,17 @@ impl LocalStandardRuntime {
         set_windows_user_proxy(false);
     }
 
-    /// Disables Standard Mode's HKCU proxy and removes `standard_mode.flag` once
+    /// Disables Standard Mode's HKCU/desktop proxy and removes `standard_mode.flag` once
     /// Full Protection (`CurbService`) is active so the two modes never conflict.
     pub fn clear_standard_mode_for_full_service(&self) {
-        set_windows_user_proxy(false);
-        let _ = std::fs::remove_file(standard_mode_marker(&user_data_dir()));
+        let marker = standard_mode_marker(&user_data_dir());
+        let had_marker = marker.exists();
+        if had_marker || !STANDARD_PROXY_CLEARED.swap(true, Ordering::AcqRel) {
+            set_windows_user_proxy(false);
+            if had_marker {
+                let _ = std::fs::remove_file(marker);
+            }
+        }
     }
 
     fn spawn_proxy(&self) {
