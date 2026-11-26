@@ -11,7 +11,7 @@ use curb_games::{resolve_watched_dirs, DetectorRegistry, MatchState};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::engine::ServiceEngine;
+use crate::engine::{LockExt, ServiceEngine};
 
 /// Background 2-second loop that tracks active Steam game playtime, runs per-title
 /// match-state detectors, persists `usage.json`, and notifies firewall reconciliation
@@ -31,7 +31,7 @@ pub async fn run_playtime_loop(
         tokio::select! {
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
-                    let guard = engine.state.lock().unwrap();
+                    let guard = engine.state.lock_or_recover();
                     let _ = save_usage(&guard.data_dir, &guard.usage_ledger);
                     break;
                 }
@@ -46,7 +46,7 @@ pub async fn run_playtime_loop(
 
         // Snapshot rule definitions needed for sampling without holding the state lock.
         let (steam_root, global_enabled, rule_infos) = {
-            let guard = engine.state.lock().unwrap();
+            let guard = engine.state.lock_or_recover();
             let root =
                 curb_preset_steam::SteamPresetPlugin::find_steam_root(guard.preset_host.as_ref());
             let infos: Vec<_> = guard
@@ -90,7 +90,7 @@ pub async fn run_playtime_loop(
             let Some(limit) = limit_opt else {
                 // Still expose first_class metadata for Steam games so the UI badge renders.
                 if first_class {
-                    let mut guard = engine.state.lock().unwrap();
+                    let mut guard = engine.state.lock_or_recover();
                     guard.playtime_statuses.insert(
                         rule_id,
                         PlaytimeRuleStatus {
@@ -156,7 +156,7 @@ pub async fn run_playtime_loop(
                             detector.reset();
                         }
                     }
-                    let mut guard = engine.state.lock().unwrap();
+                    let mut guard = engine.state.lock_or_recover();
                     guard.usage_ledger.on_game_exit(rule_id);
                     persist_now = true;
                 }
@@ -167,7 +167,7 @@ pub async fn run_playtime_loop(
                 running_rules.insert(rule_id);
             }
 
-            let mut guard = engine.state.lock().unwrap();
+            let mut guard = engine.state.lock_or_recover();
             let prev_expired = guard
                 .playtime_statuses
                 .get(&rule_id)
@@ -255,7 +255,7 @@ pub async fn run_playtime_loop(
 
         if persist_now || (any_running_limited && last_persist.elapsed() >= Duration::from_secs(30))
         {
-            let guard = engine.state.lock().unwrap();
+            let guard = engine.state.lock_or_recover();
             if let Err(e) = save_usage(&guard.data_dir, &guard.usage_ledger) {
                 warn!("Failed to persist usage.json: {e}");
             }

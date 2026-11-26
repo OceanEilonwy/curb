@@ -179,10 +179,13 @@ impl SessionManager {
         }
     }
 
-    /// Attempts to unlock with `password` against `record`, returning a random session token.
-    pub fn unlock(&mut self, password: &str, record: &AuthRecord) -> Result<String> {
-        let now = Instant::now();
+    /// Returns an error while the failed-attempt back-off window is active.
+    ///
+    /// Together with [`Self::finish_unlock`] this lets callers run the (slow) Argon2
+    /// verification *outside* any shared lock.
+    pub fn check_throttle(&self) -> Result<()> {
         if let Some(until) = self.locked_until {
+            let now = Instant::now();
             if now < until {
                 let secs = (until - now).as_secs().max(1);
                 return Err(CurbError::Auth(format!(
@@ -190,30 +193,46 @@ impl SessionManager {
                 )));
             }
         }
+        Ok(())
+    }
 
-        if !verify_password(password, record) {
+    /// Records the outcome of a password verification performed by the caller.
+    /// On success issues a session token; on failure applies exponential back-off.
+    pub fn finish_unlock(&mut self, verified: bool) -> Result<String> {
+        self.check_throttle()?;
+        if !verified {
             self.failed_attempts = self.failed_attempts.saturating_add(1);
             if self.failed_attempts >= 3 {
                 let shift = (self.failed_attempts - 3).min(6);
                 let backoff = Duration::from_secs(2u64 << shift);
-                self.locked_until = Some(now + backoff);
+                self.locked_until = Some(Instant::now() + backoff);
             }
             return Err(CurbError::Auth("Incorrect Curb password.".into()));
         }
-
         self.failed_attempts = 0;
         self.locked_until = None;
-        self.prune_expired();
+        Ok(self.issue_token())
+    }
 
+    /// Issues a fresh session token without verifying anything (first-run setup).
+    pub fn issue_token(&mut self) -> String {
+        self.prune_expired();
         let token = generate_token();
         self.sessions.insert(
             token.clone(),
             ActiveSession {
-                expires_at: now + self.idle_timeout,
+                expires_at: Instant::now() + self.idle_timeout,
                 idle_timeout: self.idle_timeout,
             },
         );
-        Ok(token)
+        token
+    }
+
+    /// Attempts to unlock with `password` against `record`, returning a random session token.
+    pub fn unlock(&mut self, password: &str, record: &AuthRecord) -> Result<String> {
+        self.check_throttle()?;
+        let ok = verify_password(password, record);
+        self.finish_unlock(ok)
     }
 
     /// Attempts to unlock as a paired remote friend identified by `peer_id` using their
@@ -224,39 +243,20 @@ impl SessionManager {
         password: &str,
         record: &AuthRecord,
     ) -> Result<(String, Uuid)> {
-        let now = Instant::now();
-        if let Some(until) = self.locked_until {
-            if now < until {
-                let secs = (until - now).as_secs().max(1);
-                return Err(CurbError::Auth(format!(
-                    "Too many failed attempts. Try again in {secs}s."
-                )));
+        self.check_throttle()?;
+        let admin = record.verify_peer(peer_id, password);
+        self.finish_unlock_peer(admin)
+    }
+
+    /// Records the outcome of a peer verification performed by the caller.
+    pub fn finish_unlock_peer(&mut self, admin: Option<Uuid>) -> Result<(String, Uuid)> {
+        match admin {
+            Some(id) => {
+                let token = self.finish_unlock(true)?;
+                Ok((token, id))
             }
+            None => self.finish_unlock(false).map(|t| (t, Uuid::nil())),
         }
-
-        let Some(admin_id) = record.verify_peer(peer_id, password) else {
-            self.failed_attempts = self.failed_attempts.saturating_add(1);
-            if self.failed_attempts >= 3 {
-                let shift = (self.failed_attempts - 3).min(6);
-                let backoff = Duration::from_secs(2u64 << shift);
-                self.locked_until = Some(now + backoff);
-            }
-            return Err(CurbError::Auth("Incorrect Curb password.".into()));
-        };
-
-        self.failed_attempts = 0;
-        self.locked_until = None;
-        self.prune_expired();
-
-        let token = generate_token();
-        self.sessions.insert(
-            token.clone(),
-            ActiveSession {
-                expires_at: now + self.idle_timeout,
-                idle_timeout: self.idle_timeout,
-            },
-        );
-        Ok((token, admin_id))
     }
 
     /// Validates `token` and refreshes its sliding idle expiration window.

@@ -25,14 +25,49 @@ pub fn enable_local_dns_redirect(
     } else {
         let mut existing = read_json::<Vec<AdapterDnsBackup>>(&backup_file).unwrap_or_default();
         let mut added = 0usize;
+        let mut refreshed = 0usize;
         for item in snapshot {
-            if !existing
+            let pos = existing
                 .iter()
-                .any(|e| e.interface_index == item.interface_index)
-            {
+                .position(|e| e.interface_index == item.interface_index);
+            if let Some(i) = pos {
+                let e = &mut existing[i];
+                // Snapshots exclude loopback servers, so a family that is currently
+                // redirected yields no entries. For each family that *does* have real
+                // servers now, refresh the backup (the network / DHCP lease may have
+                // changed) while leaving the other family's saved servers untouched.
+                let is_v4 = |s: &String| s.trim().parse::<std::net::Ipv4Addr>().is_ok();
+                let new_v4: Vec<String> =
+                    item.original_servers.iter().filter(|s| is_v4(s)).cloned().collect();
+                let new_v6: Vec<String> =
+                    item.original_servers.iter().filter(|s| !is_v4(s)).cloned().collect();
+                let old_v4: Vec<String> =
+                    e.original_servers.iter().filter(|s| is_v4(s)).cloned().collect();
+                let old_v6: Vec<String> =
+                    e.original_servers.iter().filter(|s| !is_v4(s)).cloned().collect();
+                let mut changed = false;
+                if !new_v4.is_empty() && new_v4 != old_v4 {
+                    e.v4_static = item.v4_static;
+                    changed = true;
+                }
+                if !new_v6.is_empty() && new_v6 != old_v6 {
+                    e.v6_static = item.v6_static;
+                    changed = true;
+                }
+                if changed {
+                    let mut merged = if new_v4.is_empty() { old_v4 } else { new_v4 };
+                    merged.extend(if new_v6.is_empty() { old_v6 } else { new_v6 });
+                    e.original_servers = merged;
+                    refreshed += 1;
+                }
+            } else {
                 existing.push(item);
                 added += 1;
             }
+        }
+        if refreshed > 0 {
+            let _ = write_json_atomic(&backup_file, &existing);
+            info!("Refreshed DNS backup for {refreshed} adapter(s) whose DNS changed");
         }
         if added > 0 {
             let _ = write_json_atomic(&backup_file, &existing);

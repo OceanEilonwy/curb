@@ -123,6 +123,79 @@ pub fn resolve_pid_for_socket(
     find_pid_by_socket_inode(inode?)
 }
 
+/// Returns `true` if the packet's 4-tuple belongs to a *kernel-owned* socket: a root-owned
+/// socket with inode 0 (e.g. WireGuard's UDP socket, NFS/CIFS/iSCSI transports). These have
+/// no process, so PID attribution can never succeed and default-deny would otherwise drop
+/// them. TCP `TIME_WAIT` entries (also inode 0) are excluded.
+pub fn is_kernel_owned_socket(
+    is_tcp: bool,
+    src_ip: IpAddr,
+    src_port: u16,
+    dst_ip: IpAddr,
+    dst_port: u16,
+) -> bool {
+    let paths: &[&str] = match (is_tcp, src_ip) {
+        (true, IpAddr::V4(_)) => &["/proc/net/tcp", "/proc/net/tcp6"],
+        (true, IpAddr::V6(_)) => &["/proc/net/tcp6"],
+        (false, IpAddr::V4(_)) => &["/proc/net/udp", "/proc/net/udp6"],
+        (false, IpAddr::V6(_)) => &["/proc/net/udp6"],
+    };
+    for path in paths {
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        let (s_ip, d_ip) = if path.ends_with('6') {
+            match (src_ip, dst_ip) {
+                (IpAddr::V4(a), IpAddr::V4(b)) => {
+                    (IpAddr::V6(a.to_ipv6_mapped()), IpAddr::V6(b.to_ipv6_mapped()))
+                }
+                other => other,
+            }
+        } else {
+            (src_ip, dst_ip)
+        };
+        if table_has_kernel_socket(&content, is_tcp, s_ip, src_port, d_ip, dst_port) {
+            return true;
+        }
+    }
+    false
+}
+
+fn table_has_kernel_socket(
+    table: &str,
+    is_tcp: bool,
+    src_ip: IpAddr,
+    src_port: u16,
+    dst_ip: IpAddr,
+    dst_port: u16,
+) -> bool {
+    for line in table.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 10 {
+            continue;
+        }
+        if cols[9] != "0" || cols[7] != "0" {
+            continue;
+        }
+        // TCP state 06 = TIME_WAIT (inode 0 but not a live kernel socket).
+        if is_tcp && cols[3] == "06" {
+            continue;
+        }
+        let (Some((local_ip, local_port)), Some((rem_ip, rem_port))) =
+            (parse_proc_net_addr(cols[1]), parse_proc_net_addr(cols[2]))
+        else {
+            continue;
+        };
+        if local_port != src_port || !(local_ip == src_ip || local_ip.is_unspecified()) {
+            continue;
+        }
+        if (rem_ip == dst_ip && rem_port == dst_port) || rem_port == 0 {
+            return true;
+        }
+    }
+    false
+}
+
 /// Searches `/proc/net/{tcp,tcp6,udp,udp6}` text for a matching socket inode.
 pub fn find_socket_inode(
     proc_net_table: &str,
@@ -281,6 +354,22 @@ mod tests {
             s.push_str(&format!("{word:08X}"));
         }
         s
+    }
+
+    #[test]
+    fn detects_root_owned_inode_zero_udp_socket_but_not_user_or_timewait() {
+        let hdr = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+        // 0.0.0.0:51820 unconnected, uid 0, inode 0 (WireGuard-style kernel socket)
+        let wg = format!("{hdr}   0: 00000000:CA6C 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 0 2 0000000000000000 0\n");
+        let dst = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        let src = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
+        assert!(table_has_kernel_socket(&wg, false, src, 0xCA6C, dst, 51820));
+        // user-owned (uid 1000) is not kernel owned
+        let user = wg.replace("     0        0 0 2", "  1000        0 0 2");
+        assert!(!table_has_kernel_socket(&user, false, src, 0xCA6C, dst, 51820));
+        // TIME_WAIT TCP entry is excluded
+        let tw = format!("{hdr}   0: 0501A8C0:CA6C 090071CB:01BB 06 00000000:00000000 00:00000000 00000000     0        0 0 2 0000000000000000 0\n");
+        assert!(!table_has_kernel_socket(&tw, true, src, 0xCA6C, dst, 443));
     }
 
     #[test]

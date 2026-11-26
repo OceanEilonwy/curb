@@ -7,7 +7,7 @@ use curb_core::sync::{RelayConnectionState, SyncBundle};
 use tokio::sync::{watch, Notify};
 use tracing::{debug, warn};
 
-use crate::engine::ServiceEngine;
+use crate::engine::{LockExt, ServiceEngine};
 
 /// Background P2P host & optional encrypted backup supervisor for `curb-service`.
 ///
@@ -43,7 +43,7 @@ pub async fn run_p2p_supervisor(
         };
 
         let (relay_url, backup_enabled, rev, identity, maybe_bundle, group_key) = {
-            let guard = engine.state.lock().unwrap();
+            let guard = engine.state.lock_or_recover();
             let relay = guard.sync_config.relay_url.trim().to_string();
             let backup_on = guard.sync_config.encrypted_backup_enabled;
             let rev = guard.sync_config.revision;

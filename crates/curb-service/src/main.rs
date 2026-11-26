@@ -293,6 +293,32 @@ async fn run_service_runtime(
         });
     }
 
+    // Pick up edits made to config/usage/auth files by `curb-cli` while we are running.
+    {
+        let watch_engine = engine.clone();
+        let mut watch_shutdown = shutdown_rx.clone();
+        let mut seen = engine::ExternalFileState::seeded(&data_dir);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let eng = watch_engine.clone();
+                        seen = tokio::task::spawn_blocking(move || {
+                            eng.reload_external_changes(&mut seen);
+                            seen
+                        })
+                        .await
+                        .unwrap_or_default();
+                    }
+                    _ = watch_shutdown.changed() => {
+                        if *watch_shutdown.borrow() { break; }
+                    }
+                }
+            }
+        });
+    }
+
     let playtime_task = {
         let pt_engine = engine.clone();
         let pt_shutdown = shutdown_rx.clone();

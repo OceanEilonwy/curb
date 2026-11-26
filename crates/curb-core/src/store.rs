@@ -123,6 +123,44 @@ fn default_hostname() -> String {
         .unwrap_or_else(|| "This PC".into())
 }
 
+fn own_writes() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, std::time::SystemTime>>
+{
+    static OWN: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, std::time::SystemTime>>,
+    > = std::sync::OnceLock::new();
+    OWN.get_or_init(Default::default)
+}
+
+fn record_own_write(path: &Path) {
+    if let Ok(m) = fs::metadata(path).and_then(|m| m.modified()) {
+        if let Ok(mut map) = own_writes().lock() {
+            map.insert(path.to_path_buf(), m);
+        }
+    }
+}
+
+/// Returns the file's current modification time (used to seed [`external_change`]).
+pub fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Returns `true` when `path` was modified since `last_seen` by something other than this
+/// process's own [`write_json_atomic`] (e.g. `curb-cli` editing config while the service
+/// is running). Updates `last_seen`.
+pub fn external_change(path: &Path, last_seen: &mut Option<std::time::SystemTime>) -> bool {
+    let Some(m) = file_mtime(path) else {
+        return false;
+    };
+    if *last_seen == Some(m) {
+        return false;
+    }
+    *last_seen = Some(m);
+    own_writes()
+        .lock()
+        .map(|map| map.get(path) != Some(&m))
+        .unwrap_or(true)
+}
+
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let bytes = fs::read(path)?;
     Ok(serde_json::from_slice(&bytes)?)
@@ -142,7 +180,10 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let mut last_err = None;
     for attempt in 0..10 {
         match fs::rename(&tmp, path) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                record_own_write(path);
+                return Ok(());
+            }
             Err(e) => {
                 last_err = Some(e);
                 if attempt < 9 {

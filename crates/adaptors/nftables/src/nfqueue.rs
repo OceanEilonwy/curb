@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use curb_linux::proc_net::{read_proc_exe, read_proc_ppid, resolve_pid_for_socket};
+use curb_linux::proc_net::{
+    is_kernel_owned_socket, read_proc_exe, read_proc_ppid, resolve_pid_for_socket,
+};
 use tracing::{debug, info, warn};
 
 use std::time::{Duration, Instant};
@@ -83,6 +85,9 @@ pub struct PacketContext {
     pub pid: Option<u32>,
     pub ppid: Option<u32>,
     pub exe_path: Option<PathBuf>,
+    /// `true` when no process owns the socket because it is a root-owned kernel socket
+    /// (WireGuard, NFS, CIFS, ...), as opposed to PID resolution simply failing.
+    pub kernel_socket: bool,
 }
 
 struct NetlinkSocket {
@@ -517,11 +522,21 @@ where
                                 tuple.dst_ip,
                                 tuple.dst_port,
                             );
+                            let exe_path = pid.and_then(read_proc_exe);
+                            let kernel_socket = pid.is_none()
+                                && is_kernel_owned_socket(
+                                    tuple.proto == L4Proto::Tcp,
+                                    tuple.src_ip,
+                                    tuple.src_port,
+                                    tuple.dst_ip,
+                                    tuple.dst_port,
+                                );
                             let ctx = PacketContext {
                                 tuple,
                                 pid,
                                 ppid: pid.and_then(read_proc_ppid),
-                                exe_path: pid.and_then(read_proc_exe),
+                                exe_path,
+                                kernel_socket,
                             };
                             decide(&ctx)
                         }

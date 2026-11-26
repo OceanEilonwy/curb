@@ -560,18 +560,21 @@ impl WfpController {
         Ok(ids)
     }
 
-    pub fn remove_dynamic_filters(&self, ids: &[u64]) {
+    /// Deletes dynamic filters in one transaction. Returns `false` if the transaction
+    /// failed (filters may still be installed) so callers can retry.
+    pub fn remove_dynamic_filters(&self, ids: &[u64]) -> bool {
         if ids.is_empty() {
-            return;
+            return true;
         }
-        let _ = with_transaction(self.dynamic_engine, || {
+        with_transaction(self.dynamic_engine, || {
             for &id in ids {
                 unsafe {
                     let _ = FwpmFilterDeleteById0(self.dynamic_engine, id);
                 }
             }
             Ok::<(), String>(())
-        });
+        })
+        .is_ok()
     }
 
     pub fn clear_persistent_filters(&mut self) {

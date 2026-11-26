@@ -522,6 +522,26 @@ fn path_is_within_normalized_dir(exe_path: &str, norm_dir_with_slash: &str) -> b
     norm_exe.starts_with(norm_dir_with_slash)
 }
 
+/// Last-seen modification times of the persisted files watched for external edits.
+#[derive(Debug, Default)]
+pub struct ExternalFileState {
+    config: Option<std::time::SystemTime>,
+    usage: Option<std::time::SystemTime>,
+    auth: Option<std::time::SystemTime>,
+}
+
+impl ExternalFileState {
+    /// Seeds the state with the files' current mtimes so startup is not treated as a change.
+    pub fn seeded(data_dir: &std::path::Path) -> Self {
+        use curb_core::store::{auth_path, config_path, file_mtime, usage_path};
+        Self {
+            config: file_mtime(&config_path(data_dir)),
+            usage: file_mtime(&usage_path(data_dir)),
+            auth: file_mtime(&auth_path(data_dir)),
+        }
+    }
+}
+
 /// Poison-tolerant locking: a panic on one thread must not cascade into every other
 /// user of the shared state (which would kill the enforcement loops and leave the
 /// firewall in whatever state it was in).
@@ -586,6 +606,51 @@ impl ServiceEngine {
         let mut guard = self.state.lock_or_recover();
         guard.relay_state = state;
         guard.relay_error = error;
+    }
+
+    /// Polls `config.json`, `usage.json` and `auth.json` for edits made by another process
+    /// (e.g. `curb-cli enable`, `playtime disable-all`, `set-password` while the service is
+    /// running) and adopts them, so the service neither ignores nor later overwrites them.
+    pub fn reload_external_changes(&self, seen: &mut ExternalFileState) {
+        use curb_core::store::{auth_path, config_path, external_change, usage_path};
+        let data_dir = self.state.lock_or_recover().data_dir.clone();
+        let mut changed = false;
+
+        if external_change(&config_path(&data_dir), &mut seen.config) {
+            if let Ok(cfg) = load_config(&data_dir) {
+                let mut guard = self.state.lock_or_recover();
+                if guard.config != cfg {
+                    guard.config = cfg;
+                    guard.config_version = guard.config_version.wrapping_add(1);
+                    guard.sync_config.revision = guard.sync_config.revision.saturating_add(1);
+                    guard.refresh_playtime_statuses();
+                    let _ = save_sync_config(&guard.data_dir, &guard.sync_config);
+                    changed = true;
+                    tracing::info!("Reloaded config.json modified by another process");
+                }
+            }
+        }
+        if external_change(&usage_path(&data_dir), &mut seen.usage) {
+            if let Ok(ledger) = load_usage(&data_dir) {
+                let mut guard = self.state.lock_or_recover();
+                guard.usage_ledger = ledger;
+                guard.refresh_playtime_statuses();
+                guard.config_version = guard.config_version.wrapping_add(1);
+                changed = true;
+                tracing::info!("Reloaded usage.json modified by another process");
+            }
+        }
+        if external_change(&auth_path(&data_dir), &mut seen.auth) {
+            if let Ok(auth) = load_auth(&data_dir) {
+                let mut guard = self.state.lock_or_recover();
+                guard.auth = auth;
+                guard.sessions.lock_all();
+                tracing::info!("Reloaded auth.json modified by another process; sessions revoked");
+            }
+        }
+        if changed {
+            self.notify_reconcile();
+        }
     }
 
     pub fn notify_reconcile(&self) {

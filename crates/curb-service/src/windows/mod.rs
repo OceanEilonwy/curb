@@ -40,7 +40,7 @@ mod runtime {
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    use crate::engine::{ServiceEngine, TrackedProcess};
+    use crate::engine::{LockExt, ServiceEngine, TrackedProcess};
 
     use super::adapter_dns::{enable_local_dns_redirect, restore_original_adapter_dns};
     use super::etw::ImageLockTable;
@@ -153,7 +153,7 @@ mod runtime {
         // later emergency-disable), make sure no stale default-deny filters or loopback
         // DNS settings are left behind that could strand the machine offline.
         let starts_enforcing = {
-            let guard = engine.state.lock().unwrap();
+            let guard = engine.state.lock_or_recover();
             guard.config.mode.is_actively_enforcing(Utc::now())
         };
         if !starts_enforcing {
@@ -207,6 +207,11 @@ mod runtime {
         let mut last_config_version: Option<u64> = None;
         let mut last_dns_version: u64 = 0;
         let mut dns_redirected = false;
+        let mut logged_dns_wait = false;
+        // Adapter DNS redirection shells out to PowerShell (slow, no timeout), so it runs
+        // as a background task polled each tick instead of blocking this loop.
+        let mut dns_task: Option<tokio::task::JoinHandle<Result<Vec<SocketAddr>, String>>> =
+            None;
         let mut last_dns_attempt: Option<Instant> = None;
         let mut last_ncsi_prewarm: Option<Instant> = None;
         let mut last_good_upstreams: Vec<SocketAddr> = Vec::new();
@@ -238,7 +243,7 @@ mod runtime {
             }
 
             let (enforcing, baseline, config_version, dns_version) = {
-                let mut guard = engine.state.lock().unwrap();
+                let mut guard = engine.state.lock_or_recover();
                 guard.dns_cache.prune_expired();
                 (
                     guard.config.mode.is_actively_enforcing(Utc::now()),
@@ -247,6 +252,18 @@ mod runtime {
                     guard.dns_cache.version(),
                 )
             };
+
+            // Do not install default-deny until the local DNS proxy is listening: with it
+            // down (e.g. port 53 already taken) every DNS lookup would fail while Curb
+            // claims to be protecting. Mirrors the Linux behaviour.
+            if enforcing && !was_enforcing && !engine.is_dns_v4_ready() {
+                if !logged_dns_wait {
+                    warn!("Waiting for local DNS proxy on 127.0.0.1:53 before enabling WFP enforcement");
+                    logged_dns_wait = true;
+                }
+                continue;
+            }
+            logged_dns_wait = false;
 
             // Handle transitions between Enforcing and Paused/Disabled (or baseline changes).
             if enforcing && (!was_enforcing || last_baseline.as_ref() != Some(&baseline)) {
@@ -271,6 +288,11 @@ mod runtime {
                 }
             } else if !enforcing && was_enforcing {
                 engine.set_wfp_loop_active(false);
+                // An in-flight redirect must finish before we restore, or it could
+                // re-point adapters at 127.0.0.1 after the restore.
+                if let Some(h) = dns_task.take() {
+                    let _ = h.await;
+                }
                 let dns_restored = tokio::task::block_in_place(|| {
                     // Remove persistent default-deny BLOCK filters FIRST so active TCP/UDP
                     // connections are never hit by an ALE reauthorization wave against
@@ -330,15 +352,11 @@ mod runtime {
                 Some(t) if !dns_redirected => t.elapsed() >= DNS_REDIRECT_RETRY,
                 Some(t) => t.elapsed() >= DNS_REDIRECT_REFRESH,
             };
-            if due && engine.is_dns_v4_ready() {
-                last_dns_attempt = Some(Instant::now());
-                let include_v6 = engine.is_dns_v6_ready();
-                let dir = data_dir.clone();
-                let res = tokio::task::spawn_blocking(move || {
-                    enable_local_dns_redirect(&dir, include_v6)
-                })
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
+            if dns_task.as_ref().is_some_and(|h| h.is_finished()) {
+                let res = match dns_task.take() {
+                    Some(h) => h.await.unwrap_or_else(|e| Err(e.to_string())),
+                    None => Err(String::new()),
+                };
                 match res {
                     Ok(upstreams) => {
                         if !upstreams.is_empty() {
@@ -353,6 +371,14 @@ mod runtime {
                     }
                     Err(e) => warn!("Failed to point adapter DNS to 127.0.0.1: {e}"),
                 }
+            }
+            if due && dns_task.is_none() && engine.is_dns_v4_ready() {
+                last_dns_attempt = Some(Instant::now());
+                let include_v6 = engine.is_dns_v6_ready();
+                let dir = data_dir.clone();
+                dns_task = Some(tokio::task::spawn_blocking(move || {
+                    enable_local_dns_redirect(&dir, include_v6)
+                }));
             }
 
             // Keep Microsoft NCSI probe IPs warm before their 600s cache TTL floor expires
@@ -382,6 +408,9 @@ mod runtime {
         // stranded with 127.0.0.1 adapter DNS or persistent default-deny filters while the
         // service is stopped.
         engine.set_wfp_loop_active(false);
+        if let Some(h) = dns_task.take() {
+            let _ = h.await;
+        }
         if was_enforcing {
             info!("CurbService stopping — restoring adapter DNS and clearing WFP filters");
             tokio::task::block_in_place(|| {
@@ -398,7 +427,7 @@ mod runtime {
     /// Windows NCSI probes when a new DNS answer arrives, skipping process enumeration.
     fn sync_dns_scoped_filters(engine: &ServiceEngine, wfp: &WfpController, st: &mut LoopState) {
         let (updates, ncsi_enabled, ncsi_ips) = {
-            let guard = engine.state.lock().unwrap();
+            let guard = engine.state.lock_or_recover();
             let mut updates = Vec::new();
             for (key, g) in &st.groups {
                 if g.network.dns_whitelist.is_some() {
@@ -457,8 +486,12 @@ mod runtime {
 
         let svchost = system32_path("svchost.exe");
         let res = if !ncsi_enabled {
-            wfp.remove_dynamic_filters(&st.ncsi_filter_ids);
-            Ok(Vec::new())
+            if wfp.remove_dynamic_filters(&st.ncsi_filter_ids) {
+                Ok(Vec::new())
+            } else {
+                // Keep tracking the ids so the next tick retries the removal.
+                Ok(st.ncsi_filter_ids.clone())
+            }
         } else {
             wfp.replace_app_dynamic_ports(
                 &st.ncsi_filter_ids,
@@ -494,13 +527,13 @@ mod runtime {
         // Start from previously tracked processes that are still alive (unless rules
         // changed, in which case every process is re-evaluated against the new rules).
         let prev_tracked = {
-            let mut guard = engine.state.lock().unwrap();
+            let mut guard = engine.state.lock_or_recover();
             std::mem::take(&mut guard.tracked_processes)
         };
 
         let mut pending: Vec<(u32, u32, String)> = Vec::new();
         {
-            let mut guard = engine.state.lock().unwrap();
+            let mut guard = engine.state.lock_or_recover();
             for (pid, ppid, path) in &live {
                 if !config_changed {
                     if let Some(t) = prev_tracked.get(pid) {
@@ -534,7 +567,7 @@ mod runtime {
                     }
                     continue;
                 };
-                let mut guard = engine.state.lock().unwrap();
+                let mut guard = engine.state.lock_or_recover();
                 // Backfill or refresh exe_path on user rules when a direct match is observed
                 // (e.g. when a self-updating app moves to a new versioned subfolder like
                 // `app-1.0.9175\Discord.exe`) so install-directory helper matching and
@@ -593,7 +626,7 @@ mod runtime {
         }
 
         if rules_updated {
-            let guard = engine.state.lock().unwrap();
+            let guard = engine.state.lock_or_recover();
             let _ = save_config(&guard.data_dir, &guard.config);
         }
 
@@ -602,7 +635,7 @@ mod runtime {
         // apps keep 0ms WFP startup filters while user-writable directories (`%LOCALAPPDATA%`,
         // Steam game libraries) cannot be exploited via closed-binary rename-and-swap.
         let candidate_paths = {
-            let guard = engine.state.lock().unwrap();
+            let guard = engine.state.lock_or_recover();
             let mut paths = Vec::new();
             for p in guard.candidate_rule_paths() {
                 if is_admin_protected_path(&p)
@@ -628,7 +661,7 @@ mod runtime {
                 continue;
             };
             let verdict = {
-                let guard = engine.state.lock().unwrap();
+                let guard = engine.state.lock_or_recover();
                 guard.evaluate_process(None, &identity)
             };
             if let Some((_label, network, _sub)) = verdict {
@@ -640,7 +673,7 @@ mod runtime {
 
         // Compute desired per-executable groups and NCSI permit IPs.
         let (desired, tracked_pids, ncsi_enabled, ncsi_ips) = {
-            let guard = engine.state.lock().unwrap();
+            let guard = engine.state.lock_or_recover();
             let mut pids: Vec<&u32> = guard.tracked_processes.keys().collect();
             pids.sort();
             let mut desired: HashMap<String, DesiredGroup> = HashMap::new();
@@ -674,7 +707,7 @@ mod runtime {
         for pid in &tracked_pids {
             if !st.locked_pids.contains(pid) {
                 let path = {
-                    let guard = engine.state.lock().unwrap();
+                    let guard = engine.state.lock_or_recover();
                     guard.tracked_processes.get(pid).map(|t| t.identity.path.clone())
                 };
                 if let Some(p) = path {
@@ -703,8 +736,17 @@ mod runtime {
             .cloned()
             .collect();
         for key in obsolete {
-            if let Some(g) = st.groups.remove(&key) {
-                wfp.remove_dynamic_filters(&g.filter_ids);
+            // Only forget the group once its filters are really gone; otherwise keep it so
+            // the next tick retries instead of leaving a stale PERMIT behind.
+            let removed = st
+                .groups
+                .get(&key)
+                .map(|g| wfp.remove_dynamic_filters(&g.filter_ids))
+                .unwrap_or(true);
+            if removed {
+                st.groups.remove(&key);
+            } else {
+                warn!("Failed to remove dynamic WFP filters for {key}; will retry");
             }
         }
 
@@ -802,7 +844,7 @@ mod runtime {
                     .and_then(|i| i.signature)
                     .map(|s| s.subject_cn);
 
-                let mut guard = engine.state.lock().unwrap();
+                let mut guard = engine.state.lock_or_recover();
                 let destination = guard
                     .dns_cache
                     .domain_for_ip(remote_ip)
@@ -831,7 +873,7 @@ mod runtime {
         // Update active filter count for UI status reporting.
         let total: usize = st.groups.values().map(|g| g.filter_ids.len()).sum::<usize>()
             + st.ncsi_filter_ids.len();
-        let mut guard = engine.state.lock().unwrap();
+        let mut guard = engine.state.lock_or_recover();
         guard.active_wfp_filters = total;
         let _ = st.groups.values().map(|g| &g.exe_path).count();
     }
@@ -847,7 +889,7 @@ mod runtime {
         for pid in st.locked_pids.drain() {
             st.locks.release_pid(pid);
         }
-        let mut guard = engine.state.lock().unwrap();
+        let mut guard = engine.state.lock_or_recover();
         guard.tracked_processes.clear();
         guard.active_wfp_filters = 0;
     }

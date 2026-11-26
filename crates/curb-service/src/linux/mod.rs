@@ -1,4 +1,7 @@
 #[cfg(target_os = "linux")]
+use crate::engine::LockExt;
+
+#[cfg(target_os = "linux")]
 pub async fn run_linux_enforcement_loop(
     engine: crate::engine::ServiceEngine,
     dns_proxy_port: u16,
@@ -34,11 +37,22 @@ pub async fn run_linux_enforcement_loop(
     let dns_mgr = LinuxDnsManager;
     let firewall = NftablesFirewall;
 
+    // If this task ever unwinds (panic) while the process stays alive, make sure the
+    // `queue num` ruleset is not left installed with no NFQUEUE reader (which would
+    // blackhole all TCP/UDP). Also runs harmlessly on normal shutdown.
+    struct PurgeOnDrop(NftablesFirewall);
+    impl Drop for PurgeOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.purge_all();
+        }
+    }
+    let _purge_guard = PurgeOnDrop(firewall);
+
     // If Curb starts while not enforcing (e.g. after a crash/SIGKILL while enforcing
     // followed by emergency-disable or pause), purge any stale `table inet curb` so the
     // machine is never stranded offline.
     let starts_enforcing = {
-        let guard = engine.state.lock().unwrap();
+        let guard = engine.state.lock_or_recover();
         guard.config.mode.is_actively_enforcing(Utc::now())
     };
     if !starts_enforcing {
@@ -68,6 +82,10 @@ pub async fn run_linux_enforcement_loop(
     let mut last_drift_check = Instant::now();
     let mut last_connectivity_prewarm: Option<Instant> = None;
     let mut logged_dns_wait = false;
+    let mut dns_down_since: Option<Instant> = None;
+    // How long the DNS proxy may be down while enforcing before we fail open (remove the
+    // nft redirect) rather than leave every DNS lookup pointing at a dead port.
+    const DNS_DOWN_FAIL_OPEN: Duration = Duration::from_secs(10);
 
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -99,7 +117,7 @@ pub async fn run_linux_enforcement_loop(
         }
 
         let (should_enforce, baseline, config_version) = {
-            let mut guard = engine.state.lock().unwrap();
+            let mut guard = engine.state.lock_or_recover();
             guard.dns_cache.prune_expired();
             guard.tracked_processes.retain(|&pid, _| pid_exists(pid));
             (
@@ -119,8 +137,26 @@ pub async fn run_linux_enforcement_loop(
                     );
                     logged_dns_wait = true;
                 }
+                if currently_enforcing {
+                    let since = *dns_down_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= DNS_DOWN_FAIL_OPEN {
+                        warn!("Local DNS proxy has been down for {DNS_DOWN_FAIL_OPEN:?}; removing nftables ruleset so DNS keeps working (will re-apply when the proxy is back)");
+                        if let Ok(Ok(_)) =
+                            tokio::task::spawn_blocking(move || firewall.purge_all()).await
+                        {
+                            currently_enforcing = false;
+                            last_baseline = None;
+                            last_config_version = None;
+                            last_redirect_ipv6 = None;
+                            last_connectivity_prewarm = None;
+                            engine.state.lock_or_recover().active_wfp_filters = 0;
+                            dns_down_since = None;
+                        }
+                    }
+                }
                 continue;
             }
+            dns_down_since = None;
             logged_dns_wait = false;
 
             // Watchdog: if the NFQUEUE thread exited unexpectedly, purge nftables immediately
@@ -131,7 +167,7 @@ pub async fn run_linux_enforcement_loop(
                     if currently_enforcing {
                         let _ = tokio::task::spawn_blocking(move || firewall.purge_all()).await;
                         currently_enforcing = false;
-                        engine.state.lock().unwrap().active_wfp_filters = 0;
+                        engine.state.lock_or_recover().active_wfp_filters = 0;
                     }
                     if let Some(h) = nfqueue_handle.take() {
                         let _ = h.join();
@@ -274,14 +310,14 @@ pub async fn run_linux_enforcement_loop(
                         if bump_generation {
                             // Clear tracked_processes so disabled/deleted rules or expired playtime
                             // limits cannot leave stale subprocess inheritance behind.
-                            engine.state.lock().unwrap().tracked_processes.clear();
+                            engine.state.lock_or_recover().tracked_processes.clear();
                         }
                         currently_enforcing = true;
                         last_baseline = Some(baseline.clone());
                         last_config_version = Some(config_version);
                         last_redirect_ipv6 = Some(redirect_ipv6);
                         last_drift_check = Instant::now();
-                        engine.state.lock().unwrap().active_wfp_filters = 1;
+                        engine.state.lock_or_recover().active_wfp_filters = 1;
                         info!(
                             "Linux nftables default-deny enforcement active (queue {CURB_NFQUEUE_NUM}, DNS redirect -> :{dns_proxy_port}, ipv6={redirect_ipv6}, gen={policy_generation})"
                         );
@@ -354,7 +390,7 @@ pub async fn run_linux_enforcement_loop(
                 last_connectivity_prewarm = None;
                 last_drift_check = Instant::now();
                 {
-                    let mut guard = engine.state.lock().unwrap();
+                    let mut guard = engine.state.lock_or_recover();
                     guard.active_wfp_filters = 0;
                     guard.tracked_processes.clear();
                 }
@@ -461,9 +497,14 @@ fn evaluate_linux_packet(
     }
 
     let Some(path) = &ctx.exe_path else {
-        let guard = engine.state.lock().unwrap();
+        let guard = engine.state.lock_or_recover();
         if !guard.config.mode.is_actively_enforcing(Utc::now()) {
             return NfqueueVerdict::Accept;
+        }
+        // Root-owned kernel sockets (WireGuard, NFS, CIFS, ...) have no process to
+        // attribute; dropping them would break VPNs and network mounts.
+        if ctx.kernel_socket {
+            return NfqueueVerdict::AcceptAndMark(policy_ct_mark);
         }
         debug!(
             "NFQUEUE drop (unresolved PID/exe) for {:?} {}:{} -> {}:{}",
@@ -486,7 +527,7 @@ fn evaluate_linux_packet(
 
     // Phase 1: fast evaluation under lock (no disk I/O).
     let (direct_match, proton_candidates) = {
-        let guard = engine.state.lock().unwrap();
+        let guard = engine.state.lock_or_recover();
         if !guard.config.mode.is_actively_enforcing(Utc::now()) {
             return NfqueueVerdict::Accept;
         }
@@ -519,7 +560,7 @@ fn evaluate_linux_packet(
         evaluate_proton_candidates(engine.adaptors.verifier.as_ref(), ctx.pid, &proton_candidates)
     });
 
-    let mut guard = engine.state.lock().unwrap();
+    let mut guard = engine.state.lock_or_recover();
     if !guard.config.mode.is_actively_enforcing(Utc::now()) {
         return NfqueueVerdict::Accept;
     }
@@ -772,7 +813,7 @@ mod tests {
         let engine = crate::engine::ServiceEngine::new(dir.clone()).unwrap();
         let probe_ip = IpAddr::V4(Ipv4Addr::new(95, 217, 163, 246));
         {
-            let mut guard = engine.state.lock().unwrap();
+            let mut guard = engine.state.lock_or_recover();
             guard.dns_cache.record("ping.archlinux.org", &[probe_ip], 300);
         }
 
@@ -787,6 +828,7 @@ mod tests {
             pid: Some(1234),
             ppid: Some(1),
             exe_path: Some(PathBuf::from("/usr/bin/NetworkManager")),
+            kernel_socket: false,
         };
 
         let verdict = evaluate_linux_packet(&engine, &ctx, 0x4356_0001);
@@ -796,12 +838,41 @@ mod tests {
     }
 
     #[test]
+    fn accepts_kernel_owned_socket_but_drops_unresolved_user_socket() {
+        let dir = std::env::temp_dir().join(format!("curb_lx_kern_{}", Uuid::new_v4()));
+        let engine = crate::engine::ServiceEngine::new(dir.clone()).unwrap();
+        let mut ctx = PacketContext {
+            tuple: PacketTuple {
+                proto: L4Proto::Udp,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+                src_port: 51820,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
+                dst_port: 51820,
+            },
+            pid: None,
+            ppid: None,
+            exe_path: None,
+            kernel_socket: true,
+        };
+        assert_eq!(
+            evaluate_linux_packet(&engine, &ctx, 0x4356_0001),
+            NfqueueVerdict::AcceptAndMark(0x4356_0001)
+        );
+        ctx.kernel_socket = false;
+        assert_eq!(
+            evaluate_linux_packet(&engine, &ctx, 0x4356_0001),
+            NfqueueVerdict::Drop
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn annotates_blocked_event_with_cached_domain_and_steam_community_flag() {
         let dir = std::env::temp_dir().join(format!("curb_lx_blk_{}", Uuid::new_v4()));
         let engine = crate::engine::ServiceEngine::new(dir.clone()).unwrap();
         let comm_ip = IpAddr::V4(Ipv4Addr::new(23, 55, 10, 10));
         {
-            let mut guard = engine.state.lock().unwrap();
+            let mut guard = engine.state.lock_or_recover();
             guard.dns_cache.record("steamcommunity.com", &[comm_ip], 300);
         }
 
@@ -816,12 +887,13 @@ mod tests {
             pid: Some(9999),
             ppid: Some(1),
             exe_path: Some(PathBuf::from("/usr/bin/curl")),
+            kernel_socket: false,
         };
 
         let verdict = evaluate_linux_packet(&engine, &ctx, 0x4356_0001);
         assert_eq!(verdict, NfqueueVerdict::Drop);
 
-        let guard = engine.state.lock().unwrap();
+        let guard = engine.state.lock_or_recover();
         let ev = guard.blocked_events.front().expect("recorded blocked event");
         assert_eq!(ev.destination, "steamcommunity.com:443");
         assert!(ev.is_steam_community);
@@ -918,12 +990,13 @@ mod tests {
             pid: Some(424242),
             ppid: Some(1),
             exe_path: Some(PathBuf::from(exe)),
+            kernel_socket: false,
         };
 
         // Packaged system `/usr/bin/curb-relay` TCP reply is permitted automatically.
         let ok = evaluate_linux_packet(&engine, &make_ctx(L4Proto::Tcp, "/usr/bin/curb-relay"), mark);
         assert_eq!(ok, NfqueueVerdict::AcceptAndMark(mark));
-        assert!(engine.state.lock().unwrap().blocked_events.is_empty());
+        assert!(engine.state.lock_or_recover().blocked_events.is_empty());
 
         // UDP from `curb-relay` is NOT exempted (relay is TCP-only).
         let udp = evaluate_linux_packet(&engine, &make_ctx(L4Proto::Udp, "/usr/bin/curb-relay"), mark);
