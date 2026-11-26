@@ -2,6 +2,48 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+/// Linux NetworkManager / ConnMan / desktop connectivity-check probe domains
+/// across common distributions (Arch/CachyOS/EndeavourOS, Manjaro, Fedora,
+/// Ubuntu/Pop!_OS/Mint, Debian, openSUSE, GNOME, KDE, ConnMan, Firefox/Chromium).
+pub const LINUX_CONNECTIVITY_DOMAINS: &[&str] = &[
+    "ping.archlinux.org",
+    "ping.manjaro.org",
+    "fedoraproject.org",
+    "connectivity-check.ubuntu.com",
+    "network.debian.org",
+    "conncheck.opensuse.org",
+    "nmcheck.gnome.org",
+    "networkcheck.kde.org",
+    "ipv4.connman.net",
+    "ipv6.connman.net",
+    "detectportal.firefox.com",
+    "connectivitycheck.gstatic.com",
+];
+
+/// OS connectivity-check probe domains (Windows NCSI + Linux NetworkManager/ConnMan)
+/// used to keep Wi-Fi / Ethernet adapters from showing "No Internet" or "Limited".
+pub const NCSI_DOMAINS: &[&str] = &[
+    // Windows NCSI
+    "www.msftconnecttest.com",
+    "ipv6.msftconnecttest.com",
+    "dns.msftncsi.com",
+    "www.msftncsi.com",
+    "ipv6.msftncsi.com",
+    // Linux NetworkManager / ConnMan / desktop connectivity checks
+    "ping.archlinux.org",
+    "ping.manjaro.org",
+    "fedoraproject.org",
+    "connectivity-check.ubuntu.com",
+    "network.debian.org",
+    "conncheck.opensuse.org",
+    "nmcheck.gnome.org",
+    "networkcheck.kde.org",
+    "ipv4.connman.net",
+    "ipv6.connman.net",
+    "detectportal.firefox.com",
+    "connectivitycheck.gstatic.com",
+];
+
 /// Normalizes a domain name (lowercase, trims trailing dot and whitespace).
 pub fn normalize_domain(domain: &str) -> String {
     domain.trim().trim_end_matches('.').to_ascii_lowercase()

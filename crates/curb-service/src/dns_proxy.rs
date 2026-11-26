@@ -11,7 +11,7 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::engine::ServiceEngine;
+use crate::engine::{LockExt, ServiceEngine};
 
 const MAX_CONCURRENT_DNS_QUERIES: usize = 256;
 
@@ -237,21 +237,20 @@ pub async fn prewarm_ncsi_dns(engine: &ServiceEngine, fallback_upstream: SocketA
 /// when Curb transitions into enforcing mode.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub async fn prewarm_linux_connectivity_dns(engine: &ServiceEngine, fallback_upstream: SocketAddr) {
-    let probes = [
-        ("ping.archlinux.org.", RecordType::A),
-        ("ping.archlinux.org.", RecordType::AAAA),
-        ("fedoraproject.org.", RecordType::A),
-        ("fedoraproject.org.", RecordType::AAAA),
-        ("connectivity-check.ubuntu.com.", RecordType::A),
-        ("connectivity-check.ubuntu.com.", RecordType::AAAA),
-        ("nmcheck.gnome.org.", RecordType::A),
-        ("nmcheck.gnome.org.", RecordType::AAAA),
-        ("networkcheck.kde.org.", RecordType::A),
-        ("networkcheck.kde.org.", RecordType::AAAA),
-        ("ipv4.connman.net.", RecordType::A),
-    ];
+    let mut probes: Vec<(String, RecordType)> = Vec::new();
+    for host in curb_core::dns::LINUX_CONNECTIVITY_DOMAINS {
+        let fqdn = format!("{host}.");
+        if *host == "ipv4.connman.net" {
+            probes.push((fqdn, RecordType::A));
+        } else if *host == "ipv6.connman.net" {
+            probes.push((fqdn, RecordType::AAAA));
+        } else {
+            probes.push((fqdn.clone(), RecordType::A));
+            probes.push((fqdn, RecordType::AAAA));
+        }
+    }
     for (idx, (host, rtype)) in probes.iter().enumerate() {
-        let Ok(name) = Name::from_utf8(*host) else {
+        let Ok(name) = Name::from_utf8(host.as_str()) else {
             continue;
         };
         let mut msg = Message::new();
@@ -279,14 +278,14 @@ async fn handle_dns_packet(
         .unwrap_or_default();
 
     let allowed = {
-        let guard = engine.state.lock().unwrap();
+        let guard = engine.state.lock_or_recover();
         guard.is_dns_query_allowed(&queried_domain)
     };
 
     if !allowed {
         debug!("DNS blocked: {queried_domain}");
         {
-            let mut guard = engine.state.lock().unwrap();
+            let mut guard = engine.state.lock_or_recover();
             let clean_domain = queried_domain.trim_end_matches('.').to_string();
             let hint = guard.presets.classify_blocked_domain(&clean_domain);
             let (app_name, is_steam_community) = match hint {
@@ -350,7 +349,7 @@ async fn handle_dns_packet(
                 .map(|s| (*s).to_string())
                 .collect();
             let sync_target = {
-                let mut guard = engine.state.lock().unwrap();
+                let mut guard = engine.state.lock_or_recover();
                 for (owner, target) in &cnames {
                     guard.dns_cache.record_cname(owner, &queried_domain);
                     guard.dns_cache.record_cname(target, owner);
@@ -551,7 +550,7 @@ mod tests {
 
         // Disable Steam preset so only NCSI/NTP domains are allowed in enforcing mode.
         {
-            let mut guard = engine.state.lock().unwrap();
+            let mut guard = engine.state.lock_or_recover();
             guard.config.presets.steam.enabled = false;
         }
 
@@ -596,7 +595,7 @@ mod tests {
         let parsed = Message::from_vec(&allowed_resp).unwrap();
         assert_eq!(parsed.response_code(), ResponseCode::NoError);
         {
-            let guard = engine.state.lock().unwrap();
+            let guard = engine.state.lock_or_recover();
             assert_eq!(
                 guard.ncsi_allowed_ips(),
                 vec![IpAddr::V4(Ipv4Addr::new(203, 0, 113, 42))]
@@ -659,7 +658,7 @@ mod tests {
         let sync_task = tokio::spawn(async move {
             eng_bg.reconcile_notify.notified().await;
             tokio::time::sleep(Duration::from_millis(30)).await;
-            let ver = eng_bg.state.lock().unwrap().dns_cache.version();
+            let ver = eng_bg.state.lock_or_recover().dns_cache.version();
             applied_bg.store(true, std::sync::atomic::Ordering::Release);
             eng_bg.mark_wfp_dns_applied(ver);
         });

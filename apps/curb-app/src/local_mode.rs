@@ -161,8 +161,11 @@ impl LocalStandardRuntime {
             }
         }
         if guard.config.baseline.ncsi {
-            allowed_domains.push("www.msftconnecttest.com".into());
-            allowed_domains.push("www.msftncsi.com".into());
+            allowed_domains.extend(
+                curb_core::dns::NCSI_DOMAINS
+                    .iter()
+                    .map(|s| (*s).to_string()),
+            );
         }
         domain_matches_any(host, &allowed_domains)
     }

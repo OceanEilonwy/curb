@@ -37,21 +37,7 @@ pub fn default_preset_registry() -> Arc<PresetRegistry> {
 
 /// OS connectivity-check probe domains (Windows NCSI + Linux NetworkManager/ConnMan)
 /// used to keep Wi-Fi / Ethernet adapters from showing "No Internet" or "Limited".
-pub const NCSI_DOMAINS: &[&str] = &[
-    // Windows NCSI
-    "www.msftconnecttest.com",
-    "ipv6.msftconnecttest.com",
-    "dns.msftncsi.com",
-    "www.msftncsi.com",
-    "ipv6.msftncsi.com",
-    // Linux NetworkManager / ConnMan connectivity checks
-    "ping.archlinux.org",
-    "fedoraproject.org",
-    "connectivity-check.ubuntu.com",
-    "nmcheck.gnome.org",
-    "networkcheck.kde.org",
-    "ipv4.connman.net",
-];
+pub use curb_core::dns::NCSI_DOMAINS;
 
 /// Represents an allowed running process currently tracked by `curb-service`.
 #[derive(Debug, Clone)]
@@ -536,6 +522,19 @@ fn path_is_within_normalized_dir(exe_path: &str, norm_dir_with_slash: &str) -> b
     norm_exe.starts_with(norm_dir_with_slash)
 }
 
+/// Poison-tolerant locking: a panic on one thread must not cascade into every other
+/// user of the shared state (which would kill the enforcement loops and leave the
+/// firewall in whatever state it was in).
+pub trait LockExt<T> {
+    fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockExt<T> for Mutex<T> {
+    fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 /// Thread-safe handle to `EngineState` with IPC request dispatch.
 #[derive(Clone)]
 pub struct ServiceEngine {
@@ -544,6 +543,8 @@ pub struct ServiceEngine {
     pub reconcile_notify: Arc<Notify>,
     pub dns_refresh_notify: Arc<Notify>,
     pub relay_notify: Arc<Notify>,
+    /// Serializes slow password operations (Argon2) without holding `state`.
+    auth_lock: Arc<Mutex<()>>,
     pub dns_v4_ready: Arc<AtomicBool>,
     pub dns_v6_ready: Arc<AtomicBool>,
     pub wfp_loop_active: Arc<AtomicBool>,
@@ -572,6 +573,7 @@ impl ServiceEngine {
             reconcile_notify: Arc::new(Notify::new()),
             dns_refresh_notify: Arc::new(Notify::new()),
             relay_notify: Arc::new(Notify::new()),
+            auth_lock: Arc::new(Mutex::new(())),
             dns_v4_ready: Arc::new(AtomicBool::new(false)),
             dns_v6_ready: Arc::new(AtomicBool::new(false)),
             wfp_loop_active: Arc::new(AtomicBool::new(false)),
@@ -581,7 +583,7 @@ impl ServiceEngine {
     }
 
     pub fn set_relay_status(&self, state: RelayConnectionState, error: Option<String>) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock_or_recover();
         guard.relay_state = state;
         guard.relay_error = error;
     }
@@ -650,7 +652,7 @@ impl ServiceEngine {
 
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn set_upstream_dns(&self, servers: Vec<SocketAddr>) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock_or_recover();
         guard.upstream_dns = servers;
     }
 
@@ -660,7 +662,7 @@ impl ServiceEngine {
     /// 3. Secondary public fallback (`8.8.8.8:53`)
     pub fn upstream_dns_servers(&self, fallback: SocketAddr) -> Vec<SocketAddr> {
         let mut out = {
-            let guard = self.state.lock().unwrap();
+            let guard = self.state.lock_or_recover();
             guard.upstream_dns.clone()
         };
         if !out.contains(&fallback) {
@@ -676,7 +678,7 @@ impl ServiceEngine {
     pub fn handle_request(&self, req: IpcRequest) -> IpcResponse {
         match req {
             IpcRequest::GetSnapshot => {
-                let guard = self.state.lock().unwrap();
+                let guard = self.state.lock_or_recover();
                 IpcResponse::Snapshot {
                     data: guard.snapshot(),
                 }
@@ -684,7 +686,7 @@ impl ServiceEngine {
 
             IpcRequest::ListRunningApps { visible_pids } => {
                 let blocked_snapshot = {
-                    let guard = self.state.lock().unwrap();
+                    let guard = self.state.lock_or_recover();
                     guard.blocked_events.iter().cloned().collect::<Vec<_>>()
                 };
                 let apps = self
@@ -695,7 +697,7 @@ impl ServiceEngine {
             }
 
             IpcRequest::ListSteamGames => {
-                let presets = self.state.lock().unwrap().presets.clone();
+                let presets = self.state.lock_or_recover().presets.clone();
                 let games = presets
                     .get(curb_preset_steam::STEAM_PRESET_ID)
                     .and_then(|p| p.discover_items(self.adaptors.preset_host.as_ref()).ok())
@@ -707,12 +709,12 @@ impl ServiceEngine {
             }
 
             IpcRequest::ListPresets => {
-                let presets = self.state.lock().unwrap().presets.descriptors();
+                let presets = self.state.lock_or_recover().presets.descriptors();
                 IpcResponse::Presets { presets }
             }
 
             IpcRequest::DiscoverPresetItems { preset_id } => {
-                let presets = self.state.lock().unwrap().presets.clone();
+                let presets = self.state.lock_or_recover().presets.clone();
                 let items = presets
                     .get(&preset_id)
                     .and_then(|p| p.discover_items(self.adaptors.preset_host.as_ref()).ok())
@@ -738,18 +740,26 @@ impl ServiceEngine {
             }
 
             IpcRequest::Unlock { password } => {
-                let mut guard = self.state.lock().unwrap();
-                let Some(record) = guard.auth.clone() else {
+                // Argon2 hashing/verification is slow: run it outside `state` so DNS,
+                // NFQUEUE verdicts and the enforcement loops are never stalled. All auth
+                // operations are serialized by `auth_lock` so back-off cannot be raced.
+                let _auth = self.auth_lock.lock_or_recover();
+                let (record, throttle) = {
+                    let guard = self.state.lock_or_recover();
+                    (guard.auth.clone(), guard.sessions.check_throttle())
+                };
+                let Some(record) = record else {
                     // First-run setup: allow setting initial password if none configured yet.
                     return match hash_password(&password) {
                         Ok(new_record) => {
+                            let mut guard = self.state.lock_or_recover();
                             if let Err(e) = save_auth(&guard.data_dir, &new_record) {
                                 return IpcResponse::Error {
                                     message: format!("Failed to save password: {e}"),
                                 };
                             }
-                            let token = guard.sessions.unlock(&password, &new_record).unwrap();
                             guard.auth = Some(new_record);
+                            let token = guard.sessions.issue_token();
                             IpcResponse::Unlocked { token }
                         }
                         Err(e) => IpcResponse::Error {
@@ -757,8 +767,14 @@ impl ServiceEngine {
                         },
                     };
                 };
-
-                match guard.sessions.unlock(&password, &record) {
+                if let Err(e) = throttle {
+                    return IpcResponse::Error {
+                        message: e.to_string(),
+                    };
+                }
+                let ok = verify_password(&password, &record);
+                let mut guard = self.state.lock_or_recover();
+                match guard.sessions.finish_unlock(ok) {
                     Ok(token) => IpcResponse::Unlocked { token },
                     Err(e) => IpcResponse::Error {
                         message: e.to_string(),
@@ -767,7 +783,7 @@ impl ServiceEngine {
             }
 
             IpcRequest::Lock { token } => {
-                let mut guard = self.state.lock().unwrap();
+                let mut guard = self.state.lock_or_recover();
                 guard.sessions.lock(&token);
                 IpcResponse::Ok
             }
@@ -813,7 +829,7 @@ impl ServiceEngine {
             }
 
             IpcRequest::ResetPlaytimeLimit { token, rule_id } => {
-                let mut guard = self.state.lock().unwrap();
+                let mut guard = self.state.lock_or_recover();
                 if !guard.sessions.validate_and_refresh(&token) {
                     return IpcResponse::Error {
                         message: "Admin session locked or expired. Please unlock again.".into(),
@@ -834,7 +850,7 @@ impl ServiceEngine {
             }
 
             IpcRequest::ResetAllPlaytimeLimits { token } => {
-                let mut guard = self.state.lock().unwrap();
+                let mut guard = self.state.lock_or_recover();
                 if !guard.sessions.validate_and_refresh(&token) {
                     return IpcResponse::Error {
                         message: "Admin session locked or expired. Please unlock again.".into(),
@@ -859,13 +875,17 @@ impl ServiceEngine {
                 current_password,
                 new_password,
             } => {
-                let mut guard = self.state.lock().unwrap();
-                if !guard.sessions.validate_and_refresh(&token) {
-                    return IpcResponse::Error {
-                        message: "Admin session expired. Please unlock again.".into(),
-                    };
-                }
-                let existing_admins = if let Some(record) = &guard.auth {
+                let _auth = self.auth_lock.lock_or_recover();
+                let current_record = {
+                    let mut guard = self.state.lock_or_recover();
+                    if !guard.sessions.validate_and_refresh(&token) {
+                        return IpcResponse::Error {
+                            message: "Admin session expired. Please unlock again.".into(),
+                        };
+                    }
+                    guard.auth.clone()
+                };
+                let existing_admins = if let Some(record) = &current_record {
                     if !verify_password(&current_password, record) {
                         return IpcResponse::Error {
                             message: "Current password is incorrect.".into(),
@@ -878,6 +898,7 @@ impl ServiceEngine {
                 match hash_password(&new_password) {
                     Ok(mut new_record) => {
                         new_record.admins = existing_admins;
+                        let mut guard = self.state.lock_or_recover();
                         if let Err(e) = save_auth(&guard.data_dir, &new_record) {
                             return IpcResponse::Error {
                                 message: format!("Failed to save password: {e}"),
@@ -894,13 +915,24 @@ impl ServiceEngine {
             }
 
             IpcRequest::UnlockAsPeer { peer_id, password } => {
-                let mut guard = self.state.lock().unwrap();
-                let Some(record) = guard.auth.clone() else {
+                let _auth = self.auth_lock.lock_or_recover();
+                let (record, throttle) = {
+                    let guard = self.state.lock_or_recover();
+                    (guard.auth.clone(), guard.sessions.check_throttle())
+                };
+                let Some(record) = record else {
                     return IpcResponse::Error {
                         message: "No admin password is configured on this device.".into(),
                     };
                 };
-                match guard.sessions.unlock_as_peer(&peer_id, &password, &record) {
+                if let Err(e) = throttle {
+                    return IpcResponse::Error {
+                        message: e.to_string(),
+                    };
+                }
+                let admin = record.verify_peer(&peer_id, &password);
+                let mut guard = self.state.lock_or_recover();
+                match guard.sessions.finish_unlock_peer(admin) {
                     Ok((token, admin_id)) => {
                         let data_dir = guard.data_dir.clone();
                         if let Some(auth) = guard.auth.as_mut() {
@@ -918,7 +950,7 @@ impl ServiceEngine {
             }
 
             IpcRequest::RenameDevice { token, name } => {
-                let mut guard = self.state.lock().unwrap();
+                let mut guard = self.state.lock_or_recover();
                 if !guard.sessions.validate_and_refresh(&token) {
                     return IpcResponse::Error {
                         message: "Admin session locked or expired. Please unlock again.".into(),
@@ -943,7 +975,7 @@ impl ServiceEngine {
             }
 
             IpcRequest::CreateInvite { token, kind } => {
-                let mut guard = self.state.lock().unwrap();
+                let mut guard = self.state.lock_or_recover();
                 if !guard.sessions.validate_and_refresh(&token) {
                     return IpcResponse::Error {
                         message: "Admin session locked or expired. Please unlock again.".into(),
@@ -990,34 +1022,48 @@ impl ServiceEngine {
                 name,
                 password,
             } => {
-                let mut guard = self.state.lock().unwrap();
+                let _auth = self.auth_lock.lock_or_recover();
                 let now = Utc::now();
-                guard.pending_invites.retain(|_, inv| inv.expires_at > now);
-
-                let Some(invite) = guard.pending_invites.remove(code.trim()) else {
-                    return IpcResponse::Error {
-                        message: "Invite code is invalid or expired.".into(),
+                // Take the invite and (for friend-admin invites) prepare the new admin
+                // credential *before* re-taking `state`, since Argon2 hashing is slow.
+                let (invite, prepared_auth) = {
+                    let mut guard = self.state.lock_or_recover();
+                    guard.pending_invites.retain(|_, inv| inv.expires_at > now);
+                    let Some(invite) = guard.pending_invites.remove(code.trim()) else {
+                        return IpcResponse::Error {
+                            message: "Invite code is invalid or expired.".into(),
+                        };
                     };
+                    (invite, guard.auth.clone())
                 };
+                let prepared_auth = if invite.kind == InviteKind::FriendAdmin {
+                    let Some(mut auth) = prepared_auth else {
+                        return IpcResponse::Error {
+                            message: "This device has not completed initial setup yet.".into(),
+                        };
+                    };
+                    if let Err(e) = auth.add_admin(name.clone(), Some(peer_id.clone()), &password) {
+                        return IpcResponse::Error {
+                            message: e.to_string(),
+                        };
+                    }
+                    Some(auth)
+                } else {
+                    None
+                };
+                let mut guard = self.state.lock_or_recover();
 
                 let data_dir = guard.data_dir.clone();
                 let mut group_key_hex = None;
                 match invite.kind {
                     InviteKind::FriendAdmin => {
-                        let Some(auth) = guard.auth.as_mut() else {
-                            return IpcResponse::Error {
-                                message: "This device has not completed initial setup yet.".into(),
-                            };
-                        };
-                        if let Err(e) = auth.add_admin(name, Some(peer_id), &password) {
-                            return IpcResponse::Error {
-                                message: e.to_string(),
-                            };
-                        }
-                        if let Err(e) = save_auth(&data_dir, auth) {
-                            return IpcResponse::Error {
-                                message: format!("Failed to save friend admin: {e}"),
-                            };
+                        if let Some(auth) = prepared_auth {
+                            if let Err(e) = save_auth(&data_dir, &auth) {
+                                return IpcResponse::Error {
+                                    message: format!("Failed to save friend admin: {e}"),
+                                };
+                            }
+                            guard.auth = Some(auth);
                         }
                     }
                     InviteKind::SyncDevice => {
@@ -1051,7 +1097,8 @@ impl ServiceEngine {
             }
 
             IpcRequest::RemoveAdmin { token, admin_id } => {
-                let mut guard = self.state.lock().unwrap();
+                let _auth = self.auth_lock.lock_or_recover();
+                let mut guard = self.state.lock_or_recover();
                 if !guard.sessions.validate_and_refresh(&token) {
                     return IpcResponse::Error {
                         message: "Admin session locked or expired. Please unlock again.".into(),
@@ -1087,7 +1134,7 @@ impl ServiceEngine {
                 relay_url,
                 encrypted_backup_enabled,
             } => {
-                let mut guard = self.state.lock().unwrap();
+                let mut guard = self.state.lock_or_recover();
                 if !guard.sessions.validate_and_refresh(&token) {
                     return IpcResponse::Error {
                         message: "Admin session locked or expired. Please unlock again.".into(),
@@ -1116,7 +1163,7 @@ impl ServiceEngine {
             }
 
             IpcRequest::RetryRelayConnection => {
-                let mut guard = self.state.lock().unwrap();
+                let mut guard = self.state.lock_or_recover();
                 if guard.sync_config.relay_url.trim().is_empty() {
                     guard.relay_state = RelayConnectionState::Disabled;
                     guard.relay_error = None;
@@ -1140,21 +1187,25 @@ impl ServiceEngine {
     where
         F: FnOnce(&mut Config),
     {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock_or_recover();
         if !guard.sessions.validate_and_refresh(token) {
             return IpcResponse::Error {
                 message: "Admin session locked or expired. Please unlock again.".into(),
             };
         }
-        update(&mut guard.config);
-        guard.config_version = guard.config_version.wrapping_add(1);
-        guard.sync_config.revision = guard.sync_config.revision.saturating_add(1);
-        guard.refresh_playtime_statuses();
-        if let Err(e) = save_config(&guard.data_dir, &guard.config) {
+        // Apply to a copy and persist first so a failed save never leaves the live
+        // (enforced) config diverged from what the UI is told and from disk.
+        let mut next = guard.config.clone();
+        update(&mut next);
+        if let Err(e) = save_config(&guard.data_dir, &next) {
             return IpcResponse::Error {
                 message: format!("Failed to persist config: {e}"),
             };
         }
+        guard.config = next;
+        guard.config_version = guard.config_version.wrapping_add(1);
+        guard.sync_config.revision = guard.sync_config.revision.saturating_add(1);
+        guard.refresh_playtime_statuses();
         let _ = save_sync_config(&guard.data_dir, &guard.sync_config);
         let snapshot = guard.snapshot();
         drop(guard);
@@ -1578,14 +1629,14 @@ mod tests {
 
         // Initially allowed (full 1h budget remaining) and recognized as first-class.
         {
-            let guard = engine.state.lock().unwrap();
+            let guard = engine.state.lock_or_recover();
             assert!(guard.evaluate_process(None, &halo_bin).is_some());
             assert!(guard.playtime_statuses[&rule_id].first_class);
         }
 
         // Exhaust budget -> Overtime cuts Halo internet access while Steam stays online.
         {
-            let mut guard = engine.state.lock().unwrap();
+            let mut guard = engine.state.lock_or_recover();
             let limit = guard.config.rules[0].playtime_limit.clone().unwrap();
             let chip = guard
                 .usage_ledger
