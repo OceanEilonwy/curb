@@ -111,9 +111,13 @@ fn cmd_tcp(args: &[String]) -> ExitCode {
 
 fn cmd_udp(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: udp <ip:port>");
+        eprintln!("usage: udp <dns_server_ip:port> [timeout_ms]");
         return ExitCode::from(2);
     }
+    let timeout_ms: u64 = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1500);
     let addr = match resolve_first_v4_or_any(&args[0]) {
         Ok(a) => a,
         Err(e) => {
@@ -133,21 +137,45 @@ fn cmd_udp(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(timeout_ms)));
+    let _ = sock.set_write_timeout(Some(Duration::from_millis(timeout_ms)));
     if let Err(e) = sock.connect(addr) {
         print_err("connect", &e);
         return ExitCode::from(1);
     }
-    match sock.send(b"curb-e2e-udp-probe") {
-        Ok(n) => {
+    // Minimal DNS A-record query for example.com (txid 0x1234) so we verify
+    // actual kernel UDP packet egress + reply (WFP drops outbound UDP silently
+    // after send() queues it, so a round-trip reply proves whether UDP passed).
+    let dns_query: [u8; 29] = [
+        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'e', b'x',
+        b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00, 0x01,
+    ];
+    if let Err(e) = sock.send(&dns_query) {
+        print_err("send", &e);
+        return ExitCode::from(1);
+    }
+    let mut resp = [0u8; 512];
+    match sock.recv(&mut resp) {
+        Ok(n) if n >= 12 && resp[0] == 0x12 && resp[1] == 0x34 => {
             println!(
-                "{{\"ok\":true,\"sent\":{},\"peer\":\"{}\"}}",
+                "{{\"ok\":true,\"received\":{},\"peer\":\"{}\"}}",
                 n,
                 escape_json(&addr.to_string())
             );
             ExitCode::SUCCESS
         }
+        Ok(n) => {
+            print_err(
+                "recv",
+                &io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected UDP payload ({n} bytes)"),
+                ),
+            );
+            ExitCode::from(1)
+        }
         Err(e) => {
-            print_err("send", &e);
+            print_err("recv", &e);
             ExitCode::from(1)
         }
     }

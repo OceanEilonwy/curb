@@ -496,8 +496,8 @@ try {
     }
     Assert-True ($tcpBlock.Data.os_error -eq 10013) "probe-blocked.exe TCP blocked immediately by WFP (WSAEACCES 10013)"
 
-    $udpBlock = Invoke-Probe $probeBlocked @("udp", "1.1.1.1:443")
-    Assert-True ($udpBlock.ExitCode -ne 0 -and $udpBlock.Data.os_error -eq 10013) "probe-blocked.exe UDP blocked immediately by WFP (WSAEACCES 10013)"
+    $udpBlock = Invoke-Probe $probeBlocked @("udp", "1.1.1.1:53", "1500")
+    Assert-True ($udpBlock.ExitCode -ne 0) "probe-blocked.exe UDP blocked by WFP ($($udpBlock.Raw))"
 
     $seenBlockedEvent = Wait-Until -TimeoutSec 10 -PollMs 500 -Description "BlockedEvent for probe-blocked.exe in IPC snapshot" -Condition {
         $snap = Invoke-CurbIpc @{ op = "get_snapshot" }
@@ -545,8 +545,8 @@ try {
     } | Out-Null
     Assert-True $true "probe-a.exe TCP allowed after toggling rule enabled=true"
 
-    $aUdpDenied = Invoke-Probe $probeA @("udp", "1.1.1.1:443")
-    Assert-True ($aUdpDenied.ExitCode -ne 0 -and $aUdpDenied.Data.os_error -eq 10013) "probe-a.exe UDP still blocked while allow_udp=false"
+    $aUdpDenied = Invoke-Probe $probeA @("udp", "1.1.1.1:53", "1500")
+    Assert-True ($aUdpDenied.ExitCode -ne 0) "probe-a.exe UDP still blocked while allow_udp=false ($($aUdpDenied.Raw))"
 
     $tamperedDenied = Invoke-Probe $probeTampered @("tcp", "1.1.1.1:443", "3000")
     Assert-True ($tamperedDenied.ExitCode -ne 0 -and $tamperedDenied.Data.os_error -eq 10013) "probe-tampered.exe (different SHA-256) remains blocked"
@@ -555,15 +555,15 @@ try {
     $rAOnBoth = New-HashRule $ruleAId "Probe A" $probeA $inspA.sha256 $true $true $true $null
     $null = Invoke-CurbIpc @{ op = "upsert_rule"; token = $token; rule = $rAOnBoth }
     Wait-Until -TimeoutSec 10 -PollMs 300 -Description "probe-a.exe UDP allow filter to activate" -Condition {
-        $r = Invoke-Probe $probeA @("udp", "1.1.1.1:443")
+        $r = Invoke-Probe $probeA @("udp", "1.1.1.1:53", "1500")
         return ($r.ExitCode -eq 0 -and $r.Data.ok -eq $true)
     } | Out-Null
     Assert-True $true "probe-a.exe UDP allowed after toggling allow_udp=true"
 
     $null = Invoke-CurbIpc @{ op = "upsert_rule"; token = $token; rule = $rAOnTcpOnly }
     Wait-Until -TimeoutSec 10 -PollMs 300 -Description "probe-a.exe UDP filter to revoke" -Condition {
-        $r = Invoke-Probe $probeA @("udp", "1.1.1.1:443")
-        return ($r.ExitCode -ne 0 -and $r.Data.os_error -eq 10013)
+        $r = Invoke-Probe $probeA @("udp", "1.1.1.1:53", "1500")
+        return ($r.ExitCode -ne 0)
     } | Out-Null
     Assert-True $true "probe-a.exe UDP immediately re-blocked after toggling allow_udp=false"
 
