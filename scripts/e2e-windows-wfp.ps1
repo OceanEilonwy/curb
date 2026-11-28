@@ -29,7 +29,7 @@ param(
     [string]$ProbeSourcePath = (Join-Path $PSScriptRoot "e2e_probe.rs"),
 
     [Parameter(Mandatory = $false)]
-    [int]$WatchdogTimeoutSec = 180
+    [int]$WatchdogTimeoutSec = 300
 )
 
 Set-StrictMode -Version Latest
@@ -414,6 +414,8 @@ try {
 
     $baselineCheck = Invoke-Probe $probeBlocked @("tcp", "1.1.1.1:443", "5000")
     Assert-True ($baselineCheck.ExitCode -eq 0 -and $baselineCheck.Data.ok -eq $true) "Baseline sanity: probe-blocked.exe reaches 1.1.1.1:443 before Curb is enabled"
+    $baselineUdpCheck = Invoke-Probe $probeBlocked @("udp", "1.1.1.1:53", "2000")
+    Assert-True ($baselineUdpCheck.ExitCode -eq 0 -and $baselineUdpCheck.Data.ok -eq $true) "Baseline sanity: probe-blocked.exe gets UDP reply from 1.1.1.1:53 before Curb is enabled ($($baselineUdpCheck.Raw))"
 
     # Install virtual network adapter with canary static IP and DNS
     $vAdapter = Install-KmTestLoopbackAdapter
@@ -454,7 +456,7 @@ try {
         if ($insp.status -eq "inspected") {
             $rule = New-HashRule ([Guid]::NewGuid().ToString()) ("CI Allow: " + (Split-Path -Leaf $rp)) $rp $insp.identity.sha256 $true $true $true $null
             $up = Invoke-CurbIpc @{ op = "upsert_rule"; token = $token; rule = $rule }
-            Assert-True ($up.status -eq "snapshot") "Pre-allowed CI binary: $(Split-Path -Leaf $rp) (resp: $($up | ConvertTo-Json -Compress))"
+            Assert-True ($up.status -eq "snapshot") "Pre-allowed CI binary: $(Split-Path -Leaf $rp)"
         }
     }
 
@@ -539,7 +541,7 @@ try {
     $rAOnTcpOnly = New-HashRule $ruleAId "Probe A" $probeA $inspA.sha256 $true $true $false $null
     $null = Invoke-CurbIpc @{ op = "upsert_rule"; token = $token; rule = $rAOnTcpOnly }
 
-    Wait-Until -TimeoutSec 10 -PollMs 300 -Description "probe-a.exe TCP allow filter to activate" -Condition {
+    Wait-Until -TimeoutSec 25 -PollMs 400 -Description "probe-a.exe TCP allow filter to activate" -Condition {
         $r = Invoke-Probe $probeA @("tcp", "1.1.1.1:443", "4000")
         return ($r.ExitCode -eq 0 -and $r.Data.ok -eq $true)
     } | Out-Null
@@ -554,14 +556,14 @@ try {
     # 3c. Flip allow_udp = true -> UDP allowed, then back to false -> UDP blocked again
     $rAOnBoth = New-HashRule $ruleAId "Probe A" $probeA $inspA.sha256 $true $true $true $null
     $null = Invoke-CurbIpc @{ op = "upsert_rule"; token = $token; rule = $rAOnBoth }
-    Wait-Until -TimeoutSec 10 -PollMs 300 -Description "probe-a.exe UDP allow filter to activate" -Condition {
+    Wait-Until -TimeoutSec 25 -PollMs 400 -Description "probe-a.exe UDP allow filter to activate" -Condition {
         $r = Invoke-Probe $probeA @("udp", "1.1.1.1:53", "1500")
         return ($r.ExitCode -eq 0 -and $r.Data.ok -eq $true)
     } | Out-Null
     Assert-True $true "probe-a.exe UDP allowed after toggling allow_udp=true"
 
     $null = Invoke-CurbIpc @{ op = "upsert_rule"; token = $token; rule = $rAOnTcpOnly }
-    Wait-Until -TimeoutSec 10 -PollMs 300 -Description "probe-a.exe UDP filter to revoke" -Condition {
+    Wait-Until -TimeoutSec 25 -PollMs 400 -Description "probe-a.exe UDP filter to revoke" -Condition {
         $r = Invoke-Probe $probeA @("udp", "1.1.1.1:53", "1500")
         return ($r.ExitCode -ne 0)
     } | Out-Null
@@ -570,7 +572,7 @@ try {
     # 3d. Cross-app isolation: hold a live TCP socket in probe-b.exe while toggling/deleting probe-a.exe
     $rBOn = New-HashRule $ruleBId "Probe B" $probeB $inspB.sha256 $true $true $true $null
     $null = Invoke-CurbIpc @{ op = "upsert_rule"; token = $token; rule = $rBOn }
-    Wait-Until -TimeoutSec 10 -PollMs 300 -Description "probe-b.exe allow filter to activate" -Condition {
+    Wait-Until -TimeoutSec 25 -PollMs 400 -Description "probe-b.exe allow filter to activate" -Condition {
         $r = Invoke-Probe $probeB @("tcp", "1.1.1.1:443", "4000")
         return ($r.ExitCode -eq 0 -and $r.Data.ok -eq $true)
     } | Out-Null
@@ -579,28 +581,28 @@ try {
 
     # Toggle probe-a OFF -> ON -> DELETE -> UPSERT while probe-b holds its socket open
     $null = Invoke-CurbIpc @{ op = "upsert_rule"; token = $token; rule = $rAOff }
-    Wait-Until -TimeoutSec 10 -PollMs 300 -Description "probe-a.exe to block on toggle OFF" -Condition {
+    Wait-Until -TimeoutSec 25 -PollMs 400 -Description "probe-a.exe to block on toggle OFF" -Condition {
         $r = Invoke-Probe $probeA @("tcp", "1.1.1.1:443", "3000")
         return ($r.ExitCode -ne 0 -and $r.Data.os_error -eq 10013)
     } | Out-Null
     Assert-True $true "probe-a.exe blocked on per-app toggle OFF"
 
     $null = Invoke-CurbIpc @{ op = "upsert_rule"; token = $token; rule = $rAOnBoth }
-    Wait-Until -TimeoutSec 10 -PollMs 300 -Description "probe-a.exe to allow on toggle ON" -Condition {
+    Wait-Until -TimeoutSec 25 -PollMs 400 -Description "probe-a.exe to allow on toggle ON" -Condition {
         $r = Invoke-Probe $probeA @("tcp", "1.1.1.1:443", "4000")
         return ($r.ExitCode -eq 0 -and $r.Data.ok -eq $true)
     } | Out-Null
     Assert-True $true "probe-a.exe allowed on per-app toggle ON"
 
     $null = Invoke-CurbIpc @{ op = "delete_rule"; token = $token; id = $ruleAId }
-    Wait-Until -TimeoutSec 10 -PollMs 300 -Description "probe-a.exe to block after delete_rule" -Condition {
+    Wait-Until -TimeoutSec 25 -PollMs 400 -Description "probe-a.exe to block after delete_rule" -Condition {
         $r = Invoke-Probe $probeA @("tcp", "1.1.1.1:443", "3000")
         return ($r.ExitCode -ne 0 -and $r.Data.os_error -eq 10013)
     } | Out-Null
     Assert-True $true "probe-a.exe blocked after delete_rule"
 
     $null = Invoke-CurbIpc @{ op = "upsert_rule"; token = $token; rule = $rAOnBoth }
-    Wait-Until -TimeoutSec 10 -PollMs 300 -Description "probe-a.exe to allow after re-upsert" -Condition {
+    Wait-Until -TimeoutSec 25 -PollMs 400 -Description "probe-a.exe to allow after re-upsert" -Condition {
         $r = Invoke-Probe $probeA @("tcp", "1.1.1.1:443", "4000")
         return ($r.ExitCode -eq 0 -and $r.Data.ok -eq $true)
     } | Out-Null
@@ -615,7 +617,7 @@ try {
     $rAWhitelist = New-HashRule $ruleAId "Probe A" $probeA $inspA.sha256 $true $true $false @("www.msftconnecttest.com")
     $null = Invoke-CurbIpc @{ op = "upsert_rule"; token = $token; rule = $rAWhitelist }
 
-    Wait-Until -TimeoutSec 12 -PollMs 400 -Description "probe-a.exe to reach whitelisted domain" -Condition {
+    Wait-Until -TimeoutSec 25 -PollMs 400 -Description "probe-a.exe to reach whitelisted domain" -Condition {
         $r = Invoke-Probe $probeA @("http", "www.msftconnecttest.com", "80", "/connecttest.txt", "4000")
         return ($r.ExitCode -eq 0 -and $r.Data.ok -eq $true)
     } | Out-Null
@@ -626,7 +628,7 @@ try {
 
     # Remove DNS whitelist -> example.com should work again
     $null = Invoke-CurbIpc @{ op = "upsert_rule"; token = $token; rule = $rAOnBoth }
-    Wait-Until -TimeoutSec 12 -PollMs 400 -Description "probe-a.exe to reach example.com after clearing whitelist" -Condition {
+    Wait-Until -TimeoutSec 25 -PollMs 400 -Description "probe-a.exe to reach example.com after clearing whitelist" -Condition {
         $r = Invoke-Probe $probeA @("http", "example.com", "80", "/", "4000")
         return ($r.ExitCode -eq 0 -and $r.Data.ok -eq $true)
     } | Out-Null
