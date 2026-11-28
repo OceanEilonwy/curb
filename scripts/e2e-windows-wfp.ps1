@@ -754,6 +754,12 @@ try {
 
     Write-Host "`nALL WINDOWS LIVE WFP & VIRTUAL ADAPTER E2E TESTS PASSED!" -ForegroundColor Green
 }
+catch {
+    Write-Host "`n[ERROR] $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host $_.InvocationInfo.PositionMessage -ForegroundColor Yellow
+    Write-Host $_.ScriptStackTrace -ForegroundColor DarkYellow
+    throw
+}
 finally {
     # Disarm watchdog first
     try { Set-Content -Path $WatchdogCancelFile -Value "done" -Encoding ASCII } catch { }
