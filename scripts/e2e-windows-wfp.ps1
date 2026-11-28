@@ -371,8 +371,8 @@ function Stop-AndAssertHoldProbe($Hold) {
         try { $Hold.Process.Kill() } catch { }
         throw "Hold probe ($($Hold.Tag)) did not exit within 15s after stop signal"
     }
-    $outTxt = if (Test-Path $Hold.Stdout) { ([string](Get-Content $Hold.Stdout -Raw)).Trim() } else { "" }
-    $errTxt = if (Test-Path $Hold.Stderr) { ([string](Get-Content $Hold.Stderr -Raw)).Trim() } else { "" }
+    $outTxt = if (Test-Path $Hold.Stdout) { [System.IO.File]::ReadAllText($Hold.Stdout).Trim() } else { "" }
+    $errTxt = if (Test-Path $Hold.Stderr) { [System.IO.File]::ReadAllText($Hold.Stderr).Trim() } else { "" }
     Assert-True ($Hold.Process.ExitCode -eq 0) "Hold probe ($($Hold.Tag)) kept persistent TCP socket alive without drops ($outTxt $errTxt)"
     $parsed = $outTxt | ConvertFrom-Json
     Assert-True ($parsed.ok -eq $true -and $parsed.probes -ge 2) "Hold probe ($($Hold.Tag)) completed $($parsed.probes) consecutive keep-alive requests on one socket"
