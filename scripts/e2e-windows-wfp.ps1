@@ -163,7 +163,7 @@ function New-HashRule([string]$RuleId, [string]$Name, [string]$ExePath, [string]
             allow_udp     = $AllowUdp
             dns_whitelist = $DnsWhitelist
         }
-        subprocesses = "none"
+        subprocesses = "disabled"
         exe_hint     = (Split-Path -Leaf $ExePath)
         exe_path     = $ExePath
         created_at   = (Get-Date).ToUniversalTime().ToString("o")
@@ -454,7 +454,7 @@ try {
         if ($insp.status -eq "inspected") {
             $rule = New-HashRule ([Guid]::NewGuid().ToString()) ("CI Allow: " + (Split-Path -Leaf $rp)) $rp $insp.identity.sha256 $true $true $true $null
             $up = Invoke-CurbIpc @{ op = "upsert_rule"; token = $token; rule = $rule }
-            Assert-True ($up.status -eq "snapshot") "Pre-allowed CI binary: $(Split-Path -Leaf $rp)"
+            Assert-True ($up.status -eq "snapshot") "Pre-allowed CI binary: $(Split-Path -Leaf $rp) (resp: $($up | ConvertTo-Json -Compress))"
         }
     }
 
