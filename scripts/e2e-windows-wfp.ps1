@@ -41,7 +41,12 @@ $ProbeSourcePath = (Resolve-Path $ProbeSourcePath).Path
 
 $DataDir = Join-Path $env:ProgramData "Curb"
 $ServiceName = "CurbService"
-$TempRoot = Join-Path $env:PUBLIC "curb-wfp-e2e-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+$RunNonce = [Guid]::NewGuid().ToString('N').Substring(0, 8)
+$TempRoot = Join-Path $env:PUBLIC "curb-wfp-e2e-$RunNonce"
+# Place probes in an admin-protected directory so Curb installs 0ms proactive WFP
+# filters for short-lived test executables (user-writable dirs intentionally require
+# the process to stay alive for NTFS image-locking before permitting).
+$ProbeDir = Join-Path $env:ProgramFiles "CurbE2EProbes-$RunNonce"
 $MigrateDir = Join-Path $TempRoot "seed"
 $WatchdogCancelFile = Join-Path $TempRoot "watchdog.cancel"
 $TestPassword = "wfp-e2e-pass-9482"
@@ -375,6 +380,7 @@ function Stop-AndAssertHoldProbe($Hold) {
 
 try {
     New-Item -ItemType Directory -Force -Path $TempRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $ProbeDir | Out-Null
     New-Item -ItemType Directory -Force -Path $MigrateDir | Out-Null
 
     # -------------------------------------------------------------------------
@@ -399,14 +405,14 @@ try {
     Assert-True ($PrimaryAdapterBackup.Count -gt 0) "Captured original DNS for $($PrimaryAdapterBackup.Count) active runner adapter(s)"
 
     # Compile standalone Rust probe and create 4 distinct binaries (unique SHA-256 hashes)
-    $baseProbe = Join-Path $TempRoot "probe-base.exe"
+    $baseProbe = Join-Path $ProbeDir "probe-base.exe"
     & rustc -O $ProbeSourcePath -o $baseProbe
     Assert-True ($LASTEXITCODE -eq 0 -and (Test-Path $baseProbe)) "Compiled standalone e2e_probe.rs"
 
-    $probeA = Join-Path $TempRoot "probe-a.exe"
-    $probeB = Join-Path $TempRoot "probe-b.exe"
-    $probeBlocked = Join-Path $TempRoot "probe-blocked.exe"
-    $probeTampered = Join-Path $TempRoot "probe-tampered.exe"
+    $probeA = Join-Path $ProbeDir "probe-a.exe"
+    $probeB = Join-Path $ProbeDir "probe-b.exe"
+    $probeBlocked = Join-Path $ProbeDir "probe-blocked.exe"
+    $probeTampered = Join-Path $ProbeDir "probe-tampered.exe"
     New-ProbeCopy $baseProbe $probeA 0x01
     New-ProbeCopy $baseProbe $probeB 0x02
     New-ProbeCopy $baseProbe $probeBlocked 0x03
@@ -787,6 +793,9 @@ finally {
 
     if (Test-Path $TempRoot) {
         Remove-Item -Recurse -Force $TempRoot -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $ProbeDir) {
+        Remove-Item -Recurse -Force $ProbeDir -ErrorAction SilentlyContinue
     }
     if (Test-Path $DataDir) {
         Remove-Item -Recurse -Force $DataDir -ErrorAction SilentlyContinue
