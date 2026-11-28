@@ -90,3 +90,30 @@ jobs:
             -CliPath target\release\curb-cli.exe `
             -ServicePath target\release\curb-service.exe `
             -SetupExePath $setup
+
+  windows-wfp-e2e:
+    name: Windows Live WFP & Virtual Adapter E2E
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: curb-windows
+          cache-on-failure: true
+
+      - name: Build curb-service & curb-cli (release)
+        run: cargo build --release -p curb-service -p curb-cli
+
+      - name: Run live WFP, virtual adapter DNS, toggle-storm & per-app E2E suite
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/e2e-windows-wfp.ps1 `
+            -CliPath target\release\curb-cli.exe `
+            -ServicePath target\release\curb-service.exe `
+            -ProbeSourcePath scripts\e2e_probe.rs
