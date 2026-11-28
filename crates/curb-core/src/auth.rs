@@ -43,6 +43,8 @@ impl AdminCredential {
 /// Stored in `C:\ProgramData\Curb\auth.json` (writable only by SYSTEM / Administrators).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthRecord {
+    /// Optional Argon2id hash for a local password (empty when managed exclusively by remote friend admins).
+    #[serde(default)]
     pub password_hash: String,
     pub updated_at: DateTime<Utc>,
     /// Additional named admins (e.g. remote friends), each with their own Argon2id password.
@@ -84,12 +86,33 @@ pub fn hash_password(password: &str) -> Result<AuthRecord> {
     })
 }
 
-/// Verifies a plain-text password against a stored `AuthRecord` (primary password).
+/// Verifies a plain-text password against a stored `AuthRecord` (primary local password).
 pub fn verify_password(password: &str, record: &AuthRecord) -> bool {
+    if !record.has_local_password() {
+        return false;
+    }
     verify_hash(password, &record.password_hash)
 }
 
 impl AuthRecord {
+    /// Creates an empty `AuthRecord` with no local password (used when the first admin is a remote friend).
+    pub fn empty() -> Self {
+        Self {
+            password_hash: String::new(),
+            updated_at: Utc::now(),
+            admins: Vec::new(),
+        }
+    }
+
+    /// Returns `true` if a local password has been configured.
+    pub fn has_local_password(&self) -> bool {
+        !self.password_hash.trim().is_empty()
+    }
+
+    /// Returns `true` if either a local password or at least one remote/named admin is configured.
+    pub fn has_any_admin(&self) -> bool {
+        self.has_local_password() || !self.admins.is_empty()
+    }
     /// Adds a new named admin (e.g. a remote friend who redeemed a one-time invite)
     /// with their own Argon2id password.
     pub fn add_admin(

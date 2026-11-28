@@ -4,6 +4,7 @@ import { CurbInput } from "components.slint";
 
 export component UnlockModal inherits Rectangle {
     in property <bool> password-configured: true;
+    in property <bool> has-any-admin: true;
     in-out property <string> password: "";
     in-out property <string> confirm-password: "";
     in property <string> error-text: "";
@@ -11,9 +12,12 @@ export component UnlockModal inherits Rectangle {
 
     callback close();
     callback submit(string, string);
+    callback invite-friend-instead();
 
     public function focus-field() {
-        pw-in.focus-input();
+        if root.password-configured || !root.has-any-admin {
+            pw-in.focus-input();
+        }
     }
 
     background: Theme.scrim;
@@ -55,7 +59,11 @@ export component UnlockModal inherits Rectangle {
             VerticalLayout {
                 spacing: 4px;
                 Text {
-                    text: root.password-configured ? "Enter Curb Password" : "Set Curb Admin Password";
+                    text: root.password-configured
+                        ? "Enter Curb Password"
+                        : root.has-any-admin
+                        ? "Managed Remotely"
+                        : "Set Optional Local Password";
                     color: Theme.text;
                     font-size: 14px;
                     font-weight: 600;
@@ -63,48 +71,87 @@ export component UnlockModal inherits Rectangle {
                 Text {
                     text: root.password-configured
                         ? "Needed to change allowed apps or pause protection."
-                        : "Choose a password to protect your rules and pause controls.";
+                        : root.has-any-admin
+                        ? "No local password is set on this PC. Ask a remote friend admin to unlock or adjust settings."
+                        : "For a friend acting locally on this PC. Most people prefer inviting a remote friend admin instead.";
                     color: Theme.text-sec;
                     font-size: 12px;
                     wrap: word-wrap;
                 }
             }
 
-            VerticalLayout {
-                spacing: 8px;
+            if !root.has-any-admin: Rectangle {
+                height: 32px;
+                border-radius: 8px;
+                background: inv-instead-ta.has-hover ? Theme.accent-hover : Theme.accent-soft;
+                border-width: 1px;
+                border-color: Theme.focus;
 
-                pw-in := CurbInput {
-                    text <=> root.password;
-                    fill-color: Theme.sub;
-                    is-password: true;
-                    enabled: !root.busy;
-                    placeholder: root.password-configured ? "Password" : "New password (min 4 characters)";
-                    accepted => {
-                        if !root.busy {
-                            root.submit(root.password, root.confirm-password);
-                        }
+                HorizontalLayout {
+                    alignment: center;
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    cross-axis-alignment: center;
+                    Text {
+                        text: "Invite a remote friend admin instead →";
+                        color: inv-instead-ta.has-hover ? #ffffff : Theme.accent-text;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
                     }
                 }
 
-                if !root.password-configured: confirm-in := CurbInput {
-                    text <=> root.confirm-password;
-                    fill-color: Theme.sub;
-                    is-password: true;
+                inv-instead-ta := TouchArea {
                     enabled: !root.busy;
-                    placeholder: "Confirm password";
-                    accepted => {
-                        if !root.busy {
-                            root.submit(root.password, root.confirm-password);
-                        }
+                    mouse-cursor: root.busy ? default : pointer;
+                    clicked => {
+                        root.close();
+                        root.invite-friend-instead();
                     }
                 }
+            }
 
-                if root.error-text != "": Text {
-                    text: root.error-text;
-                    color: Theme.red-text;
-                    font-size: 12px;
-                    font-weight: 500;
-                    wrap: word-wrap;
+            Rectangle {
+                visible: root.password-configured || !root.has-any-admin;
+                height: (root.password-configured || !root.has-any-admin) ? pw-fields-layout.preferred-height : 0px;
+                clip: true;
+
+                pw-fields-layout := VerticalLayout {
+                    spacing: 8px;
+
+                    pw-in := CurbInput {
+                        text <=> root.password;
+                        fill-color: Theme.sub;
+                        is-password: true;
+                        enabled: !root.busy;
+                        placeholder: root.password-configured ? "Password" : "New local password (min 4 characters)";
+                        accepted => {
+                            if !root.busy {
+                                root.submit(root.password, root.confirm-password);
+                            }
+                        }
+                    }
+
+                    if !root.password-configured: confirm-in := CurbInput {
+                        text <=> root.confirm-password;
+                        fill-color: Theme.sub;
+                        is-password: true;
+                        enabled: !root.busy;
+                        placeholder: "Confirm password";
+                        accepted => {
+                            if !root.busy {
+                                root.submit(root.password, root.confirm-password);
+                            }
+                        }
+                    }
+
+                    if root.error-text != "": Text {
+                        text: root.error-text;
+                        color: Theme.red-text;
+                        font-size: 12px;
+                        font-weight: 500;
+                        wrap: word-wrap;
+                    }
                 }
             }
 
@@ -138,7 +185,7 @@ export component UnlockModal inherits Rectangle {
                     }
                 }
 
-                Rectangle {
+                if root.password-configured || !root.has-any-admin: Rectangle {
                     height: 30px;
                     border-radius: 8px;
                     background: ok-ta.has-hover && !root.busy ? Theme.accent-hover : Theme.accent;

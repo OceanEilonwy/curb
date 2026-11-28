@@ -242,7 +242,8 @@ impl LocalStandardRuntime {
             .collect();
         ServiceSnapshot {
             config: guard.config.clone(),
-            password_configured: guard.auth.is_some(),
+            password_configured: guard.auth.as_ref().is_some_and(|a| a.has_local_password()),
+            has_any_admin: guard.auth.as_ref().is_some_and(|a| a.has_any_admin()),
             blocked_events: guard.blocked_events.iter().cloned().collect(),
             active_wfp_filters: 0,
             protection_tier: if configured {
@@ -410,6 +411,10 @@ impl LocalStandardRuntime {
                     },
                 }
             }
+            IpcRequest::RemoveLocalPassword { .. } => IpcResponse::Error {
+                message: "Removing the local password requires at least one remote friend admin (Full Protection)."
+                    .into(),
+            },
             IpcRequest::UnlockAsPeer { .. }
             | IpcRequest::RenameDevice { .. }
             | IpcRequest::CreateInvite { .. }
@@ -417,7 +422,10 @@ impl LocalStandardRuntime {
             | IpcRequest::RemoveAdmin { .. }
             | IpcRequest::SetRelayConfig { .. }
             | IpcRequest::RetryRelayConnection
-            | IpcRequest::RelayForward { .. } => IpcResponse::Error {
+            | IpcRequest::RelayForward { .. }
+            | IpcRequest::RelayFetchInvite { .. }
+            | IpcRequest::RelayClaimInvite { .. }
+            | IpcRequest::RelayCheckPresence { .. } => IpcResponse::Error {
                 message: "Remote admin & sync hosting requires Full Protection (Curb service)."
                     .into(),
             },

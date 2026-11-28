@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backup_dir: args.backup_dir.clone(),
         backup_enabled: !args.no_backup,
         max_backup_bytes: args.max_backup_bytes,
+        ..RelayConfig::default()
     };
 
     let app = build_router(cfg);

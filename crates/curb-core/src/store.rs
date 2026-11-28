@@ -39,6 +39,10 @@ pub fn peer_identity_path(data_dir: &Path) -> PathBuf {
     data_dir.join("peer_identity.json")
 }
 
+pub fn pending_invites_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("pending_invites.json")
+}
+
 pub fn load_config(data_dir: &Path) -> Result<Config> {
     let path = config_path(data_dir);
     if !path.exists() {
@@ -107,6 +111,28 @@ pub fn load_sync_config(data_dir: &Path) -> Result<crate::sync::RemoteSyncConfig
 pub fn save_sync_config(data_dir: &Path, cfg: &crate::sync::RemoteSyncConfig) -> Result<()> {
     let path = sync_config_path(data_dir);
     write_json_atomic(&path, cfg)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+pub fn load_pending_invites(data_dir: &Path) -> Result<Vec<crate::sync::PendingInviteRecord>> {
+    let path = pending_invites_path(data_dir);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    Ok(read_json(&path)?)
+}
+
+pub fn save_pending_invites(
+    data_dir: &Path,
+    invites: &[crate::sync::PendingInviteRecord],
+) -> Result<()> {
+    let path = pending_invites_path(data_dir);
+    write_json_atomic(&path, &invites)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

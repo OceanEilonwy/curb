@@ -115,6 +115,9 @@ pub enum ProtectionTier {
 pub struct ServiceSnapshot {
     pub config: Config,
     pub password_configured: bool,
+    /// True if either a local password or at least one remote friend admin is configured.
+    #[serde(default)]
+    pub has_any_admin: bool,
     pub blocked_events: Vec<BlockedEvent>,
     pub active_wfp_filters: usize,
     #[serde(default)]
@@ -207,6 +210,10 @@ pub enum IpcRequest {
         current_password: String,
         new_password: String,
     },
+    /// Removes the optional local password (requires at least one remote friend admin).
+    RemoveLocalPassword {
+        token: String,
+    },
 
     // --- Remote Admin & P2P Sync ---
     /// Renames this device (e.g. "Jordan's PC") for display in synced devices & friend apps.
@@ -248,6 +255,23 @@ pub enum IpcRequest {
         target_peer_id: String,
         payload: String,
     },
+    /// Proxies `GET /v1/invites/{slot_id}` through local `curb-service` to resolve a short invite code.
+    RelayFetchInvite {
+        relay_url: String,
+        slot_id: String,
+    },
+    /// Proxies `POST /v1/invites/{slot_id}/claim` through local `curb-service` for offline invite redemption.
+    RelayClaimInvite {
+        relay_url: String,
+        slot_id: String,
+        from_peer_id: String,
+        payload: String,
+    },
+    /// Proxies `POST /v1/presence` through local `curb-service` to check online/last-seen status of peers.
+    RelayCheckPresence {
+        relay_url: String,
+        peer_ids: Vec<String>,
+    },
 }
 
 /// Responses returned by `curb-service`.
@@ -277,6 +301,8 @@ pub enum IpcResponse {
     },
     InviteCreated {
         uri: String,
+        #[serde(default)]
+        short_uri: String,
         code: String,
         expires_in_secs: u64,
     },
@@ -290,6 +316,14 @@ pub enum IpcResponse {
     /// Opaque E2E-encrypted reply payload returned by [`IpcRequest::RelayForward`].
     RelayForwarded {
         payload: String,
+    },
+    /// Base64-encoded encrypted invite descriptor returned by [`IpcRequest::RelayFetchInvite`].
+    RelayInviteData {
+        blob_b64: String,
+    },
+    /// Presence statuses returned by [`IpcRequest::RelayCheckPresence`].
+    RelayPresence {
+        peers: Vec<crate::sync::PeerPresence>,
     },
     Ok,
     Error {

@@ -73,6 +73,7 @@ export component MainWindow inherits Window {
     // Header / auth / mode state
     in property <bool> unlocked: false;
     in property <bool> password-configured: true;
+    in property <bool> has-any-admin: true;
     in property <bool> is-full-service: true;
     in property <bool> service-outdated: false;
     in property <string> service-version-label: "";
@@ -84,7 +85,10 @@ export component MainWindow inherits Window {
     in property <int> active-allowed-count: 0;
 
     // Setup screen properties
+    in-out property <int> setup-step: 0;
     in-out property <bool> setup-choice-full: true;
+    in-out property <bool> setup-admin-remote: true;
+    in-out property <string> setup-invite-code: "";
     in-out property <string> setup-password: "";
     in-out property <string> setup-confirm: "";
     in property <bool> setup-busy: false;
@@ -215,6 +219,9 @@ export component MainWindow inherits Window {
     // Setup callbacks
     callback setup-full();
     callback setup-standard(string, string);
+    callback setup-create-remote-invite();
+    callback setup-local-admin(string, string);
+    callback setup-finish-admin();
 
     // Allowed callbacks
     callback toggle-steam-expand();
@@ -257,6 +264,7 @@ export component MainWindow inherits Window {
     callback toggle-baseline-ncsi();
     callback toggle-pw-form();
     callback submit-password-change(string, string, string);
+    callback remove-local-password();
 
     // Picker callbacks
     callback picker-cancel();
@@ -353,13 +361,19 @@ export component MainWindow inherits Window {
             if root.screen == 1: SetupView {
                 width: 100%;
                 height: 100%;
+                step: root.setup-step;
                 choice-is-full <=> root.setup-choice-full;
+                admin-is-remote <=> root.setup-admin-remote;
+                invite-code <=> root.setup-invite-code;
                 password <=> root.setup-password;
                 confirm-password <=> root.setup-confirm;
                 busy: root.setup-busy;
                 error-text: root.setup-error;
                 submit-full => { root.setup-full(); }
                 submit-standard(p, c) => { root.setup-standard(p, c); }
+                create-remote-invite => { root.setup-create-remote-invite(); }
+                submit-local-admin(p, c) => { root.setup-local-admin(p, c); }
+                finish-admin-setup => { root.setup-finish-admin(); }
                 close-requested => { root.close-to-tray(); }
             }
 
@@ -956,6 +970,7 @@ export component MainWindow inherits Window {
                     vertical-stretch: 1;
                     unlocked: root.unlocked;
                     password-configured: root.password-configured;
+                    has-any-admin: root.has-any-admin;
                     is-full-service: root.is-full-service;
                     mode-kind: root.mode-kind;
                     pending-mode: root.pending-mode;
@@ -991,6 +1006,7 @@ export component MainWindow inherits Window {
                     toggle-baseline-ncsi => { root.toggle-baseline-ncsi(); }
                     toggle-pw-form => { root.toggle-pw-form(); }
                     submit-password-change(c, n, cf) => { root.submit-password-change(c, n, cf); }
+                    remove-local-password => { root.remove-local-password(); }
                     rename-device-clicked => { root.rename-device-clicked(); }
                     add-friend-admin-clicked => { root.add-friend-admin-clicked(); }
                     connect-friend-clicked => { root.connect-friend-clicked(); }
@@ -1160,17 +1176,28 @@ export component MainWindow inherits Window {
                                     width: 7px;
                                     height: 7px;
                                     border-radius: 3.5px;
-                                    background: Theme.green-switch;
+                                    background: dev.online ? Theme.green-switch : Theme.text-muted;
                                 }
 
-                                Text {
+                                VerticalLayout {
                                     horizontal-stretch: 1;
-                                    text: dev.name;
-                                    color: Theme.text;
-                                    font-size: 12.5px;
-                                    font-weight: dev.selected ? 600 : 500;
-                                    overflow: elide;
-                                    vertical-alignment: center;
+                                    alignment: center;
+                                    spacing: 1px;
+
+                                    Text {
+                                        text: dev.name;
+                                        color: Theme.text;
+                                        font-size: 12.5px;
+                                        font-weight: dev.selected ? 600 : 500;
+                                        overflow: elide;
+                                    }
+
+                                    if dev.status-label != "": Text {
+                                        text: dev.status-label;
+                                        color: Theme.text-muted;
+                                        font-size: 10.5px;
+                                        overflow: elide;
+                                    }
                                 }
 
                                 if dev.selected: Text {
@@ -1240,12 +1267,14 @@ export component MainWindow inherits Window {
                 width: 100%;
                 height: 100%;
                 password-configured: root.password-configured;
+                has-any-admin: root.has-any-admin;
                 password <=> root.unlock-password;
                 confirm-password <=> root.unlock-confirm;
                 error-text: root.unlock-error;
                 busy: root.unlock-busy;
                 close => { root.close-unlock(); }
                 submit(p, c) => { root.submit-unlock(p, c); }
+                invite-friend-instead => { root.add-friend-admin-clicked(); }
             }
 
             // Generic Prompt Modal (Add Website / Browse .exe)

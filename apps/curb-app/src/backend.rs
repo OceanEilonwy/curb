@@ -37,6 +37,7 @@ impl DemoState {
             password: None,
             snapshot: ServiceSnapshot {
                 password_configured: true,
+                has_any_admin: true,
                 active_wfp_filters: 14,
                 protection_tier: ProtectionTier::FullService,
                 service_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -655,61 +656,194 @@ impl CurbBackend {
         }
     }
 
-    /// Generates a single-use `curb://invite?...` link for adding a friend admin.
-    pub async fn create_friend_invite(&self, token: String) -> Result<String, String> {
+    /// Generates a single-use short invite code (or `curb://join?...` link) for adding a friend admin.
+    /// `token` may be `None` during initial setup before any admin has been configured.
+    pub async fn create_friend_invite(&self, token: Option<String>) -> Result<String, String> {
         if self.demo.is_some() {
-            return Ok("curb://invite?kind=friend&peer=demo&relay=https%3A%2F%2Frelay.curb.app&code=DEMO-1234&name=This%20PC".into());
+            return Ok("DEMO-1234-5678-ABCD".into());
         }
         match self
             .dispatch_request(IpcRequest::CreateInvite {
-                token,
+                token: token.unwrap_or_default(),
                 kind: curb_core::sync::InviteKind::FriendAdmin,
             })
             .await?
         {
-            IpcResponse::InviteCreated { uri, .. } => Ok(uri),
+            IpcResponse::InviteCreated { short_uri, uri, .. } => {
+                if !short_uri.trim().is_empty() {
+                    Ok(short_uri)
+                } else {
+                    Ok(uri)
+                }
+            }
             IpcResponse::Error { message } => Err(message),
             _ => Err("Unexpected response from Curb".into()),
         }
     }
 
-    /// Redeems a one-time `curb://invite?...` link over E2E-encrypted P2P, sets the friend's
-    /// personal password on the remote PC, saves the peer locally, and switches to it.
+    async fn fetch_invite_descriptor_proxied(
+        &self,
+        relay_url: &str,
+        code: &str,
+    ) -> Result<curb_core::sync::InviteDescriptor, String> {
+        let slot_id = curb_core::sync::invite_slot_id(code);
+        let proxy_req = IpcRequest::RelayFetchInvite {
+            relay_url: relay_url.to_string(),
+            slot_id: slot_id.clone(),
+        };
+        let blob_b64 = match ipc_client::send_request(&proxy_req).await {
+            Ok(IpcResponse::RelayInviteData { blob_b64 }) => blob_b64,
+            Ok(IpcResponse::Error { message })
+                if !message.starts_with("Malformed IPC request") =>
+            {
+                return Err(message);
+            }
+            _ => curb_p2p::fetch_invite_descriptor_b64(relay_url, &slot_id)
+                .await
+                .map_err(|e| e.to_string())?,
+        };
+        curb_p2p::decrypt_invite_descriptor_b64(code, &blob_b64).map_err(|e| e.to_string())
+    }
+
+    async fn submit_invite_claim_proxied(
+        &self,
+        relay_url: &str,
+        code: &str,
+        from_peer_id: &str,
+        payload: &str,
+    ) -> Result<(), String> {
+        let slot_id = curb_core::sync::invite_slot_id(code);
+        let proxy_req = IpcRequest::RelayClaimInvite {
+            relay_url: relay_url.to_string(),
+            slot_id: slot_id.clone(),
+            from_peer_id: from_peer_id.to_string(),
+            payload: payload.to_string(),
+        };
+        match ipc_client::send_request(&proxy_req).await {
+            Ok(IpcResponse::Ok) => Ok(()),
+            Ok(IpcResponse::Error { message })
+                if !message.starts_with("Malformed IPC request") =>
+            {
+                Err(message)
+            }
+            _ => curb_p2p::submit_invite_claim(relay_url, &slot_id, from_peer_id, payload)
+                .await
+                .map_err(|e| e.to_string()),
+        }
+    }
+
+    /// Queries online/last-seen presence for all saved remote peers grouped by their relay URL.
+    pub async fn check_saved_peers_presence(
+        &self,
+    ) -> std::collections::HashMap<String, curb_core::sync::PeerPresence> {
+        let mut result = std::collections::HashMap::new();
+        if self.demo.is_some() {
+            return result;
+        }
+        let saved = self.saved_remote_peers();
+        if saved.is_empty() {
+            return result;
+        }
+        let mut by_relay: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for p in saved {
+            if !p.relay_url.trim().is_empty() {
+                by_relay.entry(p.relay_url).or_default().push(p.peer_id);
+            }
+        }
+        for (relay_url, peer_ids) in by_relay {
+            let proxy_req = IpcRequest::RelayCheckPresence {
+                relay_url: relay_url.clone(),
+                peer_ids: peer_ids.clone(),
+            };
+            let peers = match ipc_client::send_request(&proxy_req).await {
+                Ok(IpcResponse::RelayPresence { peers }) => Ok(peers),
+                _ => curb_p2p::fetch_peers_presence(&relay_url, &peer_ids).await,
+            };
+            if let Ok(list) = peers {
+                for p in list {
+                    result.insert(p.peer_id.clone(), p);
+                }
+            }
+        }
+        result
+    }
+
+    /// Redeems a one-time short code, `curb://join?...` link, or legacy `curb://invite?...` link.
+    /// Attempts instant online redemption first; if the host PC is offline, stores an E2E-encrypted
+    /// claim in `curb-relay`'s invite dropbox so the host applies it automatically on wake.
+    ///
+    /// Returns `(saved_peer, pending_offline)`.
     pub async fn connect_with_invite(
         &self,
-        invite_uri: String,
+        invite_input: String,
         my_name: String,
         my_password: String,
-    ) -> Result<SavedRemotePeer, String> {
-        let invite = curb_core::sync::InviteToken::parse_uri(&invite_uri)
+    ) -> Result<(SavedRemotePeer, bool), String> {
+        let parsed = curb_core::sync::ParsedInviteInput::parse(&invite_input)
             .map_err(|e| e.to_string())?;
+        let (code, relay_url, target_peer_id, fallback_device_name) = match parsed {
+            curb_core::sync::ParsedInviteInput::Full(tok) => (
+                tok.code,
+                tok.relay_url,
+                tok.target_peer_id,
+                tok.device_name,
+            ),
+            curb_core::sync::ParsedInviteInput::Short { code, relay_url } => {
+                let desc = self
+                    .fetch_invite_descriptor_proxied(&relay_url, &code)
+                    .await?;
+                (code, relay_url, desc.target_peer_id, desc.device_name)
+            }
+        };
+
         let identity = self.remote_store.lock().unwrap().identity().clone();
         let req = IpcRequest::RedeemInvite {
-            code: invite.code,
+            code: code.clone(),
             peer_id: identity.peer_id(),
             name: my_name,
             password: my_password,
         };
-        let resp = self
-            .send_remote_p2p(&invite.relay_url, &invite.target_peer_id, &req)
-            .await?;
 
-        match resp {
-            IpcResponse::InviteRedeemed {
+        match self
+            .send_remote_p2p(&relay_url, &target_peer_id, &req)
+            .await
+        {
+            Ok(IpcResponse::InviteRedeemed {
                 device_name,
                 peer_id,
                 ..
-            } => {
+            }) => {
                 let saved = self.remote_store.lock().unwrap().upsert_peer(
                     device_name,
                     peer_id,
-                    invite.relay_url,
+                    relay_url,
                 );
                 *self.active_remote.lock().unwrap() = Some(saved.clone());
-                Ok(saved)
+                Ok((saved, false))
             }
-            IpcResponse::Error { message } => Err(message),
-            _ => Err("Unexpected response while redeeming invite".into()),
+            Ok(IpcResponse::Error { message }) => Err(message),
+            Ok(_) => Err("Unexpected response while redeeming invite".into()),
+            Err(err) if err.contains("offline") || err.contains("Timed out") => {
+                // Host PC is offline — fall back to the relay's zero-knowledge offline claim dropbox.
+                let (_, ciphertext) =
+                    curb_p2p::seal_remote_request(&identity, &target_peer_id, &req)
+                        .map_err(|e| e.to_string())?;
+                self.submit_invite_claim_proxied(
+                    &relay_url,
+                    &code,
+                    &identity.peer_id(),
+                    &ciphertext,
+                )
+                .await?;
+                let saved = self.remote_store.lock().unwrap().upsert_peer(
+                    fallback_device_name,
+                    target_peer_id,
+                    relay_url,
+                );
+                Ok((saved, true))
+            }
+            Err(err) => Err(err),
         }
     }
 
@@ -720,6 +854,23 @@ impl CurbBackend {
     ) -> Result<ServiceSnapshot, String> {
         match self
             .dispatch_request(IpcRequest::RemoveAdmin { token, admin_id })
+            .await?
+        {
+            IpcResponse::Snapshot { data } => Ok(data),
+            IpcResponse::Error { message } => Err(message),
+            _ => Err("Unexpected response from Curb".into()),
+        }
+    }
+
+    pub async fn remove_local_password(&self, token: String) -> Result<ServiceSnapshot, String> {
+        if let Some(demo) = &self.demo {
+            let mut g = demo.lock().unwrap();
+            g.password = None;
+            g.snapshot.password_configured = false;
+            return Ok(g.snapshot.clone());
+        }
+        match self
+            .dispatch_request(IpcRequest::RemoveLocalPassword { token })
             .await?
         {
             IpcResponse::Snapshot { data } => Ok(data),

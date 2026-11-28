@@ -93,6 +93,41 @@ where
                     message: e.to_string(),
                 },
             },
+            Ok(IpcRequest::RelayFetchInvite { relay_url, slot_id }) => {
+                match curb_p2p::fetch_invite_descriptor_b64(&relay_url, &slot_id).await {
+                    Ok(blob_b64) => IpcResponse::RelayInviteData { blob_b64 },
+                    Err(e) => IpcResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+            Ok(IpcRequest::RelayClaimInvite {
+                relay_url,
+                slot_id,
+                from_peer_id,
+                payload,
+            }) => match curb_p2p::submit_invite_claim(
+                &relay_url,
+                &slot_id,
+                &from_peer_id,
+                &payload,
+            )
+            .await
+            {
+                Ok(()) => IpcResponse::Ok,
+                Err(e) => IpcResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            Ok(IpcRequest::RelayCheckPresence {
+                relay_url,
+                peer_ids,
+            }) => match curb_p2p::fetch_peers_presence(&relay_url, &peer_ids).await {
+                Ok(peers) => IpcResponse::RelayPresence { peers },
+                Err(e) => IpcResponse::Error {
+                    message: e.to_string(),
+                },
+            },
             Ok(req) => {
                 let eng = engine.clone();
                 tokio::task::spawn_blocking(move || eng.handle_request(req))

@@ -170,8 +170,10 @@ struct AppController {
 
     snapshot: Option<ServiceSnapshot>,
     local_device_name: RefCell<String>,
+    peer_presence: HashMap<String, curb_core::sync::PeerPresence>,
     token: Option<String>,
     pending_open_allow: bool,
+    admin_onboarding_done: bool,
 
     expanded_id: Option<String>,
     adv_open: HashSet<String>,
@@ -264,8 +266,10 @@ pub fn create_main_window(
         last_geometry,
         snapshot: None,
         local_device_name: RefCell::new("This PC".into()),
+        peer_presence: HashMap::new(),
         token: None,
         pending_open_allow: false,
+        admin_onboarding_done: false,
         expanded_id: Some("steam".into()),
         adv_open: HashSet::new(),
         locking: false,
@@ -353,6 +357,15 @@ fn wire_callbacks(win: &MainWindow, gen_id: u64) {
     win.on_setup_full(move || with_controller(gen_id, |c| c.handle_setup_full()));
     win.on_setup_standard(move |pw, cf| {
         with_controller(gen_id, |c| c.handle_setup_standard(pw.into(), cf.into()))
+    });
+    win.on_setup_create_remote_invite(move || {
+        with_controller(gen_id, |c| c.handle_setup_create_remote_invite())
+    });
+    win.on_setup_local_admin(move |pw, cf| {
+        with_controller(gen_id, |c| c.handle_setup_local_admin(pw.into(), cf.into()))
+    });
+    win.on_setup_finish_admin(move || {
+        with_controller(gen_id, |c| c.handle_setup_finish_admin())
     });
 
     // Steam preset
@@ -545,6 +558,9 @@ fn wire_callbacks(win: &MainWindow, gen_id: u64) {
             c.handle_change_password(cur.into(), next.into(), conf.into())
         })
     });
+    win.on_remove_local_password(move || {
+        with_controller(gen_id, |c| c.handle_remove_local_password())
+    });
     win.on_select_device(move |id| {
         with_controller(gen_id, |c| c.handle_select_device(&id))
     });
@@ -662,6 +678,7 @@ impl AppController {
         };
 
         win.set_password_configured(snap.password_configured);
+        win.set_has_any_admin(snap.has_any_admin || snap.password_configured);
         win.set_is_full_service(snap.protection_tier == ProtectionTier::FullService);
         let outdated = snap.protection_tier == ProtectionTier::FullService
             && crate::elevate::is_service_outdated(&snap.service_version);
@@ -675,7 +692,17 @@ impl AppController {
             format!("{reported} → v{}", env!("CARGO_PKG_VERSION")).into(),
         );
 
+        let has_any_admin = snap.has_any_admin || snap.password_configured;
         if snap.protection_tier == ProtectionTier::Unconfigured {
+            win.set_setup_step(0);
+            win.set_screen(1);
+            return;
+        } else if snap.protection_tier == ProtectionTier::FullService
+            && !has_any_admin
+            && !self.admin_onboarding_done
+            && self.backend.active_remote_peer().is_none()
+        {
+            win.set_setup_step(1);
             win.set_screen(1);
             return;
         } else if win.get_screen() < 2 {
@@ -759,13 +786,22 @@ impl AppController {
                 name: local_name.into(),
                 is_remote: false,
                 selected: active_remote.is_none(),
+                online: true,
+                status_label: "This PC".into(),
             });
             for p in &saved_peers {
+                let (online, status_label) = match self.peer_presence.get(&p.peer_id) {
+                    Some(pres) if pres.online => (true, "Online".to_string()),
+                    Some(pres) => (false, format_offline_since(pres.last_seen_at)),
+                    None => (false, "Checking…".to_string()),
+                };
                 dev_items.push(RemoteDeviceItem {
                     id: p.id.to_string().into(),
                     name: p.name.clone().into(),
                     is_remote: true,
                     selected: active_remote.as_ref().is_some_and(|a| a.id == p.id),
+                    online,
+                    status_label: status_label.into(),
                 });
             }
         }
@@ -1325,8 +1361,12 @@ impl AppController {
         let target_peer_id = self.backend.active_remote_peer().map(|p| p.id);
         self.backend.spawn(async move {
             let res = backend.get_snapshot().await;
+            let presence = backend.check_saved_peers_presence().await;
             let _ = slint::invoke_from_event_loop(move || {
                 with_controller(gen_id, |c| {
+                    if !presence.is_empty() {
+                        c.peer_presence = presence;
+                    }
                     // Ignore stale responses if the user switched devices while this request was in flight.
                     if c.backend.active_remote_peer().map(|p| p.id) != target_peer_id {
                         return;
@@ -1530,12 +1570,21 @@ impl AppController {
                     }
                     match res {
                         Ok(snap) => {
-                            let needs_pw = !snap.password_configured;
+                            let needs_admin = !(snap.has_any_admin || snap.password_configured);
                             c.snapshot = Some(snap);
-                            c.sync_all();
-                            c.show_toast("Full Protection active");
-                            if needs_pw {
-                                c.open_unlock_modal();
+                            if needs_admin {
+                                c.admin_onboarding_done = false;
+                                if let Some(w) = c.window() {
+                                    w.set_setup_error(SharedString::default());
+                                    w.set_setup_password(SharedString::default());
+                                    w.set_setup_confirm(SharedString::default());
+                                    w.set_setup_invite_code(SharedString::default());
+                                    w.set_setup_admin_remote(true);
+                                }
+                                c.sync_all();
+                            } else {
+                                c.sync_all();
+                                c.show_toast("Full Protection active");
                             }
                         }
                         Err(e) => {
@@ -1547,6 +1596,93 @@ impl AppController {
                 });
             });
         });
+    }
+
+    fn handle_setup_create_remote_invite(&mut self) {
+        let Some(win) = self.window() else { return };
+        if win.get_setup_busy() {
+            return;
+        }
+        win.set_setup_error(SharedString::default());
+        win.set_setup_busy(true);
+
+        let gen_id = self.gen_id;
+        let backend = self.backend.clone();
+        self.backend.spawn(async move {
+            let res = backend.create_friend_invite(None).await;
+            let _ = slint::invoke_from_event_loop(move || {
+                with_controller(gen_id, |c| {
+                    if let Some(w) = c.window() {
+                        w.set_setup_busy(false);
+                        match res {
+                            Ok(code) => {
+                                w.set_setup_invite_code(code.into());
+                            }
+                            Err(e) => {
+                                w.set_setup_error(e.into());
+                            }
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    fn handle_setup_local_admin(&mut self, password: String, confirm: String) {
+        let Some(win) = self.window() else { return };
+        if win.get_setup_busy() {
+            return;
+        }
+        if password.len() < 4 {
+            win.set_setup_error("Choose a password with at least 4 characters.".into());
+            return;
+        }
+        if password != confirm {
+            win.set_setup_error("Passwords do not match.".into());
+            return;
+        }
+        win.set_setup_error(SharedString::default());
+        win.set_setup_busy(true);
+
+        let gen_id = self.gen_id;
+        let backend = self.backend.clone();
+        self.backend.spawn(async move {
+            let res = backend.unlock(password).await;
+            let _ = slint::invoke_from_event_loop(move || {
+                with_controller(gen_id, |c| {
+                    if let Some(w) = c.window() {
+                        w.set_setup_busy(false);
+                    }
+                    match res {
+                        Ok(tok) => {
+                            c.token = Some(tok);
+                            c.admin_onboarding_done = true;
+                            if let Some(w) = c.window() {
+                                w.set_setup_password(SharedString::default());
+                                w.set_setup_confirm(SharedString::default());
+                                w.set_screen(2);
+                            }
+                            c.show_toast("Local admin password set");
+                            c.refresh_snapshot();
+                        }
+                        Err(e) => {
+                            if let Some(w) = c.window() {
+                                w.set_setup_error(e.into());
+                            }
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    fn handle_setup_finish_admin(&mut self) {
+        self.admin_onboarding_done = true;
+        if let Some(w) = self.window() {
+            w.set_setup_error(SharedString::default());
+            w.set_screen(2);
+        }
+        self.sync_all();
     }
 
     fn handle_setup_standard(&mut self, password: String, confirm: String) {
@@ -1942,16 +2078,20 @@ impl AppController {
                     }
                     match res {
                         Ok(snap) => {
-                            let needs_pw = !snap.password_configured;
+                            let needs_admin = !(snap.has_any_admin || snap.password_configured);
                             c.snapshot = Some(snap);
                             c.sync_all();
                             c.show_toast(if was_full {
                                 "Background service updated"
+                            } else if needs_admin {
+                                "Upgraded · add a friend admin in Settings"
                             } else {
                                 "Upgraded to Full Protection"
                             });
-                            if needs_pw {
-                                c.open_unlock_modal();
+                            if needs_admin {
+                                if let Some(w) = c.window() {
+                                    w.set_active_tab(2);
+                                }
                             }
                         }
                         Err(e) => c.show_toast(e),
@@ -2345,7 +2485,7 @@ impl AppController {
             }
             PromptPurpose::ConnectInviteUri => {
                 let uri = raw.trim().to_string();
-                if let Err(e) = curb_core::sync::InviteToken::parse_uri(&uri) {
+                if let Err(e) = curb_core::sync::ParsedInviteInput::parse(&uri) {
                     win.set_prompt_error(e.to_string().into());
                     return;
                 }
@@ -2395,10 +2535,17 @@ impl AppController {
                                 w.set_prompt_busy(false);
                             }
                             match res {
-                                Ok(peer) => {
+                                Ok((peer, pending_offline)) => {
                                     c.token = None;
                                     c.close_prompt_modal();
-                                    c.show_toast(format!("Connected to {}", peer.name));
+                                    if pending_offline {
+                                        c.show_toast(format!(
+                                            "Invite claimed · activates when {} comes online",
+                                            peer.name
+                                        ));
+                                    } else {
+                                        c.show_toast(format!("Connected to {}", peer.name));
+                                    }
                                     c.refresh_snapshot();
                                 }
                                 Err(e) => {
@@ -2462,8 +2609,8 @@ impl AppController {
         self.open_prompt_modal(
             PromptPurpose::ConnectInviteUri,
             "Connect to a Friend",
-            "Paste the one-time invite link from your friend's Curb app.",
-            "curb://invite?...",
+            "Enter the one-time invite code or curb:// link from your friend's Curb app.",
+            "K7M4-QP9X-2N8V-R5JT",
             "Next",
             "Next…",
             true,
@@ -2498,8 +2645,18 @@ impl AppController {
     }
 
     fn handle_add_friend_admin_clicked(&mut self) {
-        let Some(tok) = self.require_token() else {
-            return;
+        let has_any_admin = self
+            .snapshot
+            .as_ref()
+            .map(|s| s.has_any_admin || s.password_configured)
+            .unwrap_or(true);
+        let tok = if has_any_admin {
+            let Some(t) = self.require_token() else {
+                return;
+            };
+            Some(t)
+        } else {
+            self.token.clone()
         };
         let gen_id = self.gen_id;
         let backend = self.backend.clone();
@@ -2511,7 +2668,7 @@ impl AppController {
                         c.open_prompt_modal(
                             PromptPurpose::ShowInviteUri,
                             "One-Time Friend Invite",
-                            "Send this single-use link to your friend (expires in 10 min). They'll set their own password.",
+                            "Send this one-time code to your friend (valid 24 hours, works even if this PC goes offline). They'll set their own password.",
                             "",
                             "Done",
                             "Done",
@@ -2520,6 +2677,50 @@ impl AppController {
                         );
                     }
                     Err(e) => c.show_toast(e),
+                });
+            });
+        });
+    }
+
+    fn handle_remove_local_password(&mut self) {
+        let Some(tok) = self.require_token() else {
+            return;
+        };
+        let Some(win) = self.window() else { return };
+        if win.get_pw_busy() {
+            return;
+        }
+        win.set_pw_error(SharedString::default());
+        win.set_pw_busy(true);
+
+        let gen_id = self.gen_id;
+        let backend = self.backend.clone();
+        self.backend.spawn(async move {
+            let res = backend.remove_local_password(tok).await;
+            let _ = slint::invoke_from_event_loop(move || {
+                with_controller(gen_id, |c| {
+                    if let Some(w) = c.window() {
+                        w.set_pw_busy(false);
+                    }
+                    match res {
+                        Ok(snap) => {
+                            if let Some(w) = c.window() {
+                                w.set_pw_open(false);
+                                w.set_pw_current(SharedString::default());
+                                w.set_pw_new(SharedString::default());
+                                w.set_pw_confirm(SharedString::default());
+                                w.set_pw_error(SharedString::default());
+                            }
+                            c.snapshot = Some(snap);
+                            c.sync_all();
+                            c.show_toast("Local password removed · managed by friend admins");
+                        }
+                        Err(e) => {
+                            if let Some(w) = c.window() {
+                                w.set_pw_error(e.into());
+                            }
+                        }
+                    }
                 });
             });
         });
@@ -2822,6 +3023,22 @@ fn identity_to_running_app(id: BinaryIdentity) -> RunningAppInfo {
         signed,
         signer,
         sha256: id.sha256,
+    }
+}
+
+fn format_offline_since(last_seen: Option<chrono::DateTime<Utc>>) -> String {
+    let Some(ts) = last_seen else {
+        return "Offline".into();
+    };
+    let secs = (Utc::now() - ts).num_seconds().max(0);
+    if secs < 60 {
+        "Offline · just now".into()
+    } else if secs < 3600 {
+        format!("Offline · {}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("Offline · {}h ago", secs / 3600)
+    } else {
+        format!("Offline · {}d ago", secs / 86_400)
     }
 }
 

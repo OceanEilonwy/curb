@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
+use chrono::{Duration as ChronoDuration, Local, Utc};
 use curb_core::auth::{hash_password, verify_password, AuthRecord, SessionManager};
 use curb_core::config::{Config, ExecutableMatcher, NetworkPolicy};
 use curb_core::dns::{domain_matches_any, DnsCache};
@@ -15,12 +15,12 @@ use curb_core::ipc::{
 use curb_core::playtime::{PlaytimeChipState, PlaytimeRuleStatus, UsageLedger};
 use curb_core::presets::{DefaultPresetHost, EffectiveRule, PresetHost, PresetRegistry};
 use curb_core::store::{
-    load_auth, load_config, load_sync_config, load_usage, peer_identity_path, save_auth,
-    save_config, save_sync_config, save_usage,
+    load_auth, load_config, load_pending_invites, load_sync_config, load_usage, peer_identity_path,
+    save_auth, save_config, save_pending_invites, save_sync_config, save_usage,
 };
 use curb_core::sync::{
-    generate_invite_code, InviteKind, InviteToken, RelayConnectionState, RemoteStatus,
-    RemoteSyncConfig, DEFAULT_RELAY_URL,
+    generate_invite_code, normalize_invite_code, InviteKind, InviteToken, PendingInviteRecord,
+    RelayConnectionState, RemoteStatus, RemoteSyncConfig, DEFAULT_RELAY_URL,
 };
 use curb_core::verify::BinaryIdentity;
 use curb_p2p::PeerIdentity;
@@ -51,13 +51,6 @@ pub struct TrackedProcess {
     pub dynamic_filter_ids: Vec<u64>,
 }
 
-/// In-memory single-use invite issued by an unlocked admin (10-minute TTL).
-#[derive(Debug, Clone)]
-pub struct PendingInvite {
-    pub kind: InviteKind,
-    pub expires_at: DateTime<Utc>,
-}
-
 /// Central mutable state shared across IPC, DNS proxy, and enforcement loops.
 pub struct EngineState {
     pub data_dir: PathBuf,
@@ -76,7 +69,7 @@ pub struct EngineState {
     pub playtime_statuses: HashMap<Uuid, PlaytimeRuleStatus>,
     pub sync_config: RemoteSyncConfig,
     pub peer_identity: PeerIdentity,
-    pub pending_invites: HashMap<String, PendingInvite>,
+    pub pending_invites: HashMap<String, PendingInviteRecord>,
     pub relay_state: RelayConnectionState,
     pub relay_error: Option<String>,
 }
@@ -108,6 +101,14 @@ impl EngineState {
         } else {
             RelayConnectionState::Connecting
         };
+        let now = Utc::now();
+        let pending_invites: HashMap<String, PendingInviteRecord> =
+            load_pending_invites(&data_dir)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|inv| inv.expires_at > now)
+                .map(|inv| (normalize_invite_code(&inv.code), inv))
+                .collect();
         let mut st = Self {
             data_dir,
             config,
@@ -125,7 +126,7 @@ impl EngineState {
             playtime_statuses: HashMap::new(),
             sync_config,
             peer_identity,
-            pending_invites: HashMap::new(),
+            pending_invites,
             relay_state: initial_relay_state,
             relay_error: None,
         };
@@ -468,7 +469,8 @@ impl EngineState {
         };
         ServiceSnapshot {
             config: self.config.clone(),
-            password_configured: self.auth.is_some(),
+            password_configured: self.auth.as_ref().is_some_and(|a| a.has_local_password()),
+            has_any_admin: self.auth.as_ref().is_some_and(|a| a.has_any_admin()),
             blocked_events: self.blocked_events.iter().cloned().collect(),
             active_wfp_filters: self.active_wfp_filters,
             protection_tier: curb_core::ipc::ProtectionTier::FullService,
@@ -813,8 +815,9 @@ impl ServiceEngine {
                     let guard = self.state.lock_or_recover();
                     (guard.auth.clone(), guard.sessions.check_throttle())
                 };
-                let Some(record) = record else {
-                    // First-run setup: allow setting initial password if none configured yet.
+                let has_any = record.as_ref().is_some_and(|r| r.has_any_admin());
+                if !has_any {
+                    // First-run setup: allow setting optional local password when no admin exists yet.
                     return match hash_password(&password) {
                         Ok(new_record) => {
                             let mut guard = self.state.lock_or_recover();
@@ -831,7 +834,13 @@ impl ServiceEngine {
                             message: e.to_string(),
                         },
                     };
-                };
+                }
+                let record = record.unwrap();
+                if !record.has_local_password() {
+                    return IpcResponse::Error {
+                        message: "No local password is set. Unlock from a remote friend admin's Curb app.".into(),
+                    };
+                }
                 if let Err(e) = throttle {
                     return IpcResponse::Error {
                         message: e.to_string(),
@@ -951,7 +960,7 @@ impl ServiceEngine {
                     guard.auth.clone()
                 };
                 let existing_admins = if let Some(record) = &current_record {
-                    if !verify_password(&current_password, record) {
+                    if record.has_local_password() && !verify_password(&current_password, record) {
                         return IpcResponse::Error {
                             message: "Current password is incorrect.".into(),
                         };
@@ -976,6 +985,42 @@ impl ServiceEngine {
                     Err(e) => IpcResponse::Error {
                         message: e.to_string(),
                     },
+                }
+            }
+
+            IpcRequest::RemoveLocalPassword { token } => {
+                let _auth = self.auth_lock.lock_or_recover();
+                let mut guard = self.state.lock_or_recover();
+                if !guard.sessions.validate_and_refresh(&token) {
+                    return IpcResponse::Error {
+                        message: "Admin session locked or expired. Please unlock again.".into(),
+                    };
+                }
+                let data_dir = guard.data_dir.clone();
+                let Some(auth) = guard.auth.as_mut() else {
+                    return IpcResponse::Snapshot {
+                        data: guard.snapshot(),
+                    };
+                };
+                if auth.admins.is_empty() {
+                    return IpcResponse::Error {
+                        message: "Add at least one remote friend admin before removing the local password.".into(),
+                    };
+                }
+                if auth.has_local_password() {
+                    auth.password_hash.clear();
+                    auth.updated_at = Utc::now();
+                    if let Err(e) = save_auth(&data_dir, auth) {
+                        return IpcResponse::Error {
+                            message: format!("Failed to update auth: {e}"),
+                        };
+                    }
+                    guard.sessions.lock_all_except(&token);
+                    guard.sync_config.revision = guard.sync_config.revision.saturating_add(1);
+                    let _ = save_sync_config(&data_dir, &guard.sync_config);
+                }
+                IpcResponse::Snapshot {
+                    data: guard.snapshot(),
                 }
             }
 
@@ -1041,9 +1086,16 @@ impl ServiceEngine {
 
             IpcRequest::CreateInvite { token, kind } => {
                 let mut guard = self.state.lock_or_recover();
-                if !guard.sessions.validate_and_refresh(&token) {
+                let has_any_admin = guard.auth.as_ref().is_some_and(|a| a.has_any_admin());
+                if has_any_admin {
+                    if !guard.sessions.validate_and_refresh(&token) {
+                        return IpcResponse::Error {
+                            message: "Admin session locked or expired. Please unlock again.".into(),
+                        };
+                    }
+                } else if kind != InviteKind::FriendAdmin {
                     return IpcResponse::Error {
-                        message: "Admin session locked or expired. Please unlock again.".into(),
+                        message: "Unlock Curb first to link a sync device.".into(),
                     };
                 }
                 // Auto-enable default relay if none configured yet so invites work out of the box.
@@ -1052,20 +1104,25 @@ impl ServiceEngine {
                     guard.relay_state = RelayConnectionState::Connecting;
                     guard.relay_error = None;
                     let _ = save_sync_config(&guard.data_dir, &guard.sync_config);
-                    self.relay_notify.notify_waiters();
                 }
                 let now = Utc::now();
                 guard.pending_invites.retain(|_, inv| inv.expires_at > now);
 
                 let code = generate_invite_code();
-                let expires_in_secs = 600u64;
+                let norm_code = normalize_invite_code(&code);
+                let expires_in_secs = 86_400u64; // 24 hours (supports offline redemption via relay)
                 guard.pending_invites.insert(
-                    code.clone(),
-                    PendingInvite {
+                    norm_code,
+                    PendingInviteRecord {
+                        code: code.clone(),
                         kind,
                         expires_at: now + ChronoDuration::seconds(expires_in_secs as i64),
+                        published: false,
                     },
                 );
+                let all_invites: Vec<PendingInviteRecord> =
+                    guard.pending_invites.values().cloned().collect();
+                let _ = save_pending_invites(&guard.data_dir, &all_invites);
                 let invite = InviteToken {
                     kind,
                     target_peer_id: guard.peer_identity.peer_id(),
@@ -1074,7 +1131,9 @@ impl ServiceEngine {
                     device_name: guard.sync_config.device_name.clone(),
                     direct_addr: None,
                 };
+                self.relay_notify.notify_waiters();
                 IpcResponse::InviteCreated {
+                    short_uri: invite.to_short_uri(),
                     uri: invite.to_uri(),
                     code,
                     expires_in_secs,
@@ -1089,25 +1148,31 @@ impl ServiceEngine {
             } => {
                 let _auth = self.auth_lock.lock_or_recover();
                 let now = Utc::now();
+                let norm_code = normalize_invite_code(&code);
                 // Take the invite and (for friend-admin invites) prepare the new admin
                 // credential *before* re-taking `state`, since Argon2 hashing is slow.
                 let (invite, prepared_auth) = {
                     let mut guard = self.state.lock_or_recover();
                     guard.pending_invites.retain(|_, inv| inv.expires_at > now);
-                    let Some(invite) = guard.pending_invites.remove(code.trim()) else {
+                    let Some(invite) = guard.pending_invites.remove(&norm_code) else {
                         return IpcResponse::Error {
                             message: "Invite code is invalid or expired.".into(),
                         };
                     };
+                    let remaining: Vec<PendingInviteRecord> =
+                        guard.pending_invites.values().cloned().collect();
+                    let _ = save_pending_invites(&guard.data_dir, &remaining);
                     (invite, guard.auth.clone())
                 };
                 let prepared_auth = if invite.kind == InviteKind::FriendAdmin {
-                    let Some(mut auth) = prepared_auth else {
-                        return IpcResponse::Error {
-                            message: "This device has not completed initial setup yet.".into(),
-                        };
-                    };
+                    let mut auth = prepared_auth.unwrap_or_else(AuthRecord::empty);
                     if let Err(e) = auth.add_admin(name.clone(), Some(peer_id.clone()), &password) {
+                        // Restore invite if validation (e.g. short password) failed.
+                        let mut guard = self.state.lock_or_recover();
+                        guard.pending_invites.insert(norm_code, invite);
+                        let all: Vec<PendingInviteRecord> =
+                            guard.pending_invites.values().cloned().collect();
+                        let _ = save_pending_invites(&guard.data_dir, &all);
                         return IpcResponse::Error {
                             message: e.to_string(),
                         };
@@ -1242,9 +1307,48 @@ impl ServiceEngine {
                 }
             }
 
-            IpcRequest::RelayForward { .. } => IpcResponse::Error {
-                message: "RelayForward is only supported over local IPC.".into(),
+            IpcRequest::RelayForward { .. }
+            | IpcRequest::RelayFetchInvite { .. }
+            | IpcRequest::RelayClaimInvite { .. }
+            | IpcRequest::RelayCheckPresence { .. } => IpcResponse::Error {
+                message: "Relay proxy requests are only supported over local IPC.".into(),
             },
+        }
+    }
+
+    /// Handles an E2E-encrypted remote IPC request received from `from_peer` (verified via X25519 DH).
+    /// Binds `from_peer` to `UnlockAsPeer` and `RedeemInvite` so a remote caller cannot spoof
+    /// another peer's ID inside the JSON payload.
+    pub fn handle_remote_request(&self, from_peer: &str, req: IpcRequest) -> IpcResponse {
+        match &req {
+            IpcRequest::UnlockAsPeer { peer_id, .. } | IpcRequest::RedeemInvite { peer_id, .. } => {
+                if !peer_id.trim().eq_ignore_ascii_case(from_peer.trim()) {
+                    return IpcResponse::Error {
+                        message: "Authenticated peer ID mismatch.".into(),
+                    };
+                }
+            }
+            IpcRequest::RelayForward { .. }
+            | IpcRequest::RelayFetchInvite { .. }
+            | IpcRequest::RelayClaimInvite { .. }
+            | IpcRequest::RelayCheckPresence { .. } => {
+                return IpcResponse::Error {
+                    message: "Relay proxy requests are only supported over local IPC.".into(),
+                };
+            }
+            _ => {}
+        }
+        self.handle_request(req)
+    }
+
+    /// Marks a pending invite as published to the relay dropbox and persists `pending_invites.json`.
+    pub fn mark_invite_published(&self, code: &str) {
+        let norm = normalize_invite_code(code);
+        let mut guard = self.state.lock_or_recover();
+        if let Some(inv) = guard.pending_invites.get_mut(&norm) {
+            inv.published = true;
+            let all: Vec<PendingInviteRecord> = guard.pending_invites.values().cloned().collect();
+            let _ = save_pending_invites(&guard.data_dir, &all);
         }
     }
 
@@ -1836,6 +1940,154 @@ mod tests {
             password: "alex-own-password".into(),
         });
         assert!(matches!(revoked_unlock, IpcResponse::Error { .. }));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn first_run_remote_friend_admin_works_without_local_password_and_binds_peer_id() {
+        let dir = std::env::temp_dir().join(format!("curb-remote-only-{}", Uuid::new_v4()));
+        let engine = ServiceEngine::new(dir.clone()).unwrap();
+
+        // First-run: no local password, no admins -> unauthenticated CreateInvite succeeds!
+        let (code, short_uri) = match engine.handle_request(IpcRequest::CreateInvite {
+            token: String::new(),
+            kind: InviteKind::FriendAdmin,
+        }) {
+            IpcResponse::InviteCreated {
+                code, short_uri, ..
+            } => (code, short_uri),
+            other => panic!("Expected InviteCreated without token on first-run, got {other:?}"),
+        };
+        assert!(!short_uri.is_empty());
+
+        // Remote caller with mismatched X25519 peer_id is rejected
+        let friend_peer = "1122334455667788990011223344556677889900112233445566778899001122";
+        let spoofed = engine.handle_remote_request(
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            IpcRequest::RedeemInvite {
+                code: code.clone(),
+                peer_id: friend_peer.into(),
+                name: "Alex".into(),
+                password: "alex-password".into(),
+            },
+        );
+        assert!(matches!(spoofed, IpcResponse::Error { .. }));
+
+        // Authenticated friend redeems invite (without any local password ever being set)
+        let redeemed = engine.handle_remote_request(
+            friend_peer,
+            IpcRequest::RedeemInvite {
+                code,
+                peer_id: friend_peer.into(),
+                name: "Alex".into(),
+                password: "alex-password".into(),
+            },
+        );
+        assert!(matches!(redeemed, IpcResponse::InviteRedeemed { .. }));
+
+        // Snapshot shows remote-only state: has_any_admin=true, password_configured=false
+        match engine.handle_request(IpcRequest::GetSnapshot) {
+            IpcResponse::Snapshot { data } => {
+                assert!(data.has_any_admin);
+                assert!(!data.password_configured);
+                assert_eq!(data.remote_status.admins.len(), 1);
+            }
+            other => panic!("Expected snapshot, got {other:?}"),
+        }
+
+        // Local user cannot hijack the device by calling Unlock to set a local password
+        let local_hijack = engine.handle_request(IpcRequest::Unlock {
+            password: "my-own-password".into(),
+        });
+        assert!(matches!(local_hijack, IpcResponse::Error { .. }));
+
+        // Unauthenticated CreateInvite is now blocked because an admin exists
+        let unauth_invite = engine.handle_request(IpcRequest::CreateInvite {
+            token: String::new(),
+            kind: InviteKind::FriendAdmin,
+        });
+        assert!(matches!(unauth_invite, IpcResponse::Error { .. }));
+
+        // Friend can unlock remotely via handle_remote_request with matching peer_id
+        let unlocked = engine.handle_remote_request(
+            friend_peer,
+            IpcRequest::UnlockAsPeer {
+                peer_id: friend_peer.into(),
+                password: "alex-password".into(),
+            },
+        );
+        assert!(matches!(unlocked, IpcResponse::Unlocked { .. }));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_local_password_requires_friend_admin_and_switches_to_remote_only() {
+        let dir = std::env::temp_dir().join(format!("curb-rm-local-pw-{}", Uuid::new_v4()));
+        let engine = ServiceEngine::new(dir.clone()).unwrap();
+
+        let local_token = match engine.handle_request(IpcRequest::Unlock {
+            password: "local-secret".into(),
+        }) {
+            IpcResponse::Unlocked { token } => token,
+            other => panic!("Expected unlock, got {other:?}"),
+        };
+
+        // Rejected when no remote friend admin is configured yet
+        let denied = engine.handle_request(IpcRequest::RemoveLocalPassword {
+            token: local_token.clone(),
+        });
+        assert!(matches!(denied, IpcResponse::Error { .. }));
+
+        // Add a remote friend admin
+        let code = match engine.handle_request(IpcRequest::CreateInvite {
+            token: local_token.clone(),
+            kind: InviteKind::FriendAdmin,
+        }) {
+            IpcResponse::InviteCreated { code, .. } => code,
+            other => panic!("Expected InviteCreated, got {other:?}"),
+        };
+        let friend_peer = "2233445566778899001122334455667788990011223344556677889900112233";
+        assert!(matches!(
+            engine.handle_remote_request(
+                friend_peer,
+                IpcRequest::RedeemInvite {
+                    code,
+                    peer_id: friend_peer.into(),
+                    name: "Sam".into(),
+                    password: "sam-password".into(),
+                },
+            ),
+            IpcResponse::InviteRedeemed { .. }
+        ));
+
+        // Now removing the local password succeeds
+        match engine.handle_request(IpcRequest::RemoveLocalPassword { token: local_token }) {
+            IpcResponse::Snapshot { data } => {
+                assert!(!data.password_configured);
+                assert!(data.has_any_admin);
+            }
+            other => panic!("Expected Snapshot, got {other:?}"),
+        }
+
+        // Local password no longer works, but remote friend admin still unlocks
+        assert!(matches!(
+            engine.handle_request(IpcRequest::Unlock {
+                password: "local-secret".into(),
+            }),
+            IpcResponse::Error { .. }
+        ));
+        assert!(matches!(
+            engine.handle_remote_request(
+                friend_peer,
+                IpcRequest::UnlockAsPeer {
+                    peer_id: friend_peer.into(),
+                    password: "sam-password".into(),
+                },
+            ),
+            IpcResponse::Unlocked { .. }
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

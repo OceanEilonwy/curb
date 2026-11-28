@@ -18,6 +18,17 @@ use crate::{P2pError, Result};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RelayWireMessage {
+    AuthChallenge {
+        server_pub: String,
+        nonce: String,
+    },
+    AuthProof {
+        proof: String,
+    },
+    AuthOk,
+    AuthError {
+        message: String,
+    },
     Forward {
         to: String,
         #[serde(default)]
@@ -38,6 +49,17 @@ enum RelayWireMessage {
     Pong,
 }
 
+fn compute_auth_proof(identity: &PeerIdentity, server_pub: &str, nonce: &str) -> Result<String> {
+    let shared = identity.diffie_hellman(server_pub)?;
+    let peer_id = identity.peer_id();
+    let mut input = Vec::with_capacity(20 + peer_id.len() + 1 + nonce.len());
+    input.extend_from_slice(b"curb-relay-auth-v1:");
+    input.extend_from_slice(peer_id.as_bytes());
+    input.push(b':');
+    input.extend_from_slice(nonce.as_bytes());
+    Ok(blake3::keyed_hash(&shared, &input).to_hex().to_string())
+}
+
 /// Encrypted inner envelope sent inside `RelayWireMessage::Forward.payload`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -52,7 +74,7 @@ enum PeerEnvelope {
     },
 }
 
-fn http_to_ws_relay_url(relay_url: &str, peer_id: &str) -> String {
+fn http_to_ws_relay_url(relay_url: &str, peer_id: &str, query: &str) -> String {
     let trimmed = relay_url.trim().trim_end_matches('/');
     let ws_base = if let Some(rest) = trimmed.strip_prefix("https://") {
         format!("wss://{rest}")
@@ -63,7 +85,11 @@ fn http_to_ws_relay_url(relay_url: &str, peer_id: &str) -> String {
     } else {
         format!("wss://{trimmed}")
     };
-    format!("{ws_base}/v1/relay/{peer_id}")
+    if query.is_empty() {
+        format!("{ws_base}/v1/relay/{peer_id}")
+    } else {
+        format!("{ws_base}/v1/relay/{peer_id}?{query}")
+    }
 }
 
 /// Runs the `curb-service` host loop connected to `relay_url`, automatically
@@ -101,7 +127,7 @@ pub async fn run_p2p_host_with_status<F, S>(
     F: Fn(String, IpcRequest) -> IpcResponse + Send + Sync + 'static,
     S: Fn(RelayConnectionState, Option<String>) + Send + Sync + 'static,
 {
-    let ws_url = http_to_ws_relay_url(&relay_url, &identity.peer_id());
+    let ws_url = http_to_ws_relay_url(&relay_url, &identity.peer_id(), "auth=true");
     let mut backoff = Duration::from_secs(1);
 
     loop {
@@ -127,12 +153,96 @@ pub async fn run_p2p_host_with_status<F, S>(
 
         match connect_outcome {
             Ok(Ok((ws_stream, _))) => {
+                let (mut tx, mut rx) = ws_stream.split();
+
+                // Complete X25519 challenge-response if the relay issues an AuthChallenge.
+                let mut auth_failed: Option<String> = None;
+                if let Ok(Some(Ok(Message::Text(first_text)))) =
+                    tokio::time::timeout(Duration::from_secs(3), rx.next()).await
+                {
+                    if let Ok(first_msg) = serde_json::from_str::<RelayWireMessage>(&first_text) {
+                        match first_msg {
+                            RelayWireMessage::AuthChallenge { server_pub, nonce } => {
+                                match compute_auth_proof(&identity, &server_pub, &nonce) {
+                                    Ok(proof) => {
+                                        let proof_json = serde_json::to_string(
+                                            &RelayWireMessage::AuthProof { proof },
+                                        )
+                                        .unwrap_or_default();
+                                        if let Err(e) = tx.send(Message::Text(proof_json.into())).await
+                                        {
+                                            auth_failed = Some(format!("Relay auth send failed: {e}"));
+                                        } else {
+                                            match tokio::time::timeout(
+                                                Duration::from_secs(5),
+                                                rx.next(),
+                                            )
+                                            .await
+                                            {
+                                                Ok(Some(Ok(Message::Text(ack)))) => {
+                                                    match serde_json::from_str::<RelayWireMessage>(
+                                                        &ack,
+                                                    ) {
+                                                        Ok(RelayWireMessage::AuthOk) => {}
+                                                        Ok(RelayWireMessage::AuthError {
+                                                            message,
+                                                        }) => {
+                                                            auth_failed = Some(message);
+                                                        }
+                                                        _ => {
+                                                            auth_failed = Some(
+                                                                "Unexpected relay auth response"
+                                                                    .into(),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                _ => {
+                                                    auth_failed =
+                                                        Some("Relay auth timed out".into());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        auth_failed = Some(format!("Relay auth error: {e}"));
+                                    }
+                                }
+                            }
+                            RelayWireMessage::AuthError { message } => {
+                                auth_failed = Some(message);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if let Some(reason) = auth_failed {
+                    warn!(relay = %relay_url, reason = %reason, "Relay host authentication failed");
+                    let _ = tx.close().await;
+                    on_status(RelayConnectionState::Disconnected, Some(reason));
+                    tokio::select! {
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() {
+                                break;
+                            }
+                        }
+                        _ = retry.notified() => {
+                            backoff = Duration::from_secs(1);
+                        }
+                        _ = tokio::time::sleep(backoff) => {
+                            backoff = (backoff * 2).min(Duration::from_secs(30));
+                        }
+                    }
+                    continue;
+                }
+
                 info!(relay = %relay_url, peer = %identity.peer_id(), "Connected to curb-relay as P2P host");
                 on_status(RelayConnectionState::Connected, None);
                 backoff = Duration::from_secs(1);
-                let (mut tx, mut rx) = ws_stream.split();
 
-                let mut ping_interval = tokio::time::interval(Duration::from_secs(25));
+                let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
+                ping_interval.tick().await; // consume immediate first tick
+                let mut awaiting_pong = false;
                 let mut manual_retry = false;
                 let mut disconnect_reason: Option<String> = None;
                 loop {
@@ -150,11 +260,17 @@ pub async fn run_p2p_host_with_status<F, S>(
                             break;
                         }
                         _ = ping_interval.tick() => {
+                            if awaiting_pong {
+                                disconnect_reason = Some("Relay heartbeat timed out".into());
+                                let _ = tx.close().await;
+                                break;
+                            }
                             if let Ok(json) = serde_json::to_string(&RelayWireMessage::Ping) {
                                 if let Err(e) = tx.send(Message::Text(json.into())).await {
                                     disconnect_reason = Some(format!("Relay ping failed: {e}"));
                                     break;
                                 }
+                                awaiting_pong = true;
                             }
                         }
                         incoming = rx.next() => {
@@ -169,12 +285,14 @@ pub async fn run_p2p_host_with_status<F, S>(
                                     break;
                                 }
                             };
+                            awaiting_pong = false;
                             let Message::Text(text) = frame else {
                                 continue;
                             };
-                            let Ok(RelayWireMessage::Forward { from: Some(from_peer), payload, .. }) =
-                                serde_json::from_str::<RelayWireMessage>(&text)
-                            else {
+                            let Ok(msg) = serde_json::from_str::<RelayWireMessage>(&text) else {
+                                continue;
+                            };
+                            let RelayWireMessage::Forward { from: Some(from_peer), payload, .. } = msg else {
                                 continue;
                             };
 
@@ -292,6 +410,22 @@ pub fn open_remote_response(
     }
 }
 
+/// Decrypts an opaque E2E-encrypted [`PeerEnvelope::Request`] sent by `from_peer_id`
+/// (used for offline invite claims stored on `curb-relay`).
+pub fn open_remote_request(
+    my_identity: &PeerIdentity,
+    from_peer_id: &str,
+    payload: &str,
+) -> Result<IpcRequest> {
+    let pt = decrypt_from_peer(my_identity, from_peer_id, payload)?;
+    match serde_json::from_slice::<PeerEnvelope>(&pt)? {
+        PeerEnvelope::Request { request, .. } => Ok(request),
+        _ => Err(P2pError::Network(
+            "Unexpected P2P envelope (expected Request)".into(),
+        )),
+    }
+}
+
 /// Forwards an already E2E-encrypted payload to `target_peer_id` via `relay_url` as
 /// `from_peer_id` and awaits the opaque encrypted reply payload from `target_peer_id`.
 pub async fn forward_relay_frame(
@@ -300,7 +434,7 @@ pub async fn forward_relay_frame(
     target_peer_id: &str,
     payload: &str,
 ) -> Result<String> {
-    let ws_url = http_to_ws_relay_url(relay_url, from_peer_id);
+    let ws_url = http_to_ws_relay_url(relay_url, from_peer_id, "role=client");
     let (ws_stream, _) = tokio::time::timeout(
         Duration::from_secs(8),
         tokio_tungstenite::connect_async(&ws_url),
@@ -374,7 +508,15 @@ pub async fn check_peer_online(
     relay_url: &str,
     target_peer_id: &str,
 ) -> Result<bool> {
-    let ws_url = http_to_ws_relay_url(relay_url, &my_identity.peer_id());
+    if let Ok(peers) =
+        crate::invites::fetch_peers_presence(relay_url, &[target_peer_id.to_string()]).await
+    {
+        if let Some(p) = peers.into_iter().find(|p| p.peer_id == target_peer_id) {
+            return Ok(p.online);
+        }
+    }
+
+    let ws_url = http_to_ws_relay_url(relay_url, &my_identity.peer_id(), "role=client");
     let (ws_stream, _) = tokio::time::timeout(
         Duration::from_secs(5),
         tokio_tungstenite::connect_async(&ws_url),

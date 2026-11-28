@@ -9,6 +9,7 @@ description = "End-to-end encrypted P2P and relay transport for Curb remote admi
 base64.workspace = true
 blake3.workspace = true
 chacha20poly1305.workspace = true
+chrono.workspace = true
 curb-core = { path = "../curb-core" }
 futures-util.workspace = true
 hex.workspace = true
@@ -26,4 +27,3 @@ x25519-dalek.workspace = true
 [dev-dependencies]
 axum.workspace = true
 curb-relay = { path = "../curb-relay" }
-chrono.workspace = true

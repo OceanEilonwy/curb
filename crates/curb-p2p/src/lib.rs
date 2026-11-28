@@ -1,15 +1,21 @@
 pub mod backup;
 pub mod crypto;
 pub mod identity;
+pub mod invites;
 pub mod transport;
 
 use thiserror::Error;
 
 pub use backup::{download_encrypted_backup, upload_encrypted_backup};
 pub use identity::PeerIdentity;
+pub use invites::{
+    decrypt_invite_descriptor_b64, delete_invite_slot, fetch_invite_descriptor,
+    fetch_invite_descriptor_b64, fetch_invite_descriptor_raw, fetch_peers_presence,
+    poll_invite_claim, publish_invite_descriptor, submit_invite_claim, InviteClaim,
+};
 pub use transport::{
-    check_peer_online, forward_relay_frame, open_remote_response, run_p2p_host,
-    run_p2p_host_with_status, seal_remote_request, send_remote_request,
+    check_peer_online, forward_relay_frame, open_remote_request, open_remote_response,
+    run_p2p_host, run_p2p_host_with_status, seal_remote_request, send_remote_request,
 };
 
 #[derive(Debug, Error)]

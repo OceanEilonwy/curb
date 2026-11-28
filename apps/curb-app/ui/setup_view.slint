@@ -3,7 +3,11 @@ import { CheckIcon, CloseIcon, LoadingDots, WarnIcon } from "icons.slint";
 import { CurbInput, CurbScrollView, RadioCircle } from "components.slint";
 
 export component SetupView inherits Rectangle {
+    // 0 = Choose protection mode, 1 = Choose admin (Remote Friend vs Local)
+    in property <int> step: 0;
     in-out property <bool> choice-is-full: true;
+    in-out property <bool> admin-is-remote: true;
+    in-out property <string> invite-code: "";
     in-out property <string> password: "";
     in-out property <string> confirm-password: "";
     in property <bool> busy: false;
@@ -11,6 +15,9 @@ export component SetupView inherits Rectangle {
 
     callback submit-full();
     callback submit-standard(string, string);
+    callback create-remote-invite();
+    callback submit-local-admin(string, string);
+    callback finish-admin-setup();
     callback close-requested();
 
     background: Theme.surface;
@@ -47,13 +54,15 @@ export component SetupView inherits Rectangle {
                             spacing: 2px;
 
                             Text {
-                                text: "Welcome to Curb";
+                                text: root.step == 0 ? "Welcome to Curb" : "Choose Your Admin";
                                 color: Theme.text;
                                 font-size: 14px;
                                 font-weight: 700;
                             }
                             Text {
-                                text: "Choose how you want to set up protection on this PC.";
+                                text: root.step == 0
+                                    ? "Choose how you want to set up protection on this PC."
+                                    : "Pick who will manage your Curb rules and pause controls.";
                                 color: Theme.text-sec;
                                 font-size: 12px;
                                 wrap: word-wrap;
@@ -96,6 +105,10 @@ export component SetupView inherits Rectangle {
             vertical-stretch: 1;
             content-padding: 16px;
             content-spacing: 12px;
+
+            // Step 0: Protection Mode
+            if root.step == 0: VerticalLayout {
+                spacing: 12px;
 
             // Option 1: Full Protection
             Rectangle {
@@ -320,6 +333,251 @@ export component SetupView inherits Rectangle {
                     }
                 }
             }
+            }
+
+            // Step 1: Choose Admin Type (Remote Friend Admin vs Local Admin)
+            if root.step == 1: VerticalLayout {
+                spacing: 12px;
+
+                // Option 1: Remote Friend Admin (Recommended)
+                Rectangle {
+                    border-radius: 12px;
+                    background: root.admin-is-remote ? Theme.accent-soft : Theme.card;
+                    border-width: 1.5px;
+                    border-color: root.admin-is-remote ? Theme.focus : Theme.border;
+                    opacity: root.busy ? 0.65 : 1.0;
+
+                    remote-adm-ta := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        enabled: !root.busy;
+                        mouse-cursor: root.busy ? default : pointer;
+                        clicked => {
+                            root.admin-is-remote = true;
+                        }
+                    }
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            cross-axis-alignment: center;
+
+                            HorizontalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 8px;
+                                alignment: start;
+                                cross-axis-alignment: center;
+
+                                Text {
+                                    text: "Remote Friend Admin";
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    height: 19px;
+                                    border-radius: 9.5px;
+                                    background: Theme.green-soft;
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        cross-axis-alignment: center;
+                                        Text {
+                                            text: "Recommended";
+                                            color: Theme.green-text;
+                                            font-size: 11px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            RadioCircle {
+                                selected: root.admin-is-remote;
+                            }
+                        }
+
+                        Text {
+                            text: "Invite a trusted friend to manage Curb from their own device. They set their own password, and it works even if this PC goes offline.";
+                            color: Theme.text-sec;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            cross-axis-alignment: center;
+
+                            CheckIcon {
+                                color: Theme.green-text;
+                                size: 13px;
+                            }
+                            Text {
+                                text: "No local password needed · add one later in Settings if wanted";
+                                color: Theme.green-text;
+                                font-size: 12px;
+                                font-weight: 500;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+
+                // Generated one-time invite code box
+                if root.admin-is-remote && root.invite-code != "": Rectangle {
+                    border-radius: 12px;
+                    background: Theme.card;
+                    border-width: 1px;
+                    border-color: Theme.border;
+
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 8px;
+
+                        Text {
+                            text: "One-Time Friend Invite Code";
+                            color: Theme.text;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+
+                        CurbInput {
+                            text <=> root.invite-code;
+                            mono: true;
+                            fill-color: Theme.sub;
+                        }
+
+                        Text {
+                            text: "Send this code to your friend (valid 24 hours). They'll enter it in Curb → Connect to a friend.";
+                            color: Theme.text-sec;
+                            font-size: 11.5px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Option 2: Local Admin
+                Rectangle {
+                    border-radius: 12px;
+                    background: !root.admin-is-remote ? Theme.accent-soft : Theme.card;
+                    border-width: 1.5px;
+                    border-color: !root.admin-is-remote ? Theme.focus : Theme.border;
+                    opacity: root.busy ? 0.65 : 1.0;
+
+                    local-adm-ta := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        enabled: !root.busy;
+                        mouse-cursor: root.busy ? default : pointer;
+                        clicked => {
+                            root.admin-is-remote = false;
+                        }
+                    }
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            cross-axis-alignment: center;
+
+                            HorizontalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 8px;
+                                alignment: start;
+                                cross-axis-alignment: center;
+
+                                Text {
+                                    text: "Local Admin";
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    height: 19px;
+                                    border-radius: 9.5px;
+                                    background: Theme.pill;
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        cross-axis-alignment: center;
+                                        Text {
+                                            text: "This PC";
+                                            color: Theme.text;
+                                            font-size: 11px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            RadioCircle {
+                                selected: !root.admin-is-remote;
+                            }
+                        }
+
+                        Text {
+                            text: "Set a password on this PC for a friend, parent, or partner acting locally. You can still add remote friend admins later.";
+                            color: Theme.text-sec;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Inline password fields for Local Admin
+                if !root.admin-is-remote: Rectangle {
+                    border-radius: 12px;
+                    background: Theme.card;
+                    border-width: 1px;
+                    border-color: Theme.border;
+
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 10px;
+
+                        Text {
+                            text: "Create a Local Curb Password";
+                            color: Theme.text;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+
+                        CurbInput {
+                            text <=> root.password;
+                            placeholder: "New password (min 4 characters)";
+                            is-password: true;
+                            enabled: !root.busy;
+                            accepted => {
+                                local-confirm-in.focus-input();
+                            }
+                        }
+
+                        local-confirm-in := CurbInput {
+                            text <=> root.confirm-password;
+                            placeholder: "Confirm password";
+                            is-password: true;
+                            enabled: !root.busy;
+                            accepted => {
+                                if !root.busy {
+                                    root.submit-local-admin(root.password, root.confirm-password);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             if root.error-text != "": Text {
                 text: root.error-text;
@@ -349,12 +607,32 @@ export component SetupView inherits Rectangle {
                 spacing: 8px;
                 cross-axis-alignment: center;
 
-                Text {
+                if root.step == 0: Text {
                     horizontal-stretch: 1;
                     text: root.choice-is-full ? "Will prompt for system administrator" : "Runs in your user account";
                     color: Theme.text-muted;
                     font-size: 12px;
                     vertical-alignment: center;
+                }
+
+                if root.step == 1: Rectangle {
+                    horizontal-stretch: 1;
+                    height: 30px;
+
+                    Text {
+                        text: root.invite-code != "" ? "Done for now" : "Skip for now";
+                        color: skip-ta.has-hover ? Theme.text : Theme.text-muted;
+                        font-size: 12px;
+                        font-weight: 500;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                    }
+
+                    skip-ta := TouchArea {
+                        enabled: !root.busy;
+                        mouse-cursor: root.busy ? default : pointer;
+                        clicked => { root.finish-admin-setup(); }
+                    }
                 }
 
                 Rectangle {
@@ -375,9 +653,15 @@ export component SetupView inherits Rectangle {
                         }
 
                         Text {
-                            text: root.busy
-                                ? (root.choice-is-full ? "Installing Service…" : "Starting…")
-                                : (root.choice-is-full ? "Set Up Full Protection" : "Start Standard Mode");
+                            text: root.step == 0
+                                ? (root.busy
+                                    ? (root.choice-is-full ? "Installing Service…" : "Starting…")
+                                    : (root.choice-is-full ? "Set Up Full Protection" : "Start Standard Mode"))
+                                : root.admin-is-remote
+                                    ? (root.busy
+                                        ? "Creating Invite…"
+                                        : (root.invite-code != "" ? "Continue to Curb" : "Create Friend Invite"))
+                                    : (root.busy ? "Saving…" : "Set Local Password");
                             color: #ffffff;
                             font-size: 12px;
                             font-weight: 600;
@@ -389,10 +673,20 @@ export component SetupView inherits Rectangle {
                         enabled: !root.busy;
                         mouse-cursor: root.busy ? default : pointer;
                         clicked => {
-                            if root.choice-is-full {
-                                root.submit-full();
+                            if root.step == 0 {
+                                if root.choice-is-full {
+                                    root.submit-full();
+                                } else {
+                                    root.submit-standard(root.password, root.confirm-password);
+                                }
+                            } else if root.admin-is-remote {
+                                if root.invite-code != "" {
+                                    root.finish-admin-setup();
+                                } else {
+                                    root.create-remote-invite();
+                                }
                             } else {
-                                root.submit-standard(root.password, root.confirm-password);
+                                root.submit-local-admin(root.password, root.confirm-password);
                             }
                         }
                     }

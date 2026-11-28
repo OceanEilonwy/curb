@@ -6,6 +6,7 @@ import { CurbCheckbox, CurbInput, CurbScrollView, CurbSwitch, ReadOnlyStatusPill
 export component SettingsView inherits CurbScrollView {
     in property <bool> unlocked: false;
     in property <bool> password-configured: true;
+    in property <bool> has-any-admin: true;
     in property <bool> is-full-service: true;
     // 0 = enforcing, 1 = paused_until, 2 = disabled
     in property <int> mode-kind: 0;
@@ -49,6 +50,7 @@ export component SettingsView inherits CurbScrollView {
     callback toggle-baseline-ncsi();
     callback toggle-pw-form();
     callback submit-password-change(string, string, string);
+    callback remove-local-password();
     callback rename-device-clicked();
     callback add-friend-admin-clicked();
     callback connect-friend-clicked();
@@ -414,15 +416,18 @@ export component SettingsView inherits CurbScrollView {
                     horizontal-stretch: 1;
                     spacing: 2px;
                     Text {
-                        text: "Curb Password";
+                        text: "Local Password (Optional)";
                         color: Theme.text;
                         font-size: 13px;
                         font-weight: 600;
                     }
                     Text {
-                        text: "Protects your rules & pause controls";
+                        text: root.password-configured
+                            ? "Local unlock password is set for this PC"
+                            : "Optional — for a friend acting locally on this PC";
                         color: Theme.text-sec;
                         font-size: 12px;
+                        wrap: word-wrap;
                     }
                 }
 
@@ -438,12 +443,14 @@ export component SettingsView inherits CurbScrollView {
                         padding-right: 12px;
                         spacing: 5px;
                         cross-axis-alignment: center;
-                        if !root.unlocked: LockIcon {
+                        if !root.unlocked && root.has-any-admin: LockIcon {
                             color: Theme.text-sec;
                             size: 11px;
                         }
                         Text {
-                            text: (root.pw-open && root.unlocked) ? "Cancel" : "Change";
+                            text: (root.pw-open && root.unlocked)
+                                ? "Cancel"
+                                : root.password-configured ? "Change" : "Set up";
                             color: Theme.text;
                             font-size: 12px;
                             font-weight: 600;
@@ -577,6 +584,57 @@ export component SettingsView inherits CurbScrollView {
                         }
                     }
                 }
+
+                if root.password-configured && root.remote-admins.length > 0: VerticalLayout {
+                    spacing: 8px;
+
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "Switch to remote-only management";
+                            color: Theme.text-sec;
+                            font-size: 11.5px;
+                            wrap: word-wrap;
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 0;
+                            height: 28px;
+                            border-radius: 7px;
+                            background: rm-pw-ta.has-hover && !root.pw-busy ? Theme.red-soft : transparent;
+                            border-width: 1px;
+                            border-color: Theme.red-text;
+                            opacity: root.pw-busy ? 0.55 : 1.0;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                cross-axis-alignment: center;
+                                Text {
+                                    text: "Remove Local Password";
+                                    color: Theme.red-text;
+                                    font-size: 11.5px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            rm-pw-ta := TouchArea {
+                                enabled: !root.pw-busy;
+                                mouse-cursor: root.pw-busy ? default : pointer;
+                                clicked => { root.remove-local-password(); }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -665,7 +723,7 @@ export component SettingsView inherits CurbScrollView {
                         font-weight: 600;
                     }
                     Text {
-                        text: "Share a one-time link so a friend can set their own password";
+                        text: "Share a one-time code so a friend can manage Curb remotely (works even if this PC goes offline)";
                         color: Theme.text-sec;
                         font-size: 12px;
                         wrap: word-wrap;
@@ -677,7 +735,7 @@ export component SettingsView inherits CurbScrollView {
                     height: 30px;
                     border-radius: 8px;
                     background: add-adm-ta.has-hover ? Theme.accent-hover : Theme.accent;
-                    opacity: root.unlocked ? 1.0 : 0.65;
+                    opacity: (root.unlocked || !root.has-any-admin) ? 1.0 : 0.65;
 
                     HorizontalLayout {
                         padding-left: 10px;
@@ -695,7 +753,7 @@ export component SettingsView inherits CurbScrollView {
                     add-adm-ta := TouchArea {
                         mouse-cursor: pointer;
                         clicked => {
-                            if root.unlocked {
+                            if root.unlocked || !root.has-any-admin {
                                 root.add-friend-admin-clicked();
                             } else {
                                 root.require-unlock();

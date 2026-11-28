@@ -67,6 +67,21 @@ impl InviteToken {
         uri
     }
 
+    /// Serializes this invite into a short `curb://join?...` URI (or bare code when using the default relay)
+    /// that resolves via the relay's zero-knowledge invite dropbox.
+    pub fn to_short_uri(&self) -> String {
+        let relay = self.relay_url.trim().trim_end_matches('/');
+        if relay.is_empty() || relay.eq_ignore_ascii_case(DEFAULT_RELAY_URL) {
+            self.code.clone()
+        } else {
+            format!(
+                "curb://join?code={}&relay={}",
+                pct_encode(&self.code),
+                pct_encode(relay),
+            )
+        }
+    }
+
     /// Parses a `curb://invite?...` URI back into an [`InviteToken`].
     pub fn parse_uri(uri: &str) -> Result<Self> {
         let trimmed = uri.trim();
@@ -133,6 +148,174 @@ impl InviteToken {
             direct_addr,
         })
     }
+}
+
+/// Parsed user input when connecting to a friend: either a full legacy `curb://invite?...` URI
+/// or a short invite code / `curb://join?code=...` link resolved via the relay dropbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedInviteInput {
+    Full(InviteToken),
+    Short { code: String, relay_url: String },
+}
+
+impl ParsedInviteInput {
+    /// Parses a full `curb://invite?...` URI, a short `curb://join?code=...` URI,
+    /// or a bare human-friendly invite code (e.g. `K7M4-QP9X-2N8V-R5JT`).
+    pub fn parse(input: &str) -> Result<Self> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(CurbError::Config(
+                "Please enter an invite code or link.".into(),
+            ));
+        }
+        if trimmed.starts_with("curb://invite?") {
+            return Ok(Self::Full(InviteToken::parse_uri(trimmed)?));
+        }
+        if let Some(query) = trimmed.strip_prefix("curb://join?") {
+            let mut code = None;
+            let mut relay_url = None;
+            for pair in query.split('&') {
+                let Some((k, v)) = pair.split_once('=') else {
+                    continue;
+                };
+                let decoded = pct_decode(v)?;
+                match k {
+                    "code" => code = Some(decoded),
+                    "relay" => relay_url = Some(decoded),
+                    _ => {}
+                }
+            }
+            let raw_code = code
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| CurbError::Config("Invite link is missing 'code'".into()))?;
+            let normalized = normalize_invite_code(&raw_code);
+            if normalized.len() < 8 {
+                return Err(CurbError::Config("Invite code is too short.".into()));
+            }
+            let relay = relay_url
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_RELAY_URL.to_string());
+            return Ok(Self::Short {
+                code: normalized,
+                relay_url: relay,
+            });
+        }
+        // Bare invite code (e.g. `K7M4-QP9X-2N8V-R5JT`)
+        let normalized = normalize_invite_code(trimmed);
+        let valid_chars = normalized
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-');
+        if valid_chars && (8..=32).contains(&normalized.len()) && !trimmed.contains("://") {
+            return Ok(Self::Short {
+                code: normalized,
+                relay_url: DEFAULT_RELAY_URL.to_string(),
+            });
+        }
+        Err(CurbError::Config(
+            "Enter a valid invite code (e.g. K7M4-QP9X-2N8V-R5JT) or curb:// invite link.".into(),
+        ))
+    }
+}
+
+/// Normalizes an invite code by trimming, removing whitespace, and uppercasing.
+pub fn normalize_invite_code(code: &str) -> String {
+    code.chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+/// Encrypted invite descriptor stored in `curb-relay`'s zero-knowledge invite dropbox.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InviteDescriptor {
+    pub kind: InviteKind,
+    pub target_peer_id: String,
+    pub device_name: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Persisted pending invite stored by `curb-service` so invites survive restarts and sleep.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingInviteRecord {
+    pub code: String,
+    pub kind: InviteKind,
+    pub expires_at: DateTime<Utc>,
+    #[serde(default)]
+    pub published: bool,
+}
+
+/// Presence information for a remote peer reported by `curb-relay`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PeerPresence {
+    pub peer_id: String,
+    pub online: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+/// Derives the opaque 64-char hex lookup ID for an invite dropbox slot on `curb-relay`.
+pub fn invite_slot_id(code: &str) -> String {
+    let norm = normalize_invite_code(code);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"curb-invite-slot-v1:");
+    hasher.update(norm.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Derives an owner-only write/poll/delete token authenticating the host for `/v1/invites/{slot_id}`.
+pub fn invite_owner_token(code: &str, host_peer_id: &str) -> String {
+    let norm = normalize_invite_code(code);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"curb-invite-owner-v1:");
+    hasher.update(norm.as_bytes());
+    hasher.update(b":");
+    hasher.update(host_peer_id.trim().as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn invite_aead_key(code: &str) -> [u8; 32] {
+    let norm = normalize_invite_code(code);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"curb-invite-aead-v1:");
+    hasher.update(norm.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+/// Encrypts an [`InviteDescriptor`] using XChaCha20-Poly1305 keyed from the invite code.
+pub fn encrypt_invite_descriptor(code: &str, desc: &InviteDescriptor) -> Result<Vec<u8>> {
+    let key = invite_aead_key(code);
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let mut nonce_bytes = [0u8; 24];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = XNonce::from_slice(&nonce_bytes);
+
+    let plaintext = serde_json::to_vec(desc)?;
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_ref())
+        .map_err(|_| CurbError::Config("Failed to encrypt invite descriptor".into()))?;
+
+    let mut out = Vec::with_capacity(24 + ciphertext.len());
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+/// Decrypts an [`InviteDescriptor`] fetched from `curb-relay` using the invite code.
+pub fn decrypt_invite_descriptor(code: &str, blob: &[u8]) -> Result<InviteDescriptor> {
+    if blob.len() < 24 + 16 {
+        return Err(CurbError::Config(
+            "Encrypted invite descriptor is truncated".into(),
+        ));
+    }
+    let (nonce_bytes, ciphertext) = blob.split_at(24);
+    let key = invite_aead_key(code);
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let nonce = XNonce::from_slice(nonce_bytes);
+
+    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
+        CurbError::Auth("Invalid invite code or corrupted invite data.".into())
+    })?;
+    Ok(serde_json::from_slice(&plaintext)?)
 }
 
 /// Public summary of a configured admin (never exposes password hashes).
